@@ -493,11 +493,84 @@ def _print_record_controls(is_recorded, manual_mode):
     print(f'⌨   {controls}')
 
 
+def _ask_choice(prompt: str, options: dict[str, str]) -> str:
+    """Prompt the user to pick one of the given options (lowercase keys)."""
+    keys = "/".join(options)
+    while True:
+        print(f"\n{prompt}")
+        for key, description in options.items():
+            print(f"  [{key}] {description}")
+        try:
+            choice = input(f"Choose [{keys}]: ").strip().lower()
+        except EOFError:
+            print("No input available, cancelling.")
+            raise SystemExit(1)
+        if choice in options:
+            return choice
+        print(f"Invalid choice, please enter {keys}.")
+
+
+def _prepare_dataset_root(cfg: UFRecordConfig) -> None:
+    """Create the dataset root and ask how to handle an existing dataset."""
+    root = Path(cfg.dataset.root)
+    existed = root.exists()
+
+    # Create the dataset root (and any parent directories) first.
+    root.mkdir(parents=True, exist_ok=True)
+
+    if not existed or cfg.resume:
+        return
+
+    if not (root / "meta" / "info.json").is_file():
+        # The directory exists but is not a valid LeRobot dataset.
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                f"Dataset directory exists but is not a valid LeRobot dataset: {root}\n"
+                "Choose a new dataset.root, or remove this empty/incomplete directory before recording."
+            )
+        choice = _ask_choice(
+            f"Directory exists but is not a valid LeRobot dataset: {root}",
+            options={
+                "o": "Overwrite: remove this directory and record a new dataset",
+                "c": "Cancel",
+            },
+        )
+        if choice == "o":
+            shutil.rmtree(root)
+        else:
+            raise SystemExit("Recording cancelled.")
+        return
+
+    # A valid LeRobot dataset already exists.
+    if not sys.stdin.isatty():
+        # Non-interactive run: keep the previous auto-resume behaviour.
+        cfg.resume = True
+        print(f"Existing dataset found, resuming recording (non-interactive): {root}")
+        return
+
+    choice = _ask_choice(
+        f"Dataset directory already exists: {root}",
+        options={
+            "o": "Overwrite: delete the existing dataset and record a new one",
+            "r": "Resume: keep existing episodes and continue recording",
+            "c": "Cancel",
+        },
+    )
+    if choice == "o":
+        shutil.rmtree(root)
+    elif choice == "r":
+        cfg.resume = True
+    else:
+        raise SystemExit("Recording cancelled.")
+
+
 def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
         init_rerun(session_name="recording")
+
+    _prepare_dataset_root(cfg)
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None

@@ -141,6 +141,8 @@ uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.ya
 
 > 采集过程中**机械臂与相机（D435 / D435i）的相对位置必须保持不变**，推理时的相机位置必须与采集时一致。若机械臂或相机发生变化，此前采集的数据将失效。
 
+> 如果数据集目录已存在且未加 `-r`，脚本会询问是覆盖、续录还是取消。
+
 ### 3. 手动拖拽数据采集
 
 ```bash
@@ -148,7 +150,16 @@ uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.ya
 ./start_manual_record.sh -r   # 强制续录；数据集目录不存在时会报错
 ```
 
-启动脚本会从 `config/manual_mode/xarm7_manual_record_config.yaml` 读取 `dataset.root`：首次运行创建数据集，之后运行会自动续录已有的有效数据集。如果目录存在但不是有效的 LeRobot 数据集，请更换 `dataset.root`，或确认没有数据后删除该目录。
+录制脚本（`uf-lerobot-record`）会从配置读取 `dataset.root` 并先执行 `mkdir -p` 创建路径，然后：
+
+- 目录不存在：直接录制新数据集。
+- 目录已存在（有效 LeRobot 数据集）且未加 `-r`：交互询问：
+  - `o` 覆盖：删除已有数据集，重新录制
+  - `r` 续录：保留已有 episode，继续录制
+  - `c` 取消
+- 目录存在但不是有效 LeRobot 数据集（缺少 `meta/info.json`）：询问覆盖或取消；非交互运行时直接报错。
+
+加 `-r` 可跳过询问直接续录。注意 `./start_manual_record.sh` 保持原有启动脚本行为——检测到有效数据集会自动续录（相当于 `-r`），如果想看到覆盖/续录的询问，请直接用 `uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml` 运行。
 
 录制时机械臂处于示教模式，实际关节状态会同时作为 observation 和 action 写入数据集。按住 `C` 缓慢闭合夹爪，按住 `O` 缓慢张开。按键控制：`Space` 开始，`→` 保存，`←` 放弃并重录，`Esc` 停止。episode 之间手动复位机械臂。
 

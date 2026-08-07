@@ -142,6 +142,8 @@ Controls: `Space` start the episode, `→` save it, `←` discard and re-record 
 
 > During collection the **relative position between the robot arm and the camera must not change**, and the camera setup at inference time must match the one used during collection. If the arm or camera moves, previously collected data becomes invalid.
 
+> If the dataset root already exists and `-r` is not given, the script asks whether to overwrite it, resume, or cancel.
+
 ### 3. Manual drag recording
 
 ```bash
@@ -149,7 +151,16 @@ Controls: `Space` start the episode, `→` save it, `←` discard and re-record 
 ./start_manual_record.sh -r   # force resume; fails if the dataset directory does not exist
 ```
 
-The launcher reads `dataset.root` from `config/manual_mode/xarm7_manual_record_config.yaml`: on first run it creates the dataset, and on later runs it automatically resumes an existing valid dataset. If the directory exists but is not a valid LeRobot dataset, choose a new `dataset.root`, or remove that directory after confirming it contains no data.
+The record script (`uf-lerobot-record`) reads `dataset.root` from the config and creates the path with `mkdir -p` first, then:
+
+- Directory does not exist → records a new dataset.
+- Directory already exists (valid LeRobot dataset) and no `-r` was given → asks interactively:
+  - `o` overwrite: delete the existing dataset and record a new one
+  - `r` resume: keep existing episodes and continue recording
+  - `c` cancel
+- Directory exists but is not a valid LeRobot dataset (missing `meta/info.json`) → asks to overwrite it or cancel; non-interactive runs error out instead.
+
+Pass `-r` to resume directly without asking. Note that `./start_manual_record.sh` keeps its original launcher behavior — it automatically resumes an existing valid dataset (equivalent to `-r`), so run `uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml` directly if you want to see the overwrite/resume prompt.
 
 During recording the arm is in teach mode: the actual joint state is written as both the observation and the action. Hold `C` to slowly close the gripper and `O` to slowly open it. Controls: `Space` start, `→` save, `←` discard & re-record, `Esc` stop. Reset the arm manually between episodes.
 
