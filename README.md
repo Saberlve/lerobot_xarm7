@@ -1,328 +1,275 @@
-# UFACTORY LeRobot
+# UFACTORY xArm7 · LeRobot (GELLO / Manual Drag)
 
 > [中文版本](README_ZH.md)
 
-UFACTORY robot arm integration with the LeRobot framework for robot learning, data collection, and policy deployment.
+UFACTORY xArm integration with the [LeRobot](https://github.com/huggingface/lerobot) framework, focused on two data-collection workflows:
 
-## Training & Inference Results
+- **GELLO** — joint-space teleoperation with a Dynamixel leader arm
+- **Manual drag** — record demonstrations by freely moving the arm in xArm teach mode
 
-[Test datasets](https://drive.google.com/drive/folders/1Ms25rd2YYGdh3tHPEsTTMU-m1fE7uNYY) used during development, **for reference only, do NOT reuse**. As the robot arm and camera positions during development differ from user setups.
-
-<table>
-<tr>
-  <td width="50%">
-    <a href="https://www.youtube.com/watch?v=wTiWLiHciT8" target="_blank">
-      <img src="https://img.youtube.com/vi/wTiWLiHciT8/maxresdefault.jpg" width="100%">
-    </a>
-  </td>
-  <td width="50%">
-    <a href="https://www.youtube.com/watch?v=IiyvewZh5OY" target="_blank">
-      <img src="https://img.youtube.com/vi/IiyvewZh5OY/maxresdefault.jpg" width="100%">
-    </a>
-  </td>
-</tr>
-<tr>
-  <td width="50%">
-    <a href="https://youtu.be/wBwZH6POk38" target="_blank">
-      <img src="https://img.youtube.com/vi/wBwZH6POk38/maxresdefault.jpg" width="100%">
-    </a>
-  </td>
-</tr>
-</table>
+Collected data is stored in the standard LeRobot dataset format and can be used for imitation learning (ACT / Diffusion Policy, etc.) and real-time policy inference.
 
 ## Features
 
-- 🤖 UFACTORY robot control ([xArm series](https://www.ufactory.cc/))
-- 🎮 Multiple teleop modes: GELLO / [Pika](https://global.agilex.ai/products/pika) / [UMI](https://lumosumi.lumosbot.tech/pro/) / [SpaceMouse](https://3dconnexion.com/sg/product/spacemouse-wireless/)
-- 📷 Multi-camera data collection ([RealSense](https://www.realsenseai.com/products/depth-camera-d435i/) / UMI camera)
-- 📊 Dataset recording & management (LeRobot-compatible)
-- 🧠 Imitation learning training (ACT / Diffusion Policy / etc.)
-- 🚀 Policy evaluation & real-time inference
-- 🔧 Mock mode (teleop device only, no physical robot needed)
+- 🤖 UFACTORY xArm7 control
+- 🎮 GELLO joint-space teleoperation (Dynamixel leader arm)
+- ✋ Manual drag recording via xArm teach mode
+- 📷 Intel RealSense camera observation (D435 / D435i)
+- 📊 LeRobot-compatible dataset recording & management
+- 🧠 Imitation learning training and policy inference
+- ▶️ Episode replay for recorded manual demonstrations
 
 ## Requirements
 
 - Ubuntu 22.04 / 24.04
 - Python >= 3.10
 - CUDA >= 12.0 (recommended for GPU training)
-- UFACTORY xArm (optional)
+- UFACTORY xArm7 and its controller
+- GELLO arm (FTDI USB serial)
+- Intel RealSense D435 / D435i (for camera observations)
 
 ## Installation
 
-### Base Install
-
 ```bash
-git clone https://github.com/xArm-Developer/lerobot_robot_ufactory.git
-cd lerobot_robot_ufactory
+git clone https://git.weiyantech.cn/wangshuxun/Xarm-DataCollection.git lerobot_xarm7
+cd lerobot_xarm7
 
-# Create a uv virtual environment and sync project dependencies
 uv venv --python 3.10
-uv sync
+uv sync --extra gello
 ```
 
-Includes: `lerobot==0.4.3`, `xarm-python-sdk`, `numpy`, `pyyaml`. LeRobot already pulls in torch, opencv, wandb, etc.
+The base dependencies include `lerobot==0.4.3` (with Intel RealSense support), `xarm-python-sdk`, `numpy`, `pyyaml`, and `opencv-python`. The `gello` extra adds the GELLO software and Dynamixel SDK.
 
-### Peripheral Modules
+### Serial port permission
 
-Peripheral dependencies are available as optional extras via `[module]` install.
-
-#### GELLO Teleop
-
-Dynamixel-based leader arm, joint-space control.
-* Once data collection starts, the **relative position** between the robot arm and camera (D435 / D435i) **must remain unchanged**.
-* The camera position during inference must match the collection setup. If the robot arm or camera changes, previously collected data becomes invalid.
+The GELLO arm connects over a serial port, so add your user to the `dialout` group (re-login afterwards):
 
 ```bash
-# 1. Install GELLO module
-uv sync --extra gello
-
-# 2. Add serial port permissions (re-login required)
 sudo usermod -aG dialout $USER
 ```
 
-#### Pika Teleop
-
-Pika Sense handheld + Vive Tracker, Cartesian-space control.
-* No requirement for the relative position of the two base stations and the robot arm. Only need to ensure the Pika Sense is within base station range during collection, but **base stations must be recalibrated after moving**.
-* Base station positions for collection and inference do not need to be the same.
+Find the GELLO serial port path (used as `teleop.port` in the configs):
 
 ```bash
-# 1. Install peripheral deps (skip transitive deps)
-uv pip install pysurvive agx-pypika --no-deps
-
-# 2. Install udev rules (re-plug devices afterwards)
-sudo cp src/rules/*.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
+ls /dev/serial/by-id/
 ```
 
-> Calibrate Vive Tracker before first use: `uf-vive-calibrate`
+## Configuration
 
-#### UMI Teleop
+Predefined configs are provided under `config/`:
 
-Universal Manipulation Interface + Vive Tracker, supports dual-arm.
+| Workflow | Config |
+|---|---|
+| GELLO · xArm7 | `config/gello/xarm7_gello_record_config.yaml` |
+| Manual drag · xArm7 | `config/manual_mode/xarm7_manual_record_config.yaml` |
+
+### GELLO config
+
+- `robot.robot_ip` — xArm controller IP (e.g. `192.168.1.245`)
+- `robot.robot_dof` — `7`
+- `robot.gripper_type` — `1` for the xArm gripper
+- `teleop.port` — GELLO serial port (`/dev/serial/by-id/...`)
+- `teleop.joint_ids` / `teleop.joint_signs` — per-arm servo mapping and direction
+- `teleop.start_joints` — GELLO calibration reference, should match the xArm SDK initial point (degrees)
+- `teleop.gripper_id` — GELLO gripper servo ID (`8`; `-1` disables it)
+- `dataset.root` / `dataset.repo_id` — where the dataset is stored
+- `dataset.single_task` — task description saved with each frame
+- `dataset.fps` / `episode_time_s` / `reset_time_s` — recording timing
+
+> The xArm7 config already contains the correct joint mapping; only edit the port, IP, and dataset fields for your setup.
+
+### Manual-drag config
+
+- `robot.manual_mode: true` — enable xArm teach mode (joint free-drive)
+- `robot.teach_sensitivity` — teaching sensitivity, valid range 1–5
+- `robot.manual_gripper_speed` — gripper velocity in normalized position per second (default `0.5`)
+- `robot.observe_joint_vel` — record joint velocities in observations (`false` by default)
+- `robot.cameras.camera` — Intel RealSense camera (`serial_number_or_name`, resolution, fps)
+- `dataset.root` / `dataset.repo_id` / `single_task` / `fps` / `episode_time_s` / `reset_time_s` / `num_episodes` — dataset settings
+
+### Camera configuration
+
+When adding a camera to the robot config, use the template in
+`config/manual_mode/xarm7_manual_record_config.yaml`:
+
+```yaml
+robot:
+  cameras:
+    camera:
+      type: intelrealsense        # RealSense type, NOT opencv
+      serial_number_or_name: "148522072685"
+      width: 640
+      height: 480
+      fps: 30
+```
+
+- `type` must be `intelrealsense` (RealSense), **not** `opencv` (generic USB camera).
+- `serial_number_or_name` must be filled with the actual RealSense serial number **obtained beforehand**, otherwise connecting/recording fails. Get it with:
 
 ```bash
-# 1. Install XVSDK (system-level, Ubuntu Focal only)
-curl -sL https://raw.githubusercontent.com/xArm-Developer/ufactory_resources/main/fastumi/sdk/XVSDK_focal_amd64.deb -o /tmp/xvsdk.deb && sudo dpkg -i /tmp/xvsdk.deb
-sudo apt install -y --fix-broken
-
-# 2. Install peripheral deps
-uv pip install pysurvive --no-deps
-
-# 3. Install udev rules (re-plug devices afterwards)
-sudo cp src/rules/*.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
+uv run uf-camera-view -l -T realsense     # prints each camera's serial number
 ```
 
-> Calibrate Vive Tracker before first use: `uf-vive-calibrate`
-
-**Multi-UMI device configuration** (two or more devices):
-
-```bash
-# Increase USB buffer size
-sudo sed -i '/GRUB_CMDLINE_LINUX_DEFAULT/s/quiet splash/quiet splash usbcore.usbfs_memory_mb=128/' /etc/default/grub
-sync
-sudo update-grub
-sudo reboot
-```
-
-#### SpaceMouse Teleop
-
-3Dconnexion SpaceMouse / SpaceNavigator.
-
-```bash
-# 1. Install SpaceMouse module
-uv sync --extra spacemouse
-
-# 2. Install udev rules (re-plug device afterwards)
-sudo cp src/rules/*.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-
+or with the librealsense tool `rs-enumerate-devices`.
 
 ## Usage
 
-### 1. Teleop Testing
+### 1. GELLO teleop test
 
-Test teleop-to-robot control loop without recording.
+Test the GELLO → robot control loop without recording:
 
 ```bash
-# Generic usage
-uv run uf-robot-teleop --config_path path/to/config.yaml
-uv run uf-robot-teleop --config_path path/to/config.yaml --fps 60  # specify frequency
-
-# Example: xArm6 + UMI teleop
-uv run uf-robot-teleop --config_path config/umi/xarm6_umi_record_config.yaml
+uv run uf-robot-teleop --config_path config/gello/xarm7_gello_record_config.yaml
+uv run uf-robot-teleop --config_path config/gello/xarm7_gello_record_config.yaml --fps 60  # optional loop rate
 ```
 
-### 2. Manual Drag Data Collection
+`Space` reset & start, `←` reset, `Esc` exit.
 
-Manual drag recording uses `manual_mode: true` in the robot configuration and does not configure a teleoperator. During recording, the actual joint state is written as both the observation and action in the LeRobot dataset. When a gripper is configured, hold `C` to close it slowly and `O` to open it slowly. Adjust the speed with `manual_gripper_speed`, which defaults to `0.5`:
+### 2. GELLO data collection
+
+```bash
+# Record a new dataset
+uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml
+
+# Continue recording on an existing dataset
+uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml -r
+
+# Optional: save episodes in the background
+uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml -a
+```
+
+Controls: `Space` start the episode, `→` save it, `←` discard and re-record it, `Esc` stop recording. The arm resets to its initial point between episodes.
+
+> During collection the **relative position between the robot arm and the camera must not change**, and the camera setup at inference time must match the one used during collection. If the arm or camera moves, previously collected data becomes invalid.
+
+### 3. Manual drag recording
 
 ```bash
 ./start_manual_record.sh
-./start_manual_record.sh -r
+./start_manual_record.sh -r   # force resume; fails if the dataset directory does not exist
 ```
 
-The launcher creates a dataset on its first run and automatically resumes an existing valid dataset. If it reports an empty or incomplete dataset directory, choose a new `dataset.root` or remove that directory after confirming it contains no data. Press `Space` to start an episode, `Right` to save it, `Left` to discard and re-record it, and `Esc` to stop recording. Reset the arm manually between episodes.
+The launcher reads `dataset.root` from `config/manual_mode/xarm7_manual_record_config.yaml`: on first run it creates the dataset, and on later runs it automatically resumes an existing valid dataset. If the directory exists but is not a valid LeRobot dataset, choose a new `dataset.root`, or remove that directory after confirming it contains no data.
 
-### 3. Teleop Data Collection
+During recording the arm is in teach mode: the actual joint state is written as both the observation and the action. Hold `C` to slowly close the gripper and `O` to slowly open it. Controls: `Space` start, `→` save, `←` discard & re-record, `Esc` stop. Reset the arm manually between episodes.
 
-Record datasets via teleop.
+### 4. Policy training
 
 ```bash
-# Generic usage
-uv run uf-lerobot-record --config_path path/to/record_config.yaml
-uv run uf-lerobot-record --config_path path/to/config.yaml --resume true        # resume recording
-
-# Example: xArm6 + UMI data collection
-uv run uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
+uv run lerobot-train --policy act --dataset ufactory/xarm7_gello_datas
 ```
 
-### 5. Policy Training
-
-Train imitation learning policies on collected data.
+Example with explicit training parameters (checkpoints are saved every `save_freq` steps into `output_dir`):
 
 ```bash
-# Generic usage
-uv run lerobot-train --policy act --dataset your_dataset_name
-
-# Example: train ACT on xArm6 UMI dataset
-uv run lerobot-train --policy act --dataset ufactory/xarm6_umi_datas
-```
-
-Important parameters:
-
-```bash
-# Note: repo_id is the same as in the record config
-# Policy type: ACT, training steps: 800k
-# Checkpoints saved every 20k steps, output to lerobot_datas/train (sibling of lerobot directory)
 uv run lerobot-train \
-  --dataset.root=../../../../lerobot_datas/record/ufactory/xarm6_umi_datas \
-  --dataset.repo_id=ufactory/xarm6_umi_datas \
+  --dataset.root=/home/<user>/lerobot_datas/record/ufactory/xarm7_gello_datas \
+  --dataset.repo_id=ufactory/xarm7_gello_datas \
   --policy.type=act \
   --policy.device=cuda \
-  --policy.repo_id=ufactory/xarm6_umi_datas \
-  --output_dir=../../../../lerobot_datas/train/xarm6_umi_datas \
-  --job_name=xarm6_umi_datas \
+  --policy.repo_id=ufactory/xarm7_gello_datas \
+  --output_dir=/home/<user>/lerobot_datas/train/xarm7_gello_datas \
+  --job_name=xarm7_gello_datas \
   --steps=800000 \
   --batch_size=8 \
   --save_freq=20000
 ```
 
-### 6. Inference & Evaluation
-
-Run inference with a trained policy.
+### 5. Policy inference
 
 ```bash
-# Generic usage
-uv run uf-lerobot-eval --config_path path/to/config.yaml --policy.path your_train_path
-
-# Example: run inference with trained ACT policy
-uv run uf-lerobot-eval --config_path config/umi/xarm6_umi_record_config.yaml --policy.path ../../../../lerobot_datas/train/xarm6_umi_datas/checkpoints/last/pretrained_model/
+uv run uf-lerobot-eval \
+  --config_path config/gello/xarm7_gello_record_config.yaml \
+  --policy.path /path/to/train/output/checkpoints/last/pretrained_model/
 ```
+
+`←` / `→` reset, `Esc` stop.
+
+### 6. Replay recorded episodes
+
+Replay the absolute joint states (`observation.state`) of a manual-drag episode on an xArm7. States are sent as absolute targets at the dataset FPS (default 30), so the motion matches the recording:
+
+```bash
+uv run uf-lerobot-replay \
+  --dataset-root /path/to/xarm7_manual_datas \
+  --robot-ip 192.168.1.245
+
+# Skip the interactive confirmation (non-interactive use)
+uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --yes
+
+# Replay another episode
+uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --episode-index 3
+```
+
+The robot first moves to the xArm SDK initial point, then replays the episode and stays at the last state. Make sure the workspace is clear and the recorded initial pose matches the current arm setup.
 
 ## Tools
 
-### 1. Camera Viewer
-
-View and stitch multiple camera feeds.
+### Camera viewer
 
 ```bash
-uv run uf-camera-view -l                           # list all cameras
-uv run uf-camera-view -l -T xvisio                 # list XVisio cameras only
-uv run uf-camera-view -T xvisio                    # view XVisio cameras (default 1280x1280 YU12)
-uv run uf-camera-view -T xvisio -W 640 -H 1920 -F NV12  # specify format
-uv run uf-camera-view -T other                     # view other camera types
+uv run uf-camera-view -l                # list cameras
+uv run uf-camera-view -T realsense      # view RealSense cameras
 ```
 
-### 2. LeRobot Dataset Tools
+### LeRobot dataset tools
 
-LeRobot provides dataset utilities for inspecting, editing and managing collected datasets.
-
-#### View an episode:
-e.g. view episode index 17:
 ```bash
+# View episode 17
 uv run lerobot-dataset-viz \
-  --root=../../../../lerobot_datas/record/ufactory/xarm7_record_datas \
-  --repo-id ufactory/xarm7_record_datas \
+  --root=/path/to/record/ufactory/xarm7_manual_datas \
+  --repo-id ufactory/xarm7_manual_datas \
   --display-compressed-images true \
   --episode-index 17
-```
 
-#### Delete specific episodes:
-e.g. delete episodes 18 and 19:
-```bash
+# Delete episodes 18 and 19
 uv run lerobot-edit-dataset \
-  --root=../../../../lerobot_datas/record/ufactory/xarm7_record_datas \
-  --repo_id ufactory/xarm7_record_datas \
-  --new_repo_id ../xarm7_record_datas_new \
+  --root=/path/to/record/ufactory/xarm7_manual_datas \
+  --repo_id ufactory/xarm7_manual_datas \
+  --new_repo_id ../xarm7_manual_datas_new \
   --operation.type delete_episodes \
   --operation.episode_indices "[18, 19]"
-```
 
-#### Merge datasets:
-```bash
+# Merge datasets
 uv run lerobot-edit-dataset \
-  --root=../../../../lerobot_datas/record \
-  --repo_id ufactory/xarm7_record_datas_merge_1_2 \
+  --root=/path/to/record \
+  --repo_id ufactory/xarm7_datas_merge \
   --operation.type merge \
-  --operation.repo_ids "['ufactory/xarm7_record_datas_1', 'ufactory/xarm7_record_datas_2']"
+  --operation.repo_ids "['ufactory/xarm7_datas_1', 'ufactory/xarm7_datas_2']"
 ```
 
-## Teleop Comparison
-
-| Feature | GELLO | Pika | UMI | SpaceMouse |
-|---------|-------|------|-----|------------|
-| Control space | Joint space | Cartesian space | Cartesian space | Cartesian space |
-| Tracking | Dynamixel servos | Vive Tracker | UMI SLAM / Vive | 3D mouse |
-| Dual-arm | ❌ | ❌ | ✅ | ❌ |
-| System dep | dialout group | — | XVSDK deb | — |
-
-## Project Structure
+## Project structure
 
 ```
-lerobot_robot_ufactory/
-├── src/
-│   ├── lerobot_robot_ufactory/      # LeRobot plugin package
-│   │   ├── robots/                 # Robot control
-│   │   │   ├── uf_robot/           #   xArm physical robot
-│   │   │   ├── uf_mock_robot/      #   Mock robot simulator
-│   │   ├── teleoperators/          # Teleop drivers
-│   │   │   ├── base_teleop/        #   Shared base class
-│   │   │   ├── gello_teleop/       #   GELLO (Dynamixel leader)
-│   │   │   ├── pika_teleop/        #   Pika Sense (handheld + Vive)
-│   │   │   ├── umi_teleop/         #   UMI (dual-arm support)
-│   │   │   └── space_mouse/        #   SpaceMouse (3D mouse)
-│   │   ├── cameras/                # Camera modules
-│   │   │   └── umi_camera/         #   UMI camera
-│   │   ├── devices/                # External device drivers
-│   │   │   ├── pika/               #   Pika serial driver
-│   │   │   └── umi/                #   XVLib / Vive Tracker
-│   │   ├── scripts/                # Entry-point scripts
-│   │   │   ├── uf_robot_teleop.py     # Teleop testing
-│   │   │   ├── uf_lerobot_record.py   # Data recording
-│   │   │   ├── uf_lerobot_eval.py     # Policy evaluation
-│   │   │   ├── uf_camera_view.py      # Camera viewer tool
-│   │   │   └── vive_calibrate.py      # Vive Tracker calibration
-│   │   ├── context.py              # Teleop context registry
-│   │   └── utils/                  # Utilities
-├── config/                         # YAML config files
-│   ├── gello/
-│   ├── pika/
-│   ├── umi/
-│   └── spacemouse/
-├── rules/                          # udev device rules
+lerobot_xarm7/
+├── config/
+│   ├── gello/                     # xArm7 GELLO record config
+│   └── manual_mode/               # xArm7 manual-drag record config
+├── src/lerobot_robot_ufactory/
+│   ├── robots/
+│   │   └── uf_robot/              # xArm control (joint/cartesian, teach mode)
+│   ├── teleoperators/
+│   │   ├── base_teleop/           # shared teleop base class
+│   │   └── gello_teleop/          # GELLO (Dynamixel leader arm)
+│   ├── scripts/
+│   │   ├── uf_robot_teleop.py     # teleop test loop
+│   │   ├── uf_lerobot_record.py   # data collection (incl. manual mode)
+│   │   ├── uf_lerobot_eval.py     # policy inference
+│   │   ├── uf_lerobot_replay.py   # episode replay
+│   │   └── uf_camera_view.py      # camera viewer
+│   └── configs/parser.py          # config loading / CLI overrides
+├── start_manual_record.sh         # manual-drag launcher
 ├── pyproject.toml
-└── README.md
+├── README.md
+└── README_ZH.md
 ```
 
-## Important Notes
+## Important notes
 
-Users are expected to thoroughly study the codebase and configuration parameters.  
-The provided configurations are **not guaranteed to work for all scenarios** and must be adjusted based on actual hardware setups and task requirements.
-
-In particular, for **diffusion policies**, the default parameters in LeRobot are primarily designed for simulation and **are not optimized for real-world robots**.
+- The provided configs are **examples**: edit IPs, serial ports, camera serials, dataset paths, and task descriptions to match your hardware.
+- For GELLO data, keep the robot–camera relative pose identical between collection and inference.
+- The LeRobot default parameters for diffusion policies are mostly designed for simulation and are **not optimized for real robots** — tune them for your task.
+- Check the workspace for obstacles and keep the arm's initial pose consistent with the recorded data before replay or inference.
 
 ## License
 

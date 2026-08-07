@@ -1,337 +1,274 @@
-# UFACTORY LeRobot
+# UFACTORY xArm7 · LeRobot（GELLO / 手动拖拽）
 
 > [English Version](README.md)
 
-UFACTORY(深圳市众为创造科技有限公司) 机械臂与 LeRobot 框架集成项目，支持多种遥操作方式的数据采集、策略训练和部署推理。
+UFACTORY xArm 与 [LeRobot](https://github.com/huggingface/lerobot) 框架的集成项目，专注于两种数据采集方式：
 
-## 训练推理效果
+- **GELLO** — 使用 Dynamixel 示教臂的关节空间遥操作
+- **手动拖拽** — 在 xArm 示教模式下自由拖动机械臂录制演示
 
-点击下载开发时[采集的数据集](https://drive.google.com/drive/folders/1Ms25rd2YYGdh3tHPEsTTMU-m1fE7uNYY)，**仅供参考，不可复用**。因为用户机械臂和摄像头位置和开发测试时不一致。
-
-<table>
-<tr>
-  <td width="50%">
-    <a href="https://www.bilibili.com/video/BV12xFjzzEaX" target="_blank">
-      <img src="https://i2.hdslb.com/bfs/archive/7b325df5fb4c16e922b66d27b56d8fb6534f8b46.jpg" width="100%">
-    </a>
-  </td>
-  <td width="50%">
-    <a href="https://www.bilibili.com/video/BV16ccizHE2P" target="_blank">
-      <img src="https://i2.hdslb.com/bfs/archive/8c5d5e9370577fa89d06a175aceea282d9b2eb9a.jpg" width="100%">
-    </a>
-  </td>
-</tr>
-<tr>
-  <td width="50%">
-    <a href="https://www.bilibili.com/video/BV1xGEy6mE3i" target="_blank">
-      <img src="https://i2.hdslb.com/bfs/archive/c8bbac04a736b7043a20b753e11afea7627bdae2.jpg" width="100%">
-    </a>
-  </td>
-</tr>
-</table>
+采集的数据以标准 LeRobot 数据集格式保存，可用于模仿学习训练（ACT / Diffusion Policy 等）和实时策略推理。
 
 ## 功能特性
 
-- 🤖 UFACTORY 机械臂控制（[xArm 系列](https://www.ufactory.cc/)）
-- 🎮 多种遥操作方式：GELLO / [Pika](https://global.agilex.ai/products/pika) / [UMI](https://lumosumi.lumosbot.tech/pro/) / [SpaceMouse](https://3dconnexion.com/sg/product/spacemouse-wireless/)
-- 📷 多摄像头数据采集（[RealSense](https://www.realsenseai.com/products/depth-camera-d435i/) / UMI 相机）
-- 📊 数据集录制与管理（兼容 LeRobot 格式）
-- 🧠 模仿学习训练（ACT / Diffusion Policy 等）
-- 🚀 策略评估与实时推理
-- 🔧 Mock 机器人模拟（只用遥操作设备采集数据）
+- 🤖 UFACTORY xArm7 控制
+- 🎮 GELLO 关节空间遥操作（Dynamixel 示教臂）
+- ✋ xArm 示教模式手动拖拽采集
+- 📷 Intel RealSense 相机观测（D435 / D435i）
+- 📊 兼容 LeRobot 格式的数据集录制与管理
+- 🧠 模仿学习训练与策略推理
+- ▶️ 手动演示数据的 episode 回放
 
 ## 环境要求
 
 - Ubuntu 22.04 / 24.04
 - Python >= 3.10
 - CUDA >= 12.0（GPU 训练推荐）
-- UFACTORY 机械臂（xArm 系列，可选）
+- UFACTORY xArm7 及控制器
+- GELLO 示教臂（FTDI USB 串口）
+- Intel RealSense D435 / D435i（需要相机观测时）
 
 ## 安装
 
-### 基础项目安装
-
 ```bash
-git clone https://github.com/xArm-Developer/lerobot_robot_ufactory.git
-cd lerobot_robot_ufactory
+git clone https://git.weiyantech.cn/wangshuxun/Xarm-DataCollection.git lerobot_xarm7
+cd lerobot_xarm7
 
-# 创建 uv 虚拟环境并同步项目依赖
 uv venv --python 3.10
-uv sync
+uv sync --extra gello
 ```
 
-包含：`lerobot==0.4.3`、`xarm-python-sdk`、`numpy`、`pyyaml`（lerobot 已自动携带 torch、opencv、wandb 等训练相关依赖）。
+基础依赖包含 `lerobot==0.4.3`（带 Intel RealSense 支持）、`xarm-python-sdk`、`numpy`、`pyyaml` 和 `opencv-python`。`gello` 可选依赖会额外安装 GELLO 软件和 Dynamixel SDK。
 
-### 外设模块安装
+### 串口权限
 
-外设依赖以可选模块形式提供，通过 `[模块名]` 安装。
-
-#### GELLO 遥操作
-
-适用于 GELLO 示教臂（Dynamixel 舵机方案），控制空间为关节空间。
-* 一旦开始数据采集，机械臂与摄像头（D435 / D435i）的**相对位置必须保持不变**。
-* 推理时的摄像头位置必须与采集时相同。若机械臂或摄像头发生变化，此前采集的数据将无效。
+GELLO 示教臂通过串口连接，需要将当前用户加入 `dialout` 组（重新登录后生效）：
 
 ```bash
-# 1. 安装 GELLO 模块
-uv sync --extra gello
-
-# 2. 添加串口权限（重新登录后生效）
 sudo usermod -aG dialout $USER
 ```
 
-#### Pika 遥操作
-
-适用于 Pika Sense 手持示教器 + Vive Tracker，控制空间为笛卡尔空间。
-* 两个基站和机械臂相对位置没有要求，只需要保证采集时pika sense在基站范围内，但**基站移动后需要重新校准**。
-* 采集和推理时基站位置可不相同。
+查看 GELLO 串口路径（用于配置文件中的 `teleop.port`）：
 
 ```bash
-# 1. 安装外设依赖（不需要它们的间接依赖）
-uv pip install pysurvive agx-pypika --no-deps
-
-# 2. 安装 udev 规则（重新插拔设备后生效）
-sudo cp rules/*.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
+ls /dev/serial/by-id/
 ```
 
-> Vive Tracker 首次使用前需校准：`uf-vive-calibrate`
+## 配置
 
-#### UMI 遥操作
+项目在 `config/` 下提供了预置配置文件：
 
-适用于 UMI（Universal Manipulation Interface）方案，含 Vive Tracker 追踪，支持双机械臂。
+| 采集方式 | 配置文件 |
+|---|---|
+| GELLO · xArm7 | `config/gello/xarm7_gello_record_config.yaml` |
+| 手动拖拽 · xArm7 | `config/manual_mode/xarm7_manual_record_config.yaml` |
+
+### GELLO 配置说明
+
+- `robot.robot_ip` — xArm 控制器 IP（如 `192.168.1.245`）
+- `robot.robot_dof` — `7`
+- `robot.gripper_type` — `1` 表示 xArm 夹爪
+- `teleop.port` — GELLO 串口路径（`/dev/serial/by-id/...`）
+- `teleop.joint_ids` / `teleop.joint_signs` — 各型号机械臂的舵机映射与方向
+- `teleop.start_joints` — GELLO 校准参考值（角度），应与 xArm SDK 初始点一致
+- `teleop.gripper_id` — GELLO 夹爪舵机 ID（`8`；`-1` 表示无夹爪）
+- `dataset.root` / `dataset.repo_id` — 数据集保存位置
+- `dataset.single_task` — 随每一帧保存的任务描述
+- `dataset.fps` / `episode_time_s` / `reset_time_s` — 录制时序参数
+
+> xArm7 的配置已包含正确的关节映射，一般只需要修改串口、IP 和数据集路径。
+
+### 手动拖拽配置说明
+
+- `robot.manual_mode: true` — 开启 xArm 示教模式（关节自由拖动）
+- `robot.teach_sensitivity` — 示教灵敏度，有效范围 1–5
+- `robot.manual_gripper_speed` — 夹爪速度（每秒归一化位置变化，默认 `0.5`）
+- `robot.observe_joint_vel` — 是否在观测中记录关节速度（默认 `false`）
+- `robot.cameras.camera` — Intel RealSense 相机配置（`serial_number_or_name`、分辨率、fps）
+- `dataset.root` / `dataset.repo_id` / `single_task` / `fps` / `episode_time_s` / `reset_time_s` / `num_episodes` — 数据集配置
+
+### 相机配置说明
+
+需要给机器人配置添加相机时，参考 `config/manual_mode/xarm7_manual_record_config.yaml` 中的模板：
+
+```yaml
+robot:
+  cameras:
+    camera:
+      type: intelrealsense        # RealSense 类型，不是 opencv
+      serial_number_or_name: "148522072685"
+      width: 640
+      height: 480
+      fps: 30
+```
+
+- `type` 必须是 `intelrealsense`（RealSense 类型），**不能**写成 `opencv`（普通 USB 相机类型）。
+- `serial_number_or_name` 需要先获取 RealSense 相机序列号再填写，否则连接/录制会报错。获取序列号：
 
 ```bash
-# 1. 安装 XVSDK（系统级依赖，仅支持 Ubuntu Focal）
-curl -sL https://raw.githubusercontent.com/xArm-Developer/ufactory_resources/main/fastumi/sdk/XVSDK_focal_amd64.deb -o /tmp/xvsdk.deb && sudo dpkg -i /tmp/xvsdk.deb
-sudo apt install -y --fix-broken
-
-# 2. 安装外设依赖
-uv pip install pysurvive --no-deps
-
-# 3. 安装 udev 规则（重新插拔设备后生效）
-sudo cp rules/*.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
+uv run uf-camera-view -l -T realsense     # 列出每台相机的序列号
 ```
 
-> Vive Tracker 首次使用前需校准：`uf-vive-calibrate`
-
-**多 UMI 设备配置**（使用两台及以上时）：
-
-```bash
-# 增加 USB 缓冲区大小
-sudo sed -i '/GRUB_CMDLINE_LINUX_DEFAULT/s/quiet splash/quiet splash usbcore.usbfs_memory_mb=128/' /etc/default/grub
-sync
-sudo update-grub
-sudo reboot
-```
-
-#### SpaceMouse 遥操作
-
-适用于 3Dconnexion SpaceMouse / SpaceNavigator。
-
-```bash
-# 1. 安装 SpaceMouse 模块
-uv sync --extra spacemouse
-
-# 2. 安装 udev 规则（重新插拔设备后生效）
-sudo cp rules/*.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
+也可以使用 librealsense 自带的 `rs-enumerate-devices`。
 
 ## 使用
 
-### 1. 遥操作测试
+### 1. GELLO 遥操作测试
 
-测试遥操作设备与机械臂的联动，不录制数据。
+不录制数据，仅测试 GELLO 与机械臂的联动：
 
 ```bash
-# 通用格式
-uv run uf-robot-teleop --config_path path/to/config.yaml
-uv run uf-robot-teleop --config_path path/to/config.yaml --fps 60  # 指定频率
-
-# 示例: xArm6 + UMI 遥操作
-uv run uf-robot-teleop --config_path config/umi/xarm6_umi_record_config.yaml
+uv run uf-robot-teleop --config_path config/gello/xarm7_gello_record_config.yaml
+uv run uf-robot-teleop --config_path config/gello/xarm7_gello_record_config.yaml --fps 60  # 可选，指定循环频率
 ```
 
-### 2. 人工拖拽数据采集
+`Space` 复位并开始，`←` 复位，`Esc` 退出。
 
-人工拖拽录制使用 robot 配置中的 `manual_mode: true`，不需要配置 teleop。录制过程中，机械臂的实际关节状态会作为 observation 和 action 写入 LeRobot 数据集；如果配置了夹爪，还可以按住 `C` 缓慢闭合、按住 `O` 缓慢张开。夹爪速度通过 `manual_gripper_speed` 配置，默认值为 `0.5`：
+### 2. GELLO 数据采集
+
+```bash
+# 录制新数据集
+uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml
+
+# 在已有数据集上续录
+uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml -r
+
+# 可选：后台异步保存 episode
+uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml -a
+```
+
+按键控制：`Space` 开始当前 episode，`→` 保存，`←` 放弃并重录，`Esc` 停止录制。每个 episode 之间机械臂会自动复位到初始点。
+
+> 采集过程中**机械臂与相机（D435 / D435i）的相对位置必须保持不变**，推理时的相机位置必须与采集时一致。若机械臂或相机发生变化，此前采集的数据将失效。
+
+### 3. 手动拖拽数据采集
 
 ```bash
 ./start_manual_record.sh
-./start_manual_record.sh -r
+./start_manual_record.sh -r   # 强制续录；数据集目录不存在时会报错
 ```
 
-启动脚本首次运行时创建数据集，检测到有效数据集时会自动续录。如果提示数据目录为空或不完整，请修改 `dataset.root`，或者确认没有数据后删除该目录。按 `Space` 开始当前 episode，按 `Right` 保存，按 `Left` 放弃并重录当前 episode，按 `Esc` 停止录制。episode 之间可以手动复位机械臂。
+启动脚本会从 `config/manual_mode/xarm7_manual_record_config.yaml` 读取 `dataset.root`：首次运行创建数据集，之后运行会自动续录已有的有效数据集。如果目录存在但不是有效的 LeRobot 数据集，请更换 `dataset.root`，或确认没有数据后删除该目录。
 
-### 3. 遥操作数据采集
+录制时机械臂处于示教模式，实际关节状态会同时作为 observation 和 action 写入数据集。按住 `C` 缓慢闭合夹爪，按住 `O` 缓慢张开。按键控制：`Space` 开始，`→` 保存，`←` 放弃并重录，`Esc` 停止。episode 之间手动复位机械臂。
 
-通过遥操作录制数据集。
+### 4. 策略训练
 
 ```bash
-# 通用格式
-uv run uf-lerobot-record --config_path path/to/record_config.yaml
-uv run uf-lerobot-record --config_path path/to/config.yaml --resume true     # 续录
-
-# 示例: xArm6 + UMI 数据采集
-uv run uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
+uv run lerobot-train --policy act --dataset ufactory/xarm7_gello_datas
 ```
 
-### 4. 数据重放
+带完整训练参数的示例（每 `save_freq` 步保存一次 checkpoint 到 `output_dir`）：
 
-`datasets/xarm7_manual_replay` 是人工拖拽录制的 LeRobot 数据集。回放脚本使用其中的
-`observation.state`，将 7 个关节弧度值和归一化夹爪位置作为**绝对目标值**发送给 xArm7，
-不会将相邻帧相减，也不会累加成相对动作。脚本默认按数据集的 30 FPS 播放一个 episode。
+```bash
+uv run lerobot-train \
+  --dataset.root=/home/<user>/lerobot_datas/record/ufactory/xarm7_gello_datas \
+  --dataset.repo_id=ufactory/xarm7_gello_datas \
+  --policy.type=act \
+  --policy.device=cuda \
+  --policy.repo_id=ufactory/xarm7_gello_datas \
+  --output_dir=/home/<user>/lerobot_datas/train/xarm7_gello_datas \
+  --job_name=xarm7_gello_datas \
+  --steps=800000 \
+  --batch_size=8 \
+  --save_freq=20000
+```
 
-启动前会要求确认，连接后会先自动移动到 xArm SDK 初始点；播放结束后保持最后一帧姿态并断开连接：
+### 5. 策略推理
+
+```bash
+uv run uf-lerobot-eval \
+  --config_path config/gello/xarm7_gello_record_config.yaml \
+  --policy.path /path/to/train/output/checkpoints/last/pretrained_model/
+```
+
+`←` / `→` 复位，`Esc` 停止。
+
+### 6. 回放已录制 episode
+
+将手动拖拽数据集的绝对关节状态（`observation.state`）回放到 xArm7。脚本按数据集 FPS（默认 30）将状态作为**绝对目标值**发送，不做差分或累加，因此运动轨迹与录制时一致：
 
 ```bash
 uv run uf-lerobot-replay \
-  --dataset-root /home/wsx/code/lerobot_robot_ufactory/datasets/xarm7_manual_replay \
+  --dataset-root /path/to/xarm7_manual_datas \
   --robot-ip 192.168.1.245
+
+# 跳过交互确认（无人值守）
+uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --yes
+
+# 回放其他 episode
+uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --episode-index 3
 ```
 
-无人值守运行时可以使用 `--yes` 跳过确认。执行前请确认机械臂工作空间无障碍物，且数据中的初始姿态与当前设备匹配。
+回放开始前机械臂会先移动到 xArm SDK 初始点，播放结束后保持最后一帧姿态并断开连接。执行前请确认工作空间无障碍物，且数据中的初始姿态与当前设备一致。
 
-### 5. Lerobot训练
+## 工具
 
-采集数据后，使用 LeRobot 训练管道进行模仿学习训练。
+### 摄像头查看器
 
 ```bash
-# 通用格式
-uv run lerobot-train --policy act --dataset your_dataset_name
+uv run uf-camera-view -l                # 列出所有摄像头
+uv run uf-camera-view -T realsense      # 查看 RealSense 摄像头
 ```
 
-参数示例：
+### LeRobot 数据集工具
 
 ```bash
-# 注意: repo_id就是采集时配置文件里面的repo_id
-# 这里训练策略policy.type选用act，训练steps为80w次
-# 训练过程每2w次保存一次结果，结果输出到和lerobot同级目录下的lerobot_datas/train里面
-uv run lerobot-train \
-  --dataset.root=../../../../lerobot_datas/record/ufactory/xarm6_umi_datas \
-  --dataset.repo_id=ufactory/xarm6_umi_datas \
-  --policy.type=act \
-  --policy.device=cuda \
-  --policy.repo_id=ufactory/xarm6_umi_datas \
-  --output_dir=../../../../lerobot_datas/train/xarm6_umi_datas \
-  --job_name=xarm6_umi_datas \
-  --steps=800000 \
-  --batch_size=8 \
-  --save_freq=20000 
-```
-
-### 6. 推理
-
-指定模型进行推理
-
-```bash
-# 通用格式
-uv run uf-lerobot-eval --config_path path/to/config.yaml --policy.path your_train_path
-
-# 示例：使用训练好的 ACT 策略进行推理
-uv run uf-lerobot-eval --config_path config/umi/xarm6_umi_record_config.yaml --policy.path ../../../../lerobot_datas/train/xarm6_umi_datas/checkpoints/last/pretrained_model/
-```
-
-## 工具集
-
-### 1. 摄像头查看器
-
-查看和拼接多路摄像头画面。
-
-```bash
-uv run uf-camera-view -l                           # 列出所有摄像头
-uv run uf-camera-view -l -T xvisio                 # 仅列出 XVisio 摄像头
-uv run uf-camera-view -T xvisio                    # 查看 XVisio 摄像头（默认 1280x1280 YU12）
-uv run uf-camera-view -T xvisio -W 640 -H 1920 -F NV12  # 指定格式
-uv run uf-camera-view -T other                     # 查看其他类型摄像头
-```
-
-### 2. Lerobot数据集工具
-Lerobot提供一些数据集工具，方便对采集的数据集进行增删查操作。
-
-### 查看某个索引的episode:
-例如查看索引号为17的episode:
-```bash
+# 查看索引为 17 的 episode
 uv run lerobot-dataset-viz \
-  --root=../../../../lerobot_datas/record/ufactory/xarm7_record_datas \
-  --repo-id ufactory/xarm7_record_datas \
+  --root=/path/to/record/ufactory/xarm7_manual_datas \
+  --repo-id ufactory/xarm7_manual_datas \
   --display-compressed-images true \
   --episode-index 17
-```
 
-### 删除某些索引的episodes:
-例如删除索引号为18和19的episode:
-```bash
+# 删除索引为 18 和 19 的 episode
 uv run lerobot-edit-dataset \
-  --root=../../../../lerobot_datas/record/ufactory/xarm7_record_datas \
-  --repo_id ufactory/xarm7_record_datas \
-  --new_repo_id ../xarm7_record_datas_new \
+  --root=/path/to/record/ufactory/xarm7_manual_datas \
+  --repo_id ufactory/xarm7_manual_datas \
+  --new_repo_id ../xarm7_manual_datas_new \
   --operation.type delete_episodes \
   --operation.episode_indices "[18, 19]"
-```
 
-### 合并数据集
-```bash
+# 合并数据集
 uv run lerobot-edit-dataset \
-  --root=../../../../lerobot_datas/record \
-  --repo_id ufactory/xarm7_record_datas_merge_1_2 \
+  --root=/path/to/record \
+  --repo_id ufactory/xarm7_datas_merge \
   --operation.type merge \
-  --operation.repo_ids "['ufactory/xarm7_record_datas_1', 'ufactory/xarm7_record_datas_2']"
+  --operation.repo_ids "['ufactory/xarm7_datas_1', 'ufactory/xarm7_datas_2']"
 ```
-
-
-## 遥操作方式对比
-
-| 特性 | GELLO | Pika | UMI | SpaceMouse |
-|------|-------|------|-----|------------|
-| 控制空间 | 关节空间 | 笛卡尔空间 | 笛卡尔空间 | 笛卡尔空间 |
-| 跟踪方式 | Dynamixel 舵机 | Vive Tracker | UMI SLAM / Vive | 3D 鼠标 |
-| 双臂支持 | ❌ | ❌ | ✅ | ❌ |
-| 系统依赖 | dialout 组 | — | XVSDK deb | — |
 
 ## 项目结构
 
 ```
-lerobot_robot_ufactory/
-├── src/
-│   ├── lerobot_robot_ufactory/      # LeRobot 插件包
-│   │   ├── robots/                 # 机器人控制
-│   │   │   ├── uf_robot/           #   xArm 实体机器人
-│   │   │   ├── uf_mock_robot/      #   仿真 Mock 机器人
-│   │   ├── teleoperators/          # 遥操作器
-│   │   │   ├── base_teleop/        #   共享基类
-│   │   │   ├── gello_teleop/       #   GELLO (Dynamixel 示教臂)
-│   │   │   ├── pika_teleop/        #   Pika Sense (手持示教器 + Vive)
-│   │   │   ├── umi_teleop/         #   UMI (含双机械臂)
-│   │   │   └── space_mouse/        #   SpaceMouse (3D 鼠标)
-│   │   ├── cameras/                # 摄像头模块
-│   │   │   └── umi_camera/         #   UMI 相机
-│   │   ├── devices/                # 外部设备驱动
-│   │   │   ├── pika/               #   Pika 串口驱动
-│   │   │   └── umi/                #   XVLib / Vive Tracker
-│   │   ├── scripts/                # 执行脚本
-│   │   │   ├── uf_robot_teleop.py     # 遥操作测试
-│   │   │   ├── uf_lerobot_record.py   # 数据采集
-│   │   │   ├── uf_lerobot_eval.py     # 策略评估
-│   │   │   ├── uf_camera_view.py      # 摄像头查看工具
-│   │   │   └── vive_calibrate.py      # Vive Tracker 校准
-│   │   ├── context.py              # Teleop 上下文注册
-│   │   └── utils/                  # 工具函数
-├── config/                         # YAML 配置文件
-│   ├── gello/
-│   ├── pika/
-│   ├── umi/
-│   └── spacemouse/
-├── rules/                         # udev 设备规则
+lerobot_xarm7/
+├── config/
+│   ├── gello/                     # xArm7 GELLO 录制配置
+│   └── manual_mode/               # xArm7 手动拖拽录制配置
+├── src/lerobot_robot_ufactory/
+│   ├── robots/
+│   │   └── uf_robot/              # xArm 控制（关节/笛卡尔空间、示教模式）
+│   ├── teleoperators/
+│   │   ├── base_teleop/           # 遥操作基类
+│   │   └── gello_teleop/          # GELLO（Dynamixel 示教臂）
+│   ├── scripts/
+│   │   ├── uf_robot_teleop.py     # 遥操作测试
+│   │   ├── uf_lerobot_record.py   # 数据采集（含手动模式）
+│   │   ├── uf_lerobot_eval.py     # 策略推理
+│   │   ├── uf_lerobot_replay.py   # episode 回放
+│   │   └── uf_camera_view.py      # 摄像头查看器
+│   └── configs/parser.py          # 配置加载 / CLI 覆盖
+├── start_manual_record.sh         # 手动拖拽启动脚本
 ├── pyproject.toml
-└── README.md
+├── README.md
+└── README_ZH.md
 ```
 
 ## 重要提示
-用户需要全面研究整个代码库，并了解相关的配置参数，因为代码中所写的配置并非适用于所有使用场景和设置，所以用户需要研究代码或相关理论，以获取相关知识，并自行进行修改和调整。特别是对于扩散策略(diffusion policy)，LeRobot 中的默认参数可能仅用于模拟，并未针对实际机器人场景进行优化。
 
+- 提供的配置都是**示例**：请根据实际硬件修改 IP、串口、相机序列号、数据集路径和任务描述。
+- GELLO 数据采集与推理时，机械臂与相机的相对位姿必须保持一致。
+- LeRobot 中扩散策略（Diffusion Policy）的默认参数主要面向仿真，**未针对真实机器人优化**，需要根据任务自行调整。
+- 回放或推理前，请确认工作空间无障碍物，并保证机械臂初始姿态与录制数据一致。
 
 ## 许可证
 
