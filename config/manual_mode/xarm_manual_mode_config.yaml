@@ -6,3 +6,9 @@ manual_mode: true
 
 # xArm teach sensitivity, valid range: 1-5.
 teach_sensitivity: 3
+
+# Read the initial point saved in xArm Studio and return to it after pressing Enter.
+return_to_initial: true
+
+# Return speed in degrees per second.
+reset_speed: 30

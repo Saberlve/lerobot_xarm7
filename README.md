@@ -55,12 +55,9 @@ UFACTORY robot arm integration with the LeRobot framework for robot learning, da
 git clone https://github.com/xArm-Developer/lerobot_robot_ufactory.git
 cd lerobot_robot_ufactory
 
-# Create conda environment
-conda create -n uf_lerobot python=3.10 -y
-conda activate uf_lerobot
-
-# Install project
-pip install -e .
+# Create a uv virtual environment and sync project dependencies
+uv venv --python 3.10
+uv sync
 ```
 
 Includes: `lerobot==0.4.3`, `xarm-python-sdk`, `numpy`, `pyyaml`. LeRobot already pulls in torch, opencv, wandb, etc.
@@ -77,7 +74,7 @@ Dynamixel-based leader arm, joint-space control.
 
 ```bash
 # 1. Install GELLO module
-pip install -e ".[gello]"
+uv sync --extra gello
 
 # 2. Add serial port permissions (re-login required)
 sudo usermod -aG dialout $USER
@@ -91,7 +88,7 @@ Pika Sense handheld + Vive Tracker, Cartesian-space control.
 
 ```bash
 # 1. Install peripheral deps (skip transitive deps)
-pip install pysurvive agx-pypika --no-deps
+uv pip install pysurvive agx-pypika --no-deps
 
 # 2. Install udev rules (re-plug devices afterwards)
 sudo cp src/rules/*.rules /etc/udev/rules.d/
@@ -110,7 +107,7 @@ curl -sL https://raw.githubusercontent.com/xArm-Developer/ufactory_resources/mai
 sudo apt install -y --fix-broken
 
 # 2. Install peripheral deps
-pip install pysurvive --no-deps
+uv pip install pysurvive --no-deps
 
 # 3. Install udev rules (re-plug devices afterwards)
 sudo cp src/rules/*.rules /etc/udev/rules.d/
@@ -135,7 +132,7 @@ sudo reboot
 
 ```bash
 # 1. Install SpaceMouse module
-pip install -e ".[spacemouse]"
+uv sync --extra spacemouse
 
 # 2. Install udev rules (re-plug device afterwards)
 sudo cp src/rules/*.rules /etc/udev/rules.d/
@@ -151,36 +148,46 @@ Test teleop-to-robot control loop without recording.
 
 ```bash
 # Generic usage
-uf-robot-teleop --config_path path/to/config.yaml
-uf-robot-teleop --config_path path/to/config.yaml --fps 60  # specify frequency
+uv run uf-robot-teleop --config_path path/to/config.yaml
+uv run uf-robot-teleop --config_path path/to/config.yaml --fps 60  # specify frequency
 
 # Example: xArm6 + UMI teleop
-uf-robot-teleop --config_path config/umi/xarm6_umi_record_config.yaml
+uv run uf-robot-teleop --config_path config/umi/xarm6_umi_record_config.yaml
 ```
 
-### 2. Data Collection
+### 2. xArm Manual Drag Mode
+
+Use xArm joint teaching mode (`mode=2`) for manual dragging:
+
+```bash
+uv run uf-xarm-manual-mode --config_path config/manual_mode/xarm_manual_mode_config.yaml
+```
+
+Set `manual_mode` to `true` to enter drag mode. Press Enter to restore normal mode; set it to `false` to restore normal mode directly. With `return_to_initial: true`, the script reads the saved initial point through the xArm Studio API and returns to it when drag mode exits.
+
+### 3. Data Collection
 
 Record datasets via teleop.
 
 ```bash
 # Generic usage
-uf-lerobot-record --config_path path/to/record_config.yaml
-uf-lerobot-record --config_path path/to/config.yaml --resume true        # resume recording
+uv run uf-lerobot-record --config_path path/to/record_config.yaml
+uv run uf-lerobot-record --config_path path/to/config.yaml --resume true        # resume recording
 
 # Example: xArm6 + UMI data collection
-uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
+uv run uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
 ```
 
-### 3. Policy Training
+### 4. Policy Training
 
 Train imitation learning policies on collected data.
 
 ```bash
 # Generic usage
-lerobot-train --policy act --dataset your_dataset_name
+uv run lerobot-train --policy act --dataset your_dataset_name
 
 # Example: train ACT on xArm6 UMI dataset
-lerobot-train --policy act --dataset ufactory/xarm6_umi_datas
+uv run lerobot-train --policy act --dataset ufactory/xarm6_umi_datas
 ```
 
 Important parameters:
@@ -189,7 +196,7 @@ Important parameters:
 # Note: repo_id is the same as in the record config
 # Policy type: ACT, training steps: 800k
 # Checkpoints saved every 20k steps, output to lerobot_datas/train (sibling of lerobot directory)
-lerobot-train \
+uv run lerobot-train \
   --dataset.root=../../../../lerobot_datas/record/ufactory/xarm6_umi_datas \
   --dataset.repo_id=ufactory/xarm6_umi_datas \
   --policy.type=act \
@@ -202,16 +209,16 @@ lerobot-train \
   --save_freq=20000
 ```
 
-### 4. Inference & Evaluation
+### 5. Inference & Evaluation
 
 Run inference with a trained policy.
 
 ```bash
 # Generic usage
-uf-lerobot-eval --config_path path/to/config.yaml --policy.path your_train_path
+uv run uf-lerobot-eval --config_path path/to/config.yaml --policy.path your_train_path
 
 # Example: run inference with trained ACT policy
-uf-lerobot-eval --config_path config/umi/xarm6_umi_record_config.yaml --policy.path ../../../../lerobot_datas/train/xarm6_umi_datas/checkpoints/last/pretrained_model/
+uv run uf-lerobot-eval --config_path config/umi/xarm6_umi_record_config.yaml --policy.path ../../../../lerobot_datas/train/xarm6_umi_datas/checkpoints/last/pretrained_model/
 ```
 
 ## Tools
@@ -221,11 +228,11 @@ uf-lerobot-eval --config_path config/umi/xarm6_umi_record_config.yaml --policy.p
 View and stitch multiple camera feeds.
 
 ```bash
-uf-camera-view -l                           # list all cameras
-uf-camera-view -l -T xvisio                 # list XVisio cameras only
-uf-camera-view -T xvisio                    # view XVisio cameras (default 1280x1280 YU12)
-uf-camera-view -T xvisio -W 640 -H 1920 -F NV12  # specify format
-uf-camera-view -T other                     # view other camera types
+uv run uf-camera-view -l                           # list all cameras
+uv run uf-camera-view -l -T xvisio                 # list XVisio cameras only
+uv run uf-camera-view -T xvisio                    # view XVisio cameras (default 1280x1280 YU12)
+uv run uf-camera-view -T xvisio -W 640 -H 1920 -F NV12  # specify format
+uv run uf-camera-view -T other                     # view other camera types
 ```
 
 ### 2. LeRobot Dataset Tools
@@ -235,7 +242,7 @@ LeRobot provides dataset utilities for inspecting, editing and managing collecte
 #### View an episode:
 e.g. view episode index 17:
 ```bash
-lerobot-dataset-viz \
+uv run lerobot-dataset-viz \
   --root=../../../../lerobot_datas/record/ufactory/xarm7_record_datas \
   --repo-id ufactory/xarm7_record_datas \
   --display-compressed-images true \
@@ -245,7 +252,7 @@ lerobot-dataset-viz \
 #### Delete specific episodes:
 e.g. delete episodes 18 and 19:
 ```bash
-lerobot-edit-dataset \
+uv run lerobot-edit-dataset \
   --root=../../../../lerobot_datas/record/ufactory/xarm7_record_datas \
   --repo_id ufactory/xarm7_record_datas \
   --new_repo_id ../xarm7_record_datas_new \
@@ -255,7 +262,7 @@ lerobot-edit-dataset \
 
 #### Merge datasets:
 ```bash
-lerobot-edit-dataset \
+uv run lerobot-edit-dataset \
   --root=../../../../lerobot_datas/record \
   --repo_id ufactory/xarm7_record_datas_merge_1_2 \
   --operation.type merge \

@@ -55,12 +55,9 @@ UFACTORY(深圳市众为创造科技有限公司) 机械臂与 LeRobot 框架集
 git clone https://github.com/xArm-Developer/lerobot_robot_ufactory.git
 cd lerobot_robot_ufactory
 
-# 创建 conda 环境
-conda create -n uf_lerobot python=3.10 -y
-conda activate uf_lerobot
-
-# 安装项目
-pip install -e .
+# 创建 uv 虚拟环境并同步项目依赖
+uv venv --python 3.10
+uv sync
 ```
 
 包含：`lerobot==0.4.3`、`xarm-python-sdk`、`numpy`、`pyyaml`（lerobot 已自动携带 torch、opencv、wandb 等训练相关依赖）。
@@ -77,7 +74,7 @@ pip install -e .
 
 ```bash
 # 1. 安装 GELLO 模块
-pip install -e ".[gello]"
+uv sync --extra gello
 
 # 2. 添加串口权限（重新登录后生效）
 sudo usermod -aG dialout $USER
@@ -91,7 +88,7 @@ sudo usermod -aG dialout $USER
 
 ```bash
 # 1. 安装外设依赖（不需要它们的间接依赖）
-pip install pysurvive agx-pypika --no-deps
+uv pip install pysurvive agx-pypika --no-deps
 
 # 2. 安装 udev 规则（重新插拔设备后生效）
 sudo cp rules/*.rules /etc/udev/rules.d/
@@ -110,7 +107,7 @@ curl -sL https://raw.githubusercontent.com/xArm-Developer/ufactory_resources/mai
 sudo apt install -y --fix-broken
 
 # 2. 安装外设依赖
-pip install pysurvive --no-deps
+uv pip install pysurvive --no-deps
 
 # 3. 安装 udev 规则（重新插拔设备后生效）
 sudo cp rules/*.rules /etc/udev/rules.d/
@@ -135,7 +132,7 @@ sudo reboot
 
 ```bash
 # 1. 安装 SpaceMouse 模块
-pip install -e ".[spacemouse]"
+uv sync --extra spacemouse
 
 # 2. 安装 udev 规则（重新插拔设备后生效）
 sudo cp rules/*.rules /etc/udev/rules.d/
@@ -150,11 +147,11 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ```bash
 # 通用格式
-uf-robot-teleop --config_path path/to/config.yaml
-uf-robot-teleop --config_path path/to/config.yaml --fps 60  # 指定频率
+uv run uf-robot-teleop --config_path path/to/config.yaml
+uv run uf-robot-teleop --config_path path/to/config.yaml --fps 60  # 指定频率
 
 # 示例: xArm6 + UMI 遥操作
-uf-robot-teleop --config_path config/umi/xarm6_umi_record_config.yaml
+uv run uf-robot-teleop --config_path config/umi/xarm6_umi_record_config.yaml
 ```
 
 ### 2. xArm 人工拖拽模式测试
@@ -162,10 +159,10 @@ uf-robot-teleop --config_path config/umi/xarm6_umi_record_config.yaml
 使用 xArm 的关节示教模式（`mode=2`）进行人工拖拽：
 
 ```bash
-uf-xarm-manual-mode --config_path config/manual_mode/xarm_manual_mode_config.yaml
+uv run uf-xarm-manual-mode --config_path config/manual_mode/xarm_manual_mode_config.yaml
 ```
 
-配置中的 `manual_mode` 为 `true` 时进入拖拽模式，按回车后恢复为普通模式；设置为 `false` 可直接恢复为普通模式。
+配置中的 `manual_mode` 为 `true` 时进入拖拽模式，按回车后恢复为普通模式；设置为 `false` 可直接恢复为普通模式。`return_to_initial: true` 会通过 xArm Studio 接口读取保存的初始位置，并在退出拖拽后自动回位。
 
 ### 3. 数据采集
 
@@ -173,11 +170,11 @@ uf-xarm-manual-mode --config_path config/manual_mode/xarm_manual_mode_config.yam
 
 ```bash
 # 通用格式
-uf-lerobot-record --config_path path/to/record_config.yaml
-uf-lerobot-record --config_path path/to/config.yaml --resume true     # 续录
+uv run uf-lerobot-record --config_path path/to/record_config.yaml
+uv run uf-lerobot-record --config_path path/to/config.yaml --resume true     # 续录
 
 # 示例: xArm6 + UMI 数据采集
-uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
+uv run uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
 ```
 
 ### 4. Lerobot训练
@@ -186,7 +183,7 @@ uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
 
 ```bash
 # 通用格式
-lerobot-train --policy act --dataset your_dataset_name
+uv run lerobot-train --policy act --dataset your_dataset_name
 ```
 
 参数示例：
@@ -195,7 +192,7 @@ lerobot-train --policy act --dataset your_dataset_name
 # 注意: repo_id就是采集时配置文件里面的repo_id
 # 这里训练策略policy.type选用act，训练steps为80w次
 # 训练过程每2w次保存一次结果，结果输出到和lerobot同级目录下的lerobot_datas/train里面
-lerobot-train \
+uv run lerobot-train \
   --dataset.root=../../../../lerobot_datas/record/ufactory/xarm6_umi_datas \
   --dataset.repo_id=ufactory/xarm6_umi_datas \
   --policy.type=act \
@@ -214,10 +211,10 @@ lerobot-train \
 
 ```bash
 # 通用格式
-uf-lerobot-eval --config_path path/to/config.yaml --policy.path your_train_path
+uv run uf-lerobot-eval --config_path path/to/config.yaml --policy.path your_train_path
 
 # 示例：使用训练好的 ACT 策略进行推理
-uf-lerobot-eval --config_path config/umi/xarm6_umi_record_config.yaml --policy.path ../../../../lerobot_datas/train/xarm6_umi_datas/checkpoints/last/pretrained_model/
+uv run uf-lerobot-eval --config_path config/umi/xarm6_umi_record_config.yaml --policy.path ../../../../lerobot_datas/train/xarm6_umi_datas/checkpoints/last/pretrained_model/
 ```
 
 ## 工具集
@@ -227,11 +224,11 @@ uf-lerobot-eval --config_path config/umi/xarm6_umi_record_config.yaml --policy.p
 查看和拼接多路摄像头画面。
 
 ```bash
-uf-camera-view -l                           # 列出所有摄像头
-uf-camera-view -l -T xvisio                 # 仅列出 XVisio 摄像头
-uf-camera-view -T xvisio                    # 查看 XVisio 摄像头（默认 1280x1280 YU12）
-uf-camera-view -T xvisio -W 640 -H 1920 -F NV12  # 指定格式
-uf-camera-view -T other                     # 查看其他类型摄像头
+uv run uf-camera-view -l                           # 列出所有摄像头
+uv run uf-camera-view -l -T xvisio                 # 仅列出 XVisio 摄像头
+uv run uf-camera-view -T xvisio                    # 查看 XVisio 摄像头（默认 1280x1280 YU12）
+uv run uf-camera-view -T xvisio -W 640 -H 1920 -F NV12  # 指定格式
+uv run uf-camera-view -T other                     # 查看其他类型摄像头
 ```
 
 ### 2. Lerobot数据集工具
@@ -240,7 +237,7 @@ Lerobot提供一些数据集工具，方便对采集的数据集进行增删查�
 ### 查看某个索引的episode:
 例如查看索引号为17的episode:
 ```bash
-lerobot-dataset-viz \
+uv run lerobot-dataset-viz \
   --root=../../../../lerobot_datas/record/ufactory/xarm7_record_datas \
   --repo-id ufactory/xarm7_record_datas \
   --display-compressed-images true \
@@ -250,7 +247,7 @@ lerobot-dataset-viz \
 ### 删除某些索引的episodes:
 例如删除索引号为18和19的episode:
 ```bash
-lerobot-edit-dataset \
+uv run lerobot-edit-dataset \
   --root=../../../../lerobot_datas/record/ufactory/xarm7_record_datas \
   --repo_id ufactory/xarm7_record_datas \
   --new_repo_id ../xarm7_record_datas_new \
@@ -260,7 +257,7 @@ lerobot-edit-dataset \
 
 ### 合并数据集
 ```bash
-lerobot-edit-dataset \
+uv run lerobot-edit-dataset \
   --root=../../../../lerobot_datas/record \
   --repo_id ufactory/xarm7_record_datas_merge_1_2 \
   --operation.type merge \
