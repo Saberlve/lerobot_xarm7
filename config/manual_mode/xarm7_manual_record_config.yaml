@@ -24,7 +24,7 @@ robot:
       fps: 30
 
 dataset:
-  root: "/home/wsx/code/lerobot_robot_ufactory/xarm7_manual_datas"
+  root: "/home/wsx/code/lerobot_robot_ufactory/datasets/xarm7_manual_replay_pick_pen"
   repo_id: "ufactory/xarm7_manual_datas"
   # Task description stored with each recorded frame.
   single_task: "Describe the task being demonstrated."
@@ -37,3 +37,5 @@ dataset:
   # Store camera observations as videos.
   video: true
   push_to_hub: false
+
+

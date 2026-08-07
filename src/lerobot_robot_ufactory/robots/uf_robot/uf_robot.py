@@ -223,8 +223,16 @@ class UFRobot(Robot, Thread):
         if self._initial_point is None:
             raise RuntimeError("xArm initial point has not been loaded")
 
-        self.real_arm.set_mode(0)
-        self.real_arm.set_state(0)
+        # The controller requires motion to be enabled again after an
+        # emergency stop has been released, before any reset motion command.
+        code = self.real_arm.motion_enable(enable=True)
+        self._check_motion_code("motion_enable", code)
+        code = self.real_arm.clean_error()
+        self._check_motion_code("clean_error", code)
+        code = self.real_arm.set_mode(0)
+        self._check_motion_code("set_mode(0)", code)
+        code = self.real_arm.set_state(0)
+        self._check_motion_code("set_state(0)", code)
         code = self.real_arm.set_servo_angle(
             angle=self._initial_point,
             speed=ROBOT_RESET_SPEED_DEG,
@@ -271,7 +279,9 @@ class UFRobot(Robot, Thread):
             return
 
         if self._control_space == "joint":
-            self.real_arm.set_mode(6)
+            code = self.real_arm.set_mode(self.config.joint_command_mode)
+            if code != 0:
+                raise RuntimeError(f"set_mode({self.config.joint_command_mode}) failed, code={code}")
         elif self._control_space == "cartesian":
             self.real_arm.set_mode(7)
         else:
@@ -430,6 +440,20 @@ class UFRobot(Robot, Thread):
             modbus_datas = [0x09, 0x10, 0x03, 0xE8, 0x00, 0x03, 0x06, 0x09, 0x00, 0x00, grippos, self._gripper_param.speed, self._gripper_param.force]
             self.real_arm.getset_tgpio_modbus_data(modbus_datas)
 
+    def _motion_status(self) -> str:
+        """Return controller state details for a failed motion command."""
+        arm = self.real_arm
+        mode = getattr(arm, "mode", "unknown")
+        state = getattr(arm, "state", "unknown")
+        error_code = getattr(arm, "error_code", "unknown")
+        warn_code = getattr(arm, "warn_code", "unknown")
+        return f"mode={mode}, state={state}, error_code={error_code}, warn_code={warn_code}"
+
+    def _check_motion_code(self, command: str, code: int) -> None:
+        """Fail loudly when the SDK rejects a joint command."""
+        if code != 0:
+            raise RuntimeError(f"{command} failed, code={code}, {self._motion_status()}")
+
     def send_action(self, action: dict) -> np.ndarray:
         if not self._is_connected:
             raise ConnectionError()
@@ -458,17 +482,43 @@ class UFRobot(Robot, Thread):
             for i in range(self._dof):
                 cmd_list[i] = action[f"{self.prefix}J{i+1}.pos"]
 
-            # TODO: make mode 6 compatible with wait=True
-            if wait_== False and self.real_arm.mode != 6:
-                self.real_arm.set_mode(6)
-                self.real_arm.set_state(0)
-                time.sleep(0.1)
-            elif wait_ and self.real_arm.mode != 0:
-                self.real_arm.set_mode(0)
-                self.real_arm.set_state(0)
-                time.sleep(0.1)
+            if self.config.joint_command_mode == 1:
+                # set_servo_angle_j is an absolute target command. It is the
+                # SDK's high-frequency interface and executes only the latest
+                # target, so it must be used with servo motion mode (1).
+                if self.real_arm.mode != 1:
+                    code = self.real_arm.set_mode(1)
+                    self._check_motion_code("set_mode(1)", code)
+                    code = self.real_arm.set_state(0)
+                    self._check_motion_code("set_state(0)", code)
+                    time.sleep(0.1)
+                code = self.real_arm.set_servo_angle_j(
+                    cmd_list[:self._dof], speed=jnt_spd, is_radian=True
+                )
+                self._check_motion_code("set_servo_angle_j", code)
+            else:
+                # The legacy mode-6 path uses the absolute move_joint API.
+                # The first blocking command must be sent in position mode.
+                if wait_ == False and self.real_arm.mode != 6:
+                    code = self.real_arm.set_mode(6)
+                    self._check_motion_code("set_mode(6)", code)
+                    code = self.real_arm.set_state(0)
+                    self._check_motion_code("set_state(0)", code)
+                    time.sleep(0.1)
+                elif wait_ and self.real_arm.mode != 0:
+                    code = self.real_arm.set_mode(0)
+                    self._check_motion_code("set_mode(0)", code)
+                    code = self.real_arm.set_state(0)
+                    self._check_motion_code("set_state(0)", code)
+                    time.sleep(0.1)
 
-            self.real_arm.set_servo_angle(angle=cmd_list[:self._dof], speed=jnt_spd, is_radian=True, wait=wait_)
+                code = self.real_arm.set_servo_angle(
+                    angle=cmd_list[:self._dof],
+                    speed=jnt_spd,
+                    is_radian=True,
+                    wait=wait_,
+                )
+                self._check_motion_code("set_servo_angle", code)
         elif self._control_space == "cartesian": # unit: mm?
             lin_spd = self._max_linear_velocity
 

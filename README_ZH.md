@@ -178,6 +178,22 @@ uv run uf-lerobot-record --config_path path/to/config.yaml --resume true     # �
 uv run uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
 ```
 
+### 4. 数据重放
+
+`datasets/xarm7_manual_replay` 是人工拖拽录制的 LeRobot 数据集。回放脚本使用其中的
+`observation.state`，将 7 个关节弧度值和归一化夹爪位置作为**绝对目标值**发送给 xArm7，
+不会将相邻帧相减，也不会累加成相对动作。脚本默认按数据集的 30 FPS 播放一个 episode。
+
+启动前会要求确认，连接后会先自动移动到 xArm SDK 初始点；播放结束后保持最后一帧姿态并断开连接：
+
+```bash
+uv run uf-lerobot-replay \
+  --dataset-root /home/wsx/code/lerobot_robot_ufactory/datasets/xarm7_manual_replay \
+  --robot-ip 192.168.1.245
+```
+
+无人值守运行时可以使用 `--yes` 跳过确认。执行前请确认机械臂工作空间无障碍物，且数据中的初始姿态与当前设备匹配。
+
 ### 5. Lerobot训练
 
 采集数据后，使用 LeRobot 训练管道进行模仿学习训练。

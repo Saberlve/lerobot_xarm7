@@ -25,6 +25,7 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.24",
+    "pyarrow>=14.0",
     "pyyaml",
     "lerobot[intelrealsense]==0.4.3",
     "xarm-python-sdk",
@@ -35,6 +36,7 @@ dependencies = [
 uf-robot-teleop = "lerobot_robot_ufactory.scripts.uf_robot_teleop:main"
 uf-lerobot-record = "lerobot_robot_ufactory.scripts.uf_lerobot_record:main"
 uf-lerobot-eval = "lerobot_robot_ufactory.scripts.uf_lerobot_eval:main"
+uf-lerobot-replay = "lerobot_robot_ufactory.scripts.uf_lerobot_replay:main"
 uf-vive-calibrate = "lerobot_robot_ufactory.scripts.vive_calibrate:main"
 uf-camera-view = "lerobot_robot_ufactory.scripts.uf_camera_view:main"
 uf-camera-test = "lerobot_robot_ufactory.scripts.uf_camera_test:main"
