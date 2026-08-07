@@ -15,11 +15,16 @@ robot:
   # Whether to record joint velocities in observations.
   observe_joint_vel: false
 
-  # Camera definitions; leave empty when no cameras are used.
-  cameras: {}
+  cameras:
+    camera:
+      type: intelrealsense
+      serial_number_or_name: "148522072685"
+      width: 640
+      height: 480
+      fps: 30
 
 dataset:
-  root: "/home/uf/Data/lerobot_datas/record/ufactory/xarm7_manual_datas"
+  root: "/home/wsx/code/lerobot_robot_ufactory/xarm7_manual_datas"
   repo_id: "ufactory/xarm7_manual_datas"
   # Task description stored with each recorded frame.
   single_task: "Describe the task being demonstrated."

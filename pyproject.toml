@@ -34,7 +34,6 @@ dependencies = [
 [project.scripts]
 uf-robot-teleop = "lerobot_robot_ufactory.scripts.uf_robot_teleop:main"
 uf-lerobot-record = "lerobot_robot_ufactory.scripts.uf_lerobot_record:main"
-uf-xarm-manual-mode = "lerobot_robot_ufactory.scripts.uf_xarm_manual_mode:main"
 uf-lerobot-eval = "lerobot_robot_ufactory.scripts.uf_lerobot_eval:main"
 uf-vive-calibrate = "lerobot_robot_ufactory.scripts.vive_calibrate:main"
 uf-camera-view = "lerobot_robot_ufactory.scripts.uf_camera_view:main"
