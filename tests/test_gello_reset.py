@@ -19,6 +19,9 @@ class FakeDriver:
         if self.follow_commands:
             self.positions = self.commands[-1].copy()
 
+    def close(self):
+        pass
+
 
 class FakeGelloRobot:
     def __init__(self, follow_commands=True):
@@ -35,8 +38,10 @@ class FakeGelloRobot:
 
 def make_teleop(robot):
     teleop = gello_module.GelloTeleop.__new__(gello_module.GelloTeleop)
+    teleop.id = "test_gello"
     teleop._is_connected = True
     teleop._teleop_enabled = False
+    teleop._needs_alignment = True
     teleop.dof = 2
     teleop.gello_agent = type("FakeAgent", (), {"_robot": robot})()
     return teleop
@@ -65,6 +70,7 @@ def test_gello_reset_moves_to_robot_observation_and_disables_torque(monkeypatch)
     assert np.allclose(robot._driver.positions, [0.4, 0.6, 0.5])
     assert robot._last_pos is None
     assert teleop._teleop_enabled is False
+    assert teleop._needs_alignment is False
 
 
 def test_gello_reset_failure_leaves_torque_off_and_teleop_disabled(monkeypatch):
@@ -79,6 +85,33 @@ def test_gello_reset_failure_leaves_torque_off_and_teleop_disabled(monkeypatch):
 
     assert robot.torque_calls == [True, False]
     assert teleop._teleop_enabled is False
+
+
+def test_gello_enable_after_pause_realigns_before_output(monkeypatch):
+    patch_clock(monkeypatch)
+    robot = FakeGelloRobot()
+    teleop = make_teleop(robot)
+
+    teleop.set_teleop_enabled(
+        True,
+        {"J1.pos": 0.3, "J2.pos": -0.4, "gripper.pos": 0.5},
+    )
+
+    assert robot.torque_calls == [True, False]
+    assert np.allclose(robot._driver.positions, [0.4, 0.6, 0.5])
+    assert teleop._teleop_enabled is True
+
+
+def test_gello_disconnect_closes_driver():
+    robot = FakeGelloRobot()
+    closed = []
+    robot._driver.close = lambda: closed.append(True)
+    teleop = make_teleop(robot)
+    teleop.disconnect()
+
+    assert closed == [True]
+    assert robot.torque_calls == [False]
+    assert teleop._is_connected is False
 
 
 def test_recording_reset_disables_before_robot_and_enables_after_alignment():

@@ -28,6 +28,7 @@ class GelloTeleop(UFBaseTeleop):
         self.config = config
         self._is_connected = False
         self._teleop_enabled = False
+        self._needs_alignment = True
         self._is_calibrated = True # CHECK!!
 
         from gello.dynamixel.driver import DynamixelDriver
@@ -95,17 +96,22 @@ class GelloTeleop(UFBaseTeleop):
             raise DeviceAlreadyConnectedError(f"{self} already connected")
         from gello.agents.gello_agent import GelloAgent
 
-        self.gello_agent = GelloAgent(port=self.config.port, dynamixel_config=self._dynamixel_robo_config)
-        self.gello_agent._robot.set_torque_mode(False)
-        if not self._is_calibrated and calibrate:
-            logger.info(
-                "Mismatch between calibration values in the motor and the calibration file or no calibration file found"
-            )
-            self.calibrate()
+        try:
+            self.gello_agent = GelloAgent(port=self.config.port, dynamixel_config=self._dynamixel_robo_config)
+            self.gello_agent._robot.set_torque_mode(False)
+            if not self._is_calibrated and calibrate:
+                logger.info(
+                    "Mismatch between calibration values in the motor and the calibration file or no calibration file found"
+                )
+                self.calibrate()
 
-        self.configure()
-        self._is_connected = True
-        super().connect(calibrate)
+            self.configure()
+            self._is_connected = True
+            super().connect(calibrate)
+        except BaseException:
+            self._is_connected = False
+            self._close_gello_driver()
+            raise
         logger.info(f"{self} connected.")
 
     @property
@@ -175,11 +181,16 @@ class GelloTeleop(UFBaseTeleop):
             gello_robot.set_torque_mode(False)
             gello_robot._last_pos = None
 
+        self._needs_alignment = False
+
     def set_teleop_enabled(self, enabled: bool, obs=None):
         if enabled and not self._is_connected:
             raise DeviceNotConnectedError("Gello teleop is not connected")
+        if enabled and self._needs_alignment and obs is not None:
+            self.reset_to_robot_observation(obs)
         if not enabled and self._is_connected and hasattr(self, "gello_agent"):
             self.gello_agent._robot.set_torque_mode(False)
+            self._needs_alignment = True
         self._teleop_enabled = enabled
         logger.info("Gello teleoperation %s", "enabled" if enabled else "disabled")
 
@@ -201,9 +212,20 @@ class GelloTeleop(UFBaseTeleop):
     def send_feedback(self, feedback: dict[str, float]) -> None:
         raise NotImplementedError
 
+    def _close_gello_driver(self) -> None:
+        if not hasattr(self, "gello_agent"):
+            return
+        gello_robot = self.gello_agent._robot
+        try:
+            gello_robot.set_torque_mode(False)
+        finally:
+            gello_robot._driver.close()
+
     def disconnect(self) -> None:
-        if hasattr(self, "gello_agent"):
-            self.gello_agent._robot.set_torque_mode(False)
-        self._is_connected = False
-        self._teleop_enabled = False
+        try:
+            self._close_gello_driver()
+        finally:
+            self._is_connected = False
+            self._teleop_enabled = False
+            self._needs_alignment = True
         logger.info(f"{self} disconnected.")
