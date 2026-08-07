@@ -111,10 +111,11 @@ class PikaTeleop(UFBaseTeleop, Thread):
                 self._teleop_enabled = True
                 print(f'[{self.prefix}PIKA] Teleoperation is start')
             else:
-                obs = self._last_action
-                self._last_robot_pose = [obs[f"{self.prefix}pose.x"], obs[f"{self.prefix}pose.y"], obs[f"{self.prefix}pose.z"], obs[f"{self.prefix}pose.rx"], obs[f"{self.prefix}pose.ry"], obs[f"{self.prefix}pose.rz"]]
-                if self.config.use_gripper:
-                    self._last_gripper_pos = obs[f"{self.prefix}gripper.pos"]
+                if self._last_action is not None:
+                    obs = self._last_action
+                    self._last_robot_pose = [obs[f"{self.prefix}pose.x"], obs[f"{self.prefix}pose.y"], obs[f"{self.prefix}pose.z"], obs[f"{self.prefix}pose.rx"], obs[f"{self.prefix}pose.ry"], obs[f"{self.prefix}pose.rz"]]
+                    if self.config.use_gripper:
+                        self._last_gripper_pos = obs[f"{self.prefix}gripper.pos"]
                 self._teleop_enabled = False
                 self._last_action = None
                 print(f'[{self.prefix}PIKA] Teleoperation has paused')

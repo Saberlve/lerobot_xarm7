@@ -9,6 +9,7 @@ from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 from lerobot_robot_ufactory.scripts import uf_lerobot_record as record_module
 from lerobot_robot_ufactory.scripts.uf_lerobot_record import (
     _manual_action_from_observation,
+    _prepare_recording_episode,
     get_cfg,
 )
 
@@ -20,6 +21,7 @@ class FakeXArm:
         self.axis = 6
         self.error_code = 0
         self.mode = 0
+        self.initial_point = [0.0, -30.0, 0.0, 0.0, 0.0, 30.0]
         self.calls = []
 
     def motion_enable(self, **kwargs):
@@ -39,6 +41,14 @@ class FakeXArm:
 
     def set_state(self, state):
         self.calls.append(("set_state", state))
+        return 0
+
+    def get_initial_point(self):
+        self.calls.append(("get_initial_point",))
+        return 0, self.initial_point
+
+    def set_servo_angle(self, **kwargs):
+        self.calls.append(("set_servo_angle", kwargs))
         return 0
 
     def get_err_warn_code(self):
@@ -72,7 +82,6 @@ def test_manual_mode_robot_enters_teaching_mode_without_sending_actions(monkeypa
         robot_dof=6,
         control_space="joint",
         gripper_type=0,
-        start_joints=(),
         manual_mode=True,
         teach_sensitivity=4,
     )
@@ -81,10 +90,26 @@ def test_manual_mode_robot_enters_teaching_mode_without_sending_actions(monkeypa
     robot.connect()
     assert arm.mode == 2
     assert ("set_teach_sensitivity", 4) in arm.calls
+    assert robot._initial_point == arm.initial_point
+    assert not any(call[0] == "set_servo_angle" for call in arm.calls)
+
+    robot.reset_to_initial()
+    reset_calls = [call for call in arm.calls if call[0] == "set_servo_angle"]
+    assert reset_calls == [
+        (
+            "set_servo_angle",
+            {
+                "angle": arm.initial_point,
+                "speed": 60,
+                "is_radian": False,
+                "wait": True,
+            },
+        )
+    ]
+    assert arm.mode == 2
 
     action = {"J1.pos": 1.0}
     assert robot.send_action(action) is action
-    assert not any(call[0] == "set_servo_angle" for call in arm.calls)
 
     observation = robot.get_observation()
     assert observation["J1.pos"] == 0.0
@@ -93,6 +118,42 @@ def test_manual_mode_robot_enters_teaching_mode_without_sending_actions(monkeypa
     robot.disconnect()
     assert arm.mode == 0
     assert ("disconnect",) in arm.calls
+
+
+def test_robot_reset_uses_sdk_initial_point_in_normal_mode(monkeypatch, tmp_path):
+    from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
+
+    arm = FakeXArm("192.168.1.245")
+    monkeypatch.setattr(uf_robot_module, "XArmAPI", lambda robot_ip: arm)
+    monkeypatch.setattr(uf_robot_module.time, "sleep", lambda _: None)
+
+    config = UFRobotConfig(
+        id="test_normal_robot",
+        calibration_dir=tmp_path,
+        robot_ip=arm.robot_ip,
+        robot_dof=6,
+        control_space="joint",
+        gripper_type=0,
+    )
+    robot = uf_robot_module.UFRobot(config)
+    assert not hasattr(config, "start_joints")
+    assert not hasattr(config, "start_tcp_pose")
+    robot.connect()
+
+    reset_calls = [call for call in arm.calls if call[0] == "set_servo_angle"]
+    assert reset_calls == [
+        (
+            "set_servo_angle",
+            {
+                "angle": arm.initial_point,
+                "speed": 60,
+                "is_radian": False,
+                "wait": True,
+            },
+        )
+    ]
+
+    robot.disconnect()
 
 
 def test_manual_mode_config_rejects_cartesian_control(tmp_path):
@@ -201,3 +262,18 @@ def test_manual_record_loop_writes_actual_state_as_action(tmp_path):
 
     dataset.save_episode()
     dataset.finalize()
+
+
+def test_manual_recording_episode_resets_before_recording():
+    class FakeRobot:
+        def __init__(self):
+            self.calls = []
+
+        def reset_to_initial(self):
+            self.calls.append("reset_to_initial")
+
+    robot = FakeRobot()
+
+    _prepare_recording_episode(robot, teleop=None, is_uf_teleop=False, manual_mode=True)
+
+    assert robot.calls == ["reset_to_initial"]

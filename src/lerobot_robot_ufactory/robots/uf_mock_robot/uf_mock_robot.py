@@ -93,6 +93,9 @@ class UFMockRobot(Robot):
     def configure(self) -> None:
         pass
 
+    def reset_to_initial(self) -> None:
+        pass
+
     def calibrate(self) -> None:
         self._is_calibrated = True
         pass # CHECK! currently No-op
@@ -128,6 +131,5 @@ class UFMockRobot(Robot):
     def is_connected(self) -> bool:
         """Whether the robot is currently calibrated or not. Should be always `True` if not applicable"""
         return self._is_connected
-
 
 

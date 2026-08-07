@@ -17,6 +17,7 @@ from xarm.core.utils import convert
 
 ## Configurations:
 INIT_SYNC_JOINT_VELOCITY_RAD = 0.2
+ROBOT_RESET_SPEED_DEG = 60
 
 CARTESIAN_OBS_KEYS = [
     "pose.x", "pose.y", "pose.z", "pose.rx", "pose.ry", "pose.rz",
@@ -75,6 +76,7 @@ class UFRobot(Robot, Thread):
         self._control_space = self.config.control_space
 
         self.real_arm = None
+        self._initial_point = None
         cameras_args = self.config.cameras_args or {}
         self.camera_width = cameras_args.get('w', 0)
         self.camera_height = cameras_args.get('h', 0)
@@ -89,15 +91,6 @@ class UFRobot(Robot, Thread):
 
         self._max_joint_velocity = math.radians(self.config.max_joint_velocity)
         self._max_linear_velocity = self.config.max_linear_velocity
-
-        if self.config.start_tcp_pose and len(self.config.start_tcp_pose) >= 6:
-            self._start_tcp_pose = list(self.config.start_tcp_pose[:3]) + list(map(math.radians, self.config.start_tcp_pose[3:6]))
-        else:
-            self._start_tcp_pose = None
-        if self.config.start_joints:
-            self._start_joints = list(map(math.radians, self.config.start_joints))
-        else:
-            self._start_joints = None
 
         self.report_stop_event = Event()
         self._rt_report_normal = False
@@ -193,6 +186,13 @@ class UFRobot(Robot, Thread):
             self._is_connected = False
             raise ConnectionError()
 
+        code, initial_point = self.real_arm.get_initial_point()
+        if code != 0:
+            raise RuntimeError(f"get_initial_point failed, code={code}")
+        if initial_point is None or len(initial_point) < self._dof:
+            raise RuntimeError(f"Invalid initial point returned by xArm: {initial_point}")
+        self._initial_point = list(initial_point[:self._dof])
+
         for cam in self.cameras.values():
             cam.connect()
             self._is_connected = self._is_connected and cam.is_connected
@@ -206,13 +206,35 @@ class UFRobot(Robot, Thread):
         #         print('Could not connect to pika gripper.')
         #         raise ConnectionError()
 
-        self.configure()
+        if self.config.manual_mode:
+            self.configure()
+        else:
+            self.reset_to_initial()
         if calibrate:  
             self.calibrate()
 
         self.real_arm.set_linear_spd_limit_factor(2.0)
 
         self._is_connected = True
+
+    def reset_to_initial(self) -> None:
+        if not self._is_connected or self.real_arm is None:
+            raise ConnectionError("UF Robot is not connected")
+        if self._initial_point is None:
+            raise RuntimeError("xArm initial point has not been loaded")
+
+        self.real_arm.set_mode(0)
+        self.real_arm.set_state(0)
+        code = self.real_arm.set_servo_angle(
+            angle=self._initial_point,
+            speed=ROBOT_RESET_SPEED_DEG,
+            is_radian=False,
+            wait=True,
+        )
+        if code != 0:
+            raise RuntimeError(f"Failed to move to xArm initial point, code={code}")
+
+        self.configure()
 
     def configure(self) -> None:
         self.real_arm.motion_enable()
@@ -277,13 +299,6 @@ class UFRobot(Robot, Thread):
             if err_warn[0] != 0:
                 raise RuntimeError(f"Failed to set correct state to Gripper! Controller Error code: {err_warn[0]} !")
         
-        if self._start_joints is not None:
-            self.real_arm.set_servo_angle(angle=self._start_joints, is_radian=True, wait=True)
-        if self._start_tcp_pose is not None:
-            self.real_arm.set_position(*self._start_tcp_pose, speed=100, is_radian=True, wait=True)
-            _, self._start_joints = self.real_arm.get_servo_angle(is_radian=True)
-            self._start_tcp_pose = None
-
         if self._control_space == "joint":
             self.real_arm.set_mode(6)
         elif self._control_space == "cartesian":

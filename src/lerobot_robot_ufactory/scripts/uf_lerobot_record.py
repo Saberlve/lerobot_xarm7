@@ -408,6 +408,23 @@ def record_loop(
         timestamp = time.perf_counter() - start_episode_t
 
 
+def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode):
+    if is_uf_teleop:
+        # Stop teleop output before handing control to the xArm reset motion.
+        teleop.set_teleop_enabled(False)
+
+    if is_uf_teleop or manual_mode:
+        reset = getattr(robot, "reset_to_initial", None)
+        if reset is None:
+            reset = robot.configure
+        reset()
+
+    if is_uf_teleop:
+        obs = robot.get_observation()
+        teleop.reset_to_robot_observation(obs)
+        teleop.set_teleop_enabled(True, obs)
+
+
 def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
@@ -540,8 +557,6 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
         print('⌨   [ESC] Exit  [Space] Start  [←] Reset  [→] Save')
     else:
         input('⌨   Press Enter to start record >>> ')
-        if is_uf_teleop:
-            teleop.set_teleop_enabled(True)
         is_recorded = True
         print('\n********** Episode Record Loop Start **********')
 
@@ -575,10 +590,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                 events["rerecord_episode"] = False
                 events["exit_early"] = False
                 if is_uf_teleop or manual_mode:
-                    robot.configure()
-                    if is_uf_teleop:
-                        obs = robot.get_observation()
-                        teleop.set_teleop_enabled(True, obs)
+                    _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode)
                 log_say(f"Recording episode {_current_episode_index(dataset)}", cfg.play_sounds)
                 record_loop(
                     robot=robot,

@@ -61,7 +61,20 @@ def teleop_loop(cfg: TeleopConfig):
     is_evt = not is_headless()
     is_uf_teleop = isinstance(teleop, UFBaseTeleop)
 
-    is_reset = False
+    def reset_uf_control():
+        if is_uf_teleop:
+            # Stop teleop output before handing control to the xArm reset motion.
+            teleop.set_teleop_enabled(False)
+        reset = getattr(robot, "reset_to_initial", None)
+        if reset is None:
+            reset = robot.configure
+        reset()
+        if is_uf_teleop:
+            obs = robot.get_observation()
+            teleop.reset_to_robot_observation(obs)
+            teleop.set_teleop_enabled(True, obs)
+
+    is_reset = is_uf_teleop
     is_paused = True
     events = {"exit": False}
     listener = None
@@ -105,12 +118,14 @@ def teleop_loop(cfg: TeleopConfig):
 
         listener, events = init_keyboard_listener(events=events, on_press=on_press, on_release=on_release)
         print("\n********** Teleop Control Loop Start **********")
-        print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
+        if is_uf_teleop:
+            print('⌨   [ESC] Exit  [Space] Reset / Start  [←] Reset')
+        else:
+            print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
     else:
         input('⌨   Press Enter to start teleop >>> ')
         if is_uf_teleop:
-            obs = robot.get_observation()
-            teleop.set_teleop_enabled(True, obs)
+            reset_uf_control()
         is_paused = False
         is_reset = False
         print("\n********** Teleop Control Loop Start **********")
@@ -143,10 +158,10 @@ def teleop_loop(cfg: TeleopConfig):
                     print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
                 else:
                     if is_reset:
+                        reset_uf_control()
                         is_reset = False
-                        robot.configure()
                     # print('========== Teleop is start ==========')
-                    if is_uf_teleop:
+                    elif is_uf_teleop:
                         obs = robot.get_observation()
                         teleop.set_teleop_enabled(True, obs)
                     print('⌨   [ESC] Exit  [Space] Pause  [←] Reset')

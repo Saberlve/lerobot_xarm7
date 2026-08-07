@@ -57,6 +57,10 @@ class MultipleUFMockRobot(Robot):
         for robot in self.robots.values():
             robot.configure()
 
+    def reset_to_initial(self) -> None:
+        for robot in self.robots.values():
+            robot.reset_to_initial()
+
     def disconnect(self) -> None:
         for robot in self.robots.values():
             robot.disconnect()

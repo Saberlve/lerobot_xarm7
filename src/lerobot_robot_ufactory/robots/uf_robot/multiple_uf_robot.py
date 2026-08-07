@@ -101,6 +101,30 @@ class MultipleUFRobot(Robot):
             for robot in self.robots.values():
                 robot.configure()
 
+    def reset_to_initial(self) -> None:
+        """Reset every arm to its SDK-configured initial point."""
+        if self._is_async_configure:
+            errors = []
+
+            def reset_robot(robot):
+                try:
+                    robot.reset_to_initial()
+                except BaseException as exc:
+                    errors.append(exc)
+
+            threads = []
+            for robot in self.robots.values():
+                thread = threading.Thread(target=reset_robot, args=(robot,), daemon=True)
+                threads.append(thread)
+                thread.start()
+            for thread in threads:
+                thread.join()
+            if errors:
+                raise errors[0]
+        else:
+            for robot in self.robots.values():
+                robot.reset_to_initial()
+
     def disconnect(self) -> None:
         for robot in self.robots.values():
             robot.disconnect()

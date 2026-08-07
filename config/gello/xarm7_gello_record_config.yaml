@@ -5,14 +5,16 @@ robot:
   control_space: "joint"
   robot_ip: "192.168.1.245"
   gripper_type: 1
-  start_joints: [0, 0, 0, 90, 0, 90, 0]
+  # Redundant args, indicating the initial pose of xarm7. Set by 192.168.1.245:18333
+  # start_joints: [0, -30, 0, 0, 0, 30, 0]
 
 # make sure to edit with your correct configurations!
 teleop:
   type: uf::gello_teleop
   id: "gello_teleop"
   port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAJZYC7-if00-port0"
-  start_joints: [0, 0, 0, 90, 0, 90, 0]
+  # GELLO calibration reference; matches the xArm SDK initial point.
+  start_joints: [0, -30, 0, 0, 0, 30, 0]
 
 dataset:
   # root of local repo: /home/<user_name>/.cache/huggingface/lerobot (default)

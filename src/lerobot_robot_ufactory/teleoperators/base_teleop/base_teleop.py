@@ -22,3 +22,7 @@ class UFBaseTeleop(Teleoperator):
         当enabled为True且obs不为None时, 顺便设置机械臂初始位置映射
         """
         pass
+
+    def reset_to_robot_observation(self, obs):
+        """Align a physical teleoperator with the robot after robot reset."""
+        pass

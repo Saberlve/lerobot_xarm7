@@ -6,8 +6,6 @@ robot:
   robot_ip: "192.168.1.83"
   gripper_type: 2
   max_linear_velocity: 250
-  start_joints: [0, -14.8, -52.6, 0, 67.4, 0]
-  start_tcp_pose: [400, 0, 400, 180, 0, 0]
   cameras:
     fisheye:
       type: opencv

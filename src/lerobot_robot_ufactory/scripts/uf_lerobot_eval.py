@@ -232,7 +232,10 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
 
     # with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
     while True:
-        robot.configure()
+        reset = getattr(robot, "reset_to_initial", None)
+        if reset is None:
+            reset = robot.configure
+        reset()
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()

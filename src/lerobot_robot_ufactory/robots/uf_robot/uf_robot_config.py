@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Tuple
 from lerobot.cameras import CameraConfig
 from lerobot.robots import RobotConfig
 
@@ -20,8 +19,8 @@ class UFRobotConfig(RobotConfig):
     observe_joint_vel: bool = False # only effective in joint control mode
     manual_mode: bool = False  # xArm joint teaching mode; records state without sending actions
     teach_sensitivity: int | None = None  # xArm teaching sensitivity, valid range: 1-5
-    start_joints: Tuple[float, ...] = (0, 0, 0, 90, 0, 90, 0) # °
-    start_tcp_pose: Tuple[float, ...] = None # [x, y, z, roll(°), pitch(°), yaw(°)]
+    # start_joints and start_tcp_pose are intentionally disabled.
+    # Reset uses the xArm SDK initial_point instead of configuration poses.
     max_joint_velocity: int = 90   # °/s, only effective in joint control mode
     max_linear_velocity: int = 200 # mm/s, only effective in cartesian control mode
     no_action: bool = False # only for debug
