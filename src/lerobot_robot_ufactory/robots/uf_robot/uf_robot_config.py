@@ -17,7 +17,8 @@ class UFRobotConfig(RobotConfig):
     gripper_speed: int = -1     # auto
     gripper_force: int = -1     # auto
     observe_joint_vel: bool = False # only effective in joint control mode
-    manual_mode: bool = False  # xArm joint teaching mode; records state without sending actions
+    manual_mode: bool = False  # xArm joint teaching mode; records state and optional gripper actions
+    manual_gripper_speed: float = 0.5  # normalized gripper position per second in manual mode
     teach_sensitivity: int | None = None  # xArm teaching sensitivity, valid range: 1-5
     # start_joints and start_tcp_pose are intentionally disabled.
     # Reset uses the xArm SDK initial_point instead of configuration poses.
@@ -33,3 +34,5 @@ class UFRobotConfig(RobotConfig):
                 raise ValueError("manual_mode requires control_space='joint'")
             if self.teach_sensitivity is not None and not 1 <= self.teach_sensitivity <= 5:
                 raise ValueError("teach_sensitivity must be between 1 and 5")
+        if self.manual_gripper_speed < 0:
+            raise ValueError("manual_gripper_speed must be non-negative")

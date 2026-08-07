@@ -243,6 +243,13 @@ class UFRobot(Robot, Thread):
         self.real_arm.set_state(0)  # set to start state
         time.sleep(0.5)
 
+        _, err_warn = self.real_arm.get_err_warn_code()
+        if err_warn[0] != 0:
+            raise RuntimeError(f"Failed to set correct state to UF robot! Controller Error code: {err_warn[0]} !")
+
+        if self._gripper_type > GripperType.NoGripper:
+            self._configure_gripper(move_to_open=not self.config.manual_mode)
+
         if self.config.manual_mode:
             if self.config.teach_sensitivity is not None:
                 code = self.real_arm.set_teach_sensitivity(self.config.teach_sensitivity)
@@ -263,42 +270,6 @@ class UFRobot(Robot, Thread):
                 )
             return
 
-        _, err_warn = self.real_arm.get_err_warn_code()
-        if err_warn[0] != 0:
-            raise RuntimeError(f"Failed to set correct state to UF robot! Controller Error code: {err_warn[0]} !")
-
-        if self._gripper_type > GripperType.NoGripper:
-            self.real_arm._arm._baud_checkset = True
-            if self._gripper_type == GripperType.xArmGripper:
-                self.real_arm.set_gripper_enable(True)
-                self.real_arm.set_gripper_mode(0)
-                self.real_arm.set_gripper_speed(self._gripper_param.speed)
-                self.real_arm.set_gripper_position(self._gripper_param.open_pos)
-            elif self._gripper_type == GripperType.xArmGripperG2:
-                self.real_arm.set_gripper_enable(True)
-                self.real_arm.set_gripper_mode(0)
-                self.real_arm.set_gripper_g2_position(self._gripper_param.open_pos)
-            elif self._gripper_type == GripperType.BioGripperG2:
-                _, mode = self.real_arm.get_bio_gripper_control_mode()
-                if mode != 1:
-                    self.real_arm.set_bio_gripper_control_mode(1)
-                self.real_arm.set_bio_gripper_enable(True)
-                self.real_arm.open_bio_gripper()
-            elif self._gripper_type == GripperType.PikaGripper:
-                self.pika_gripper.enable()
-                time.sleep(0.5)
-                self.pika_gripper.set_gripper_distance(self._gripper_param.open_pos)
-            elif self._gripper_type == GripperType.RobotiqGripper:
-                self.real_arm.robotiq_reset()
-                self.real_arm.robotiq_set_activate(wait=True)
-                self.real_arm.robotiq_set_position(self._gripper_param.open_pos, wait=True)
-            self._gripper_param.grippos = self._gripper_param.open_pos
-            self._gripper_param.gripper_norm = self._gripper_param.open_pos
-            self.real_arm._arm._baud_checkset = False
-            _, err_warn = self.real_arm.get_err_warn_code()
-            if err_warn[0] != 0:
-                raise RuntimeError(f"Failed to set correct state to Gripper! Controller Error code: {err_warn[0]} !")
-        
         if self._control_space == "joint":
             self.real_arm.set_mode(6)
         elif self._control_space == "cartesian":
@@ -315,6 +286,49 @@ class UFRobot(Robot, Thread):
         if self._use_rt_report and not self._rt_report_normal:
             self.start()
         time.sleep(0.2)
+
+    def _configure_gripper(self, move_to_open: bool) -> None:
+        """Initialize the configured gripper without moving it in manual mode."""
+        self.real_arm._arm._baud_checkset = True
+        try:
+            if self._gripper_type == GripperType.xArmGripper:
+                self.real_arm.set_gripper_enable(True)
+                self.real_arm.set_gripper_mode(0)
+                self.real_arm.set_gripper_speed(self._gripper_param.speed)
+                if move_to_open:
+                    self.real_arm.set_gripper_position(self._gripper_param.open_pos)
+            elif self._gripper_type == GripperType.xArmGripperG2:
+                self.real_arm.set_gripper_enable(True)
+                self.real_arm.set_gripper_mode(0)
+                if move_to_open:
+                    self.real_arm.set_gripper_g2_position(self._gripper_param.open_pos)
+            elif self._gripper_type == GripperType.BioGripperG2:
+                _, mode = self.real_arm.get_bio_gripper_control_mode()
+                if mode != 1:
+                    self.real_arm.set_bio_gripper_control_mode(1)
+                self.real_arm.set_bio_gripper_enable(True)
+                if move_to_open:
+                    self.real_arm.open_bio_gripper()
+            elif self._gripper_type == GripperType.PikaGripper:
+                self.pika_gripper.enable()
+                if move_to_open:
+                    time.sleep(0.5)
+                    self.pika_gripper.set_gripper_distance(self._gripper_param.open_pos)
+            elif self._gripper_type == GripperType.RobotiqGripper:
+                self.real_arm.robotiq_reset()
+                self.real_arm.robotiq_set_activate(wait=True)
+                if move_to_open:
+                    self.real_arm.robotiq_set_position(self._gripper_param.open_pos, wait=True)
+        finally:
+            self.real_arm._arm._baud_checkset = False
+
+        _, err_warn = self.real_arm.get_err_warn_code()
+        if err_warn[0] != 0:
+            raise RuntimeError(f"Failed to set correct state to Gripper! Controller Error code: {err_warn[0]} !")
+
+        if move_to_open:
+            self._gripper_param.grippos = self._gripper_param.open_pos
+            self._gripper_param.gripper_norm = 0.0
 
     def calibrate(self) -> None:
         self._is_calibrated = True
@@ -385,10 +399,49 @@ class UFRobot(Robot, Thread):
 
         return obs_dict
 
+    def _send_gripper_action(self, gripper_norm: float) -> None:
+        gripper_norm = min(max(float(gripper_norm), 0.0), 1.0)
+        if self._gripper_type == GripperType.xArmGripper:
+            grippos = self._gripper_param.get_grippos(gripper_norm)
+            modbus_datas = [0x08, 0x10, 0x07, 0x00, 0x00, 0x02, 0x04]
+            modbus_datas.extend(list(struct.pack('>i', grippos)))
+            self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+        elif self._gripper_type == GripperType.xArmGripperG2:
+            grippos = self._gripper_param.get_grippos(gripper_norm)
+            grippos = int((math.degrees(math.asin((grippos - 16) / 110)) + 8.33) * 18.28)
+            modbus_datas = [0x08, 0x10, 0x0C, 0x00, 0x00, 0x05, 0x0A, 0x00, 0x01]
+            modbus_datas.extend(list(struct.pack('>h', self._gripper_param.speed)))
+            modbus_datas.extend(list(struct.pack('>h', self._gripper_param.force)))
+            modbus_datas.extend(list(struct.pack('>i', grippos)))
+            self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+        elif self._gripper_type == GripperType.BioGripperG2:
+            grippos = self._gripper_param.get_grippos(gripper_norm)
+            grippos = int(grippos * 3.7342 - 265.13)
+            modbus_datas = [0x08, 0x10, 0x0C, 0x00, 0x00, 0x05, 0x0A, 0x00, 0x01]
+            modbus_datas.extend(list(struct.pack('>h', self._gripper_param.speed)))
+            modbus_datas.extend(list(struct.pack('>h', self._gripper_param.force)))
+            modbus_datas.extend(list(struct.pack('>i', grippos)))
+            self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+        elif self._gripper_type == GripperType.PikaGripper:
+            grippos = self._gripper_param.get_grippos(gripper_norm)
+            self.pika_gripper.set_gripper_distance(grippos)
+        elif self._gripper_type == GripperType.RobotiqGripper:
+            grippos = self._gripper_param.get_grippos(gripper_norm)
+            modbus_datas = [0x09, 0x10, 0x03, 0xE8, 0x00, 0x03, 0x06, 0x09, 0x00, 0x00, grippos, self._gripper_param.speed, self._gripper_param.force]
+            self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+
     def send_action(self, action: dict) -> np.ndarray:
         if not self._is_connected:
             raise ConnectionError()
         if self.config.manual_mode:
+            gripper_key = f"{self.prefix}gripper.pos"
+            if (
+                self._gripper_type > GripperType.NoGripper
+                and gripper_key in action
+                and self.real_arm.error_code == 0
+                and not self.config.no_action
+            ):
+                self._send_gripper_action(action[gripper_key])
             return action
         if self.real_arm.error_code != 0:
             return action
@@ -428,40 +481,7 @@ class UFRobot(Robot, Thread):
         if self._cmd_cnt < 99999:
             self._cmd_cnt += 1 # CHECK!! possibility of overflow?
         if self._gripper_type > GripperType.NoGripper:
-            gripper_norm = action[f"{self.prefix}gripper.pos"]
-            if self._gripper_type == GripperType.xArmGripper:
-                grippos = self._gripper_param.get_grippos(gripper_norm)
-                modbus_datas = [0x08, 0x10, 0x07, 0x00, 0x00, 0x02, 0x04]
-                modbus_datas.extend(list(struct.pack('>i', grippos)))
-                self.real_arm.getset_tgpio_modbus_data(modbus_datas)
-                # self.real_arm.set_gripper_position(grippos, wait=False, wait_motion=False) # CHECK! the command unit
-            elif self._gripper_type == GripperType.xArmGripperG2:
-                grippos = self._gripper_param.get_grippos(gripper_norm)
-                grippos = int((math.degrees(math.asin((grippos - 16) / 110)) + 8.33) * 18.28)
-                modbus_datas = [0x08, 0x10, 0x0C, 0x00, 0x00, 0x05, 0x0A, 0x00, 0x01]
-                modbus_datas.extend(list(struct.pack('>h', self._gripper_param.speed)))
-                modbus_datas.extend(list(struct.pack('>h', self._gripper_param.force)))
-                modbus_datas.extend(list(struct.pack('>i', grippos)))
-                self.real_arm.getset_tgpio_modbus_data(modbus_datas)
-            elif self._gripper_type == GripperType.BioGripperG2:
-                grippos = self._gripper_param.get_grippos(gripper_norm)
-                grippos = int(grippos * 3.7342 - 265.13)
-                modbus_datas = [0x08, 0x10, 0x0C, 0x00, 0x00, 0x05, 0x0A, 0x00, 0x01]
-                modbus_datas.extend(list(struct.pack('>h', self._gripper_param.speed)))
-                modbus_datas.extend(list(struct.pack('>h', self._gripper_param.force)))
-                modbus_datas.extend(list(struct.pack('>i', grippos)))
-                self.real_arm.getset_tgpio_modbus_data(modbus_datas)
-            elif self._gripper_type == GripperType.PikaGripper:
-                grippos = self._gripper_param.get_grippos(gripper_norm)
-                self.pika_gripper.set_gripper_distance(grippos)
-            elif self._gripper_type == GripperType.RobotiqGripper:
-                grippos = self._gripper_param.get_grippos(gripper_norm)
-                modbus_datas = [0x09, 0x10, 0x03, 0xE8, 0x00, 0x03, 0x06, 0x09, 0x00, 0x00, grippos, self._gripper_param.speed, self._gripper_param.force]
-                self.real_arm.getset_tgpio_modbus_data(modbus_datas)
-                # self.real_arm.robotiq_set_position(
-                #     grippos, speed=self._gripper_param.speed, force=self._gripper_param.force,
-                #     wait=False, wait_motion=False,
-                # )
+            self._send_gripper_action(action[f"{self.prefix}gripper.pos"])
 
         self.logs["write_pos_dt_s"] = time.perf_counter() - before_write_t
         return action

@@ -8,6 +8,8 @@ robot:
   # Gripper type: 1 is the xArm gripper.
   gripper_type: 1
   manual_mode: true
+  # Normalized gripper position change per second while holding C/O.
+  manual_gripper_speed: 0.5
   # Teaching sensitivity, valid range is 1-5, affecting vel of the robot.
   teach_sensitivity: 3
   # Whether to record joint velocities in observations.

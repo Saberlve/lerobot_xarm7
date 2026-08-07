@@ -9,6 +9,8 @@ from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 from lerobot_robot_ufactory.scripts import uf_lerobot_record as record_module
 from lerobot_robot_ufactory.scripts.uf_lerobot_record import (
     _manual_action_from_observation,
+    _update_manual_gripper_key_state,
+    _update_manual_gripper_target,
     _prepare_recording_episode,
     get_cfg,
 )
@@ -22,6 +24,8 @@ class FakeXArm:
         self.error_code = 0
         self.mode = 0
         self.initial_point = [0.0, -30.0, 0.0, 0.0, 0.0, 30.0]
+        self._arm = type("FakeArmTransport", (), {"_baud_checkset": False})()
+        self.gripper_position = 800
         self.calls = []
 
     def motion_enable(self, **kwargs):
@@ -57,6 +61,31 @@ class FakeXArm:
     def set_linear_spd_limit_factor(self, factor):
         self.calls.append(("set_linear_spd_limit_factor", factor))
         return 0
+
+    def set_gripper_enable(self, enable):
+        self.calls.append(("set_gripper_enable", enable))
+        return 0
+
+    def set_gripper_mode(self, mode):
+        self.calls.append(("set_gripper_mode", mode))
+        return 0
+
+    def set_gripper_speed(self, speed):
+        self.calls.append(("set_gripper_speed", speed))
+        return 0
+
+    def set_gripper_position(self, position, **kwargs):
+        self.calls.append(("set_gripper_position", position, kwargs))
+        self.gripper_position = position
+        return 0
+
+    def get_gripper_position(self):
+        self.calls.append(("get_gripper_position",))
+        return 0, self.gripper_position
+
+    def getset_tgpio_modbus_data(self, data):
+        self.calls.append(("getset_tgpio_modbus_data", data))
+        return 0, []
 
     def get_joint_states(self, is_radian=True, num=3):
         positions = np.arange(6, dtype=np.float64)
@@ -167,6 +196,26 @@ def test_manual_mode_config_rejects_cartesian_control(tmp_path):
         )
 
 
+def test_manual_gripper_speed_is_configurable_and_non_negative(tmp_path):
+    config = UFRobotConfig(
+        id="test_manual_robot",
+        calibration_dir=tmp_path,
+        robot_dof=6,
+        manual_mode=True,
+        manual_gripper_speed=0.25,
+    )
+    assert config.manual_gripper_speed == 0.25
+
+    with pytest.raises(ValueError, match="manual_gripper_speed"):
+        UFRobotConfig(
+            id="test_manual_robot",
+            calibration_dir=tmp_path,
+            robot_dof=6,
+            manual_mode=True,
+            manual_gripper_speed=-0.1,
+        )
+
+
 def test_manual_action_filters_non_action_observation_fields():
     observation = {
         "J1.pos": 1.0,
@@ -182,6 +231,52 @@ def test_manual_action_filters_non_action_observation_fields():
     }
 
 
+def test_manual_gripper_keys_update_target_in_expected_direction_and_bounds():
+    key_state = {"close": False, "open": False}
+
+    _update_manual_gripper_key_state(type("Key", (), {"char": "C"})(), True, key_state)
+    assert key_state == {"close": True, "open": False}
+    assert _update_manual_gripper_target(0.5, key_state, speed=1.0, fps=10) == pytest.approx(0.6)
+
+    _update_manual_gripper_key_state(type("Key", (), {"char": "C"})(), False, key_state)
+    _update_manual_gripper_key_state(type("Key", (), {"char": "o"})(), True, key_state)
+    assert _update_manual_gripper_target(0.05, key_state, speed=1.0, fps=10) == 0.0
+
+    _update_manual_gripper_key_state(type("Key", (), {"char": "c"})(), True, key_state)
+    assert _update_manual_gripper_target(0.99, key_state, speed=1.0, fps=10) == 0.99
+
+
+def test_manual_mode_initializes_gripper_without_opening_and_sends_only_gripper(monkeypatch, tmp_path):
+    from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
+
+    arm = FakeXArm("192.168.1.245")
+    monkeypatch.setattr(uf_robot_module, "XArmAPI", lambda robot_ip: arm)
+    monkeypatch.setattr(uf_robot_module.time, "sleep", lambda _: None)
+
+    config = UFRobotConfig(
+        id="test_manual_gripper_robot",
+        calibration_dir=tmp_path,
+        robot_ip=arm.robot_ip,
+        robot_dof=6,
+        control_space="joint",
+        gripper_type=1,
+        manual_mode=True,
+    )
+    robot = uf_robot_module.UFRobot(config)
+    robot.connect()
+
+    assert ("set_gripper_enable", True) in arm.calls
+    assert ("set_gripper_mode", 0) in arm.calls
+    assert ("set_gripper_speed", 5000) in arm.calls
+    assert not any(call[0] == "set_gripper_position" for call in arm.calls)
+
+    robot.send_action({"J1.pos": 1.0, "gripper.pos": 0.5})
+
+    assert any(call[0] == "getset_tgpio_modbus_data" for call in arm.calls)
+    assert not any(call[0] == "set_servo_angle" for call in arm.calls)
+    robot.disconnect()
+
+
 def test_manual_record_config_has_no_teleop(monkeypatch):
     config_path = Path("config/manual_mode/xarm7_manual_record_config.yaml").resolve()
     monkeypatch.setattr(
@@ -194,6 +289,7 @@ def test_manual_record_config_has_no_teleop(monkeypatch):
 
     assert config.robot.manual_mode is True
     assert config.robot.robot_dof == 7
+    assert config.robot.manual_gripper_speed == 0.5
     assert config.teleop is None
     assert config.dataset.fps == 30
 
@@ -277,3 +373,38 @@ def test_manual_recording_episode_resets_before_recording():
     _prepare_recording_episode(robot, teleop=None, is_uf_teleop=False, manual_mode=True)
 
     assert robot.calls == ["reset_to_initial"]
+
+
+def test_manual_record_loop_applies_keyboard_gripper_target():
+    class FakeRobot:
+        name = "fake_manual_robot"
+        robot_type = name
+        action_features = {"J1.pos": float, "gripper.pos": float}
+
+        def __init__(self):
+            self.sent_actions = []
+
+        def get_observation(self):
+            return {"J1.pos": 1.0, "gripper.pos": 0.5}
+
+        def send_action(self, action):
+            self.sent_actions.append(action.copy())
+            return action
+
+    robot = FakeRobot()
+    action_pipeline, robot_pipeline, observation_pipeline = record_module.make_default_processors()
+
+    record_module.record_loop(
+        robot=robot,
+        events={"exit_early": False},
+        fps=10,
+        teleop_action_processor=action_pipeline,
+        robot_action_processor=robot_pipeline,
+        robot_observation_processor=observation_pipeline,
+        control_time_s=0.001,
+        manual_mode=True,
+        manual_gripper_keys={"close": True, "open": False},
+        manual_gripper_speed=1.0,
+    )
+
+    assert robot.sent_actions == [{"J1.pos": 1.0, "gripper.pos": 0.6}]

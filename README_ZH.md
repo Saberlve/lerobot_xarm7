@@ -166,7 +166,7 @@ uv run uf-xarm-manual-mode --config_path config/manual_mode/xarm_manual_mode_con
 
 ### 3. 人工拖拽数据采集
 
-人工拖拽录制使用 robot 配置中的 `manual_mode: true`，不需要配置 teleop。录制过程中，机械臂的实际关节状态会同时作为 observation 和 action 写入 LeRobot 数据集：
+人工拖拽录制使用 robot 配置中的 `manual_mode: true`，不需要配置 teleop。录制过程中，机械臂的实际关节状态会作为 observation 和 action 写入 LeRobot 数据集；如果配置了夹爪，还可以按住 `C` 缓慢闭合、按住 `O` 缓慢张开。夹爪速度通过 `manual_gripper_speed` 配置，默认值为 `0.5`：
 
 ```bash
 uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml

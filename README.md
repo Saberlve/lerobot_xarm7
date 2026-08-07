@@ -167,7 +167,7 @@ Set `manual_mode` to `true` to enter drag mode. Press Enter to restore normal mo
 
 ### 3. Manual Drag Data Collection
 
-Manual drag recording uses `manual_mode: true` in the robot configuration and does not configure a teleoperator. During recording, the actual joint state is written as both the observation and action in the LeRobot dataset:
+Manual drag recording uses `manual_mode: true` in the robot configuration and does not configure a teleoperator. During recording, the actual joint state is written as both the observation and action in the LeRobot dataset. When a gripper is configured, hold `C` to close it slowly and `O` to open it slowly. Adjust the speed with `manual_gripper_speed`, which defaults to `0.5`:
 
 ```bash
 uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml

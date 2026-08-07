@@ -96,9 +96,43 @@ def _current_episode_index(dataset):
         return dataset.num_episodes
 
 
-def _manual_action_from_observation(observation, action_features):
+def _manual_gripper_action_key(action_features):
+    return next((key for key in action_features if key.endswith("gripper.pos")), None)
+
+
+def _manual_action_from_observation(observation, action_features, gripper_target=None):
     """Keep only robot action fields when mirroring manual-mode state."""
-    return {key: value for key, value in observation.items() if key in action_features}
+    action = {key: value for key, value in observation.items() if key in action_features}
+    if gripper_target is not None:
+        gripper_key = _manual_gripper_action_key(action_features)
+        if gripper_key is not None and gripper_key in action:
+            action[gripper_key] = float(gripper_target)
+    return action
+
+
+def _update_manual_gripper_key_state(key, pressed, key_state):
+    char = getattr(key, "char", None)
+    if not isinstance(char, str):
+        return
+
+    char = char.lower()
+    if char == "c":
+        key_state["close"] = pressed
+    elif char == "o":
+        key_state["open"] = pressed
+
+
+def _update_manual_gripper_target(target, key_state, speed, fps):
+    if target is None or fps <= 0:
+        return target
+
+    close_pressed = bool(key_state.get("close", False))
+    open_pressed = bool(key_state.get("open", False))
+    if close_pressed == open_pressed:
+        return target
+
+    direction = 1.0 if close_pressed else -1.0
+    return min(max(target + direction * speed / fps, 0.0), 1.0)
 
 
 def _create_empty_episode_buffer(dataset, episode_index, template_episode_buffer):
@@ -271,6 +305,8 @@ def record_loop(
     display_compressed_images: bool = False,
     frame_callback: callable = None,
     manual_mode: bool = False,
+    manual_gripper_keys: dict[str, bool] | None = None,
+    manual_gripper_speed: float = 0.5,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -310,6 +346,10 @@ def record_loop(
     # only positional cmd for now: Remove velo from observation for cmd if needed!
     last_robot_cmd = { k: v for k,v in last_robot_cmd.items() if not "vel" in k }
 
+    manual_gripper_keys = manual_gripper_keys or {}
+    manual_gripper_target = None
+    manual_gripper_action_key = _manual_gripper_action_key(robot.action_features)
+
     timestamp = 0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
@@ -346,7 +386,24 @@ def record_loop(
         elif policy is None and manual_mode:
             # In manual mode the physical arm is the source of both the
             # observation and the demonstrated target state.
-            act = _manual_action_from_observation(obs_processed, robot.action_features)
+            if manual_gripper_action_key is not None and manual_gripper_target is None:
+                gripper_value = obs_processed.get(manual_gripper_action_key)
+                if gripper_value is None:
+                    gripper_value = obs.get(manual_gripper_action_key)
+                if gripper_value is not None:
+                    manual_gripper_target = min(max(float(gripper_value), 0.0), 1.0)
+
+            manual_gripper_target = _update_manual_gripper_target(
+                manual_gripper_target,
+                manual_gripper_keys,
+                manual_gripper_speed,
+                fps,
+            )
+            act = _manual_action_from_observation(
+                obs_processed,
+                robot.action_features,
+                gripper_target=manual_gripper_target,
+            )
             act_processed_teleop = teleop_action_processor((act, obs))
 
         elif policy is None and isinstance(teleop, Teleoperator):
@@ -423,6 +480,17 @@ def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode):
         obs = robot.get_observation()
         teleop.reset_to_robot_observation(obs)
         teleop.set_teleop_enabled(True, obs)
+
+
+def _print_record_controls(is_recorded, manual_mode):
+    if is_recorded:
+        controls = '[ESC] Exit  [←] Reset  [→] Save'
+    else:
+        start_label = 'Reset / Start' if manual_mode else 'Start'
+        controls = f'[ESC] Exit  [Space] {start_label}  [←] Reset  [→] Save'
+    if manual_mode:
+        controls += '  [C] Close  [O] Open'
+    print(f'⌨   {controls}')
 
 
 def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
@@ -510,6 +578,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     is_uf_teleop = isinstance(teleop, UFBaseTeleop)
     is_recorded = False
     key_dict = {}
+    manual_gripper_keys = {"close": False, "open": False}
     listener = None
     events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
 
@@ -522,6 +591,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
         }
 
         def on_press(key):
+            _update_manual_gripper_key_state(key, True, manual_gripper_keys)
             try:
                 if key == keyboard.Key.right:
                     print("Right arrow key pressed. Exiting loop...")
@@ -540,12 +610,10 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                 key_dict[key] = True
 
         def on_release(key):
+            _update_manual_gripper_key_state(key, False, manual_gripper_keys)
             try:
                 if key == keyboard.Key.enter:
-                    if not is_recorded:
-                        print('⌨   [ESC] Exit  [Space] Start  [←] Reset  [→] Save')
-                    else:
-                        print('⌨   [ESC] Exit  [←] Reset  [→] Save')
+                    _print_record_controls(is_recorded, manual_mode)
                     # is_recorded = True
             except Exception as e:
                 print(f"Error handling key release: {e}")
@@ -554,7 +622,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
 
         listener, events = init_keyboard_listener(events=events, on_press=on_press, on_release=on_release)
         print("\n********** Episode Record Loop Start **********")
-        print('⌨   [ESC] Exit  [Space] Start  [←] Reset  [→] Save')
+        _print_record_controls(is_recorded, manual_mode)
     else:
         input('⌨   Press Enter to start record >>> ')
         is_recorded = True
@@ -609,6 +677,8 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                     display_data=cfg.display_data,
                     frame_callback=frame_callback,
                     manual_mode=manual_mode,
+                    manual_gripper_keys=manual_gripper_keys,
+                    manual_gripper_speed=getattr(cfg.robot, "manual_gripper_speed", 0.5),
                 )
             else:
                 continue
@@ -630,7 +700,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                         _set_episode_buffer(dataset, empty_episode_buffer)
                 is_recorded = False
                 if is_evt:
-                    print('⌨   [ESC] Exit  [Space] Start  [←] Reset  [→] Save')
+                    _print_record_controls(is_recorded, manual_mode)
                 else:
                     input('\n⌨   Press Enter to rerecord this episode >>>>> ')
                     is_recorded = True
@@ -652,7 +722,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                 recorded_episodes += 1
                 is_recorded = False
                 if is_evt:
-                    print('⌨   [ESC] Exit  [Space] Start  [←] Reset  [→] Save')
+                    _print_record_controls(is_recorded, manual_mode)
                 else:
                     input('⌨   Press Enter to record at the next episode >>>>> ')
                     is_recorded = True
