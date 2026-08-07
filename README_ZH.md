@@ -157,7 +157,17 @@ uf-robot-teleop --config_path path/to/config.yaml --fps 60  # 指定频率
 uf-robot-teleop --config_path config/umi/xarm6_umi_record_config.yaml
 ```
 
-### 2. 数据采集
+### 2. xArm 人工拖拽模式测试
+
+使用 xArm 的关节示教模式（`mode=2`）进行人工拖拽：
+
+```bash
+uf-xarm-manual-mode --config_path config/manual_mode/xarm_manual_mode_config.yaml
+```
+
+配置中的 `manual_mode` 为 `true` 时进入拖拽模式，按回车后恢复为普通模式；设置为 `false` 可直接恢复为普通模式。
+
+### 3. 数据采集
 
 通过遥操作录制数据集。
 
@@ -170,7 +180,7 @@ uf-lerobot-record --config_path path/to/config.yaml --resume true     # 续录
 uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
 ```
 
-### 3. Lerobot训练
+### 4. Lerobot训练
 
 采集数据后，使用 LeRobot 训练管道进行模仿学习训练。
 
@@ -198,7 +208,7 @@ lerobot-train \
   --save_freq=20000 
 ```
 
-### 4. 推理
+### 5. 推理
 
 指定模型进行推理
 
@@ -312,4 +322,3 @@ lerobot_robot_ufactory/
 ## 许可证
 
 本项目基于 Apache License 2.0 发布，详见 [LICENSE](LICENSE) 文件。
-

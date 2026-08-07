@@ -3,7 +3,7 @@ robot:
   id: "uf_robot"
   robot_dof: 5
   control_space: "joint"
-  robot_ip: "192.168.1.75"
+  robot_ip: "192.168.1.245"
   gripper_type: 1
   start_joints: [0, 0, -90, 90, 0]
 

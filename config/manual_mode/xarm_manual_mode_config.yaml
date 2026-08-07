@@ -1,0 +1,8 @@
+# xArm manual/joint teaching mode test configuration.
+robot_ip: "192.168.1.245"
+
+# true: enter mode 2 and wait for Enter; false: restore mode 0.
+manual_mode: true
+
+# xArm teach sensitivity, valid range: 1-5.
+teach_sensitivity: 3
