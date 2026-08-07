@@ -38,6 +38,7 @@ uf-xarm-manual-mode = "lerobot_robot_ufactory.scripts.uf_xarm_manual_mode:main"
 uf-lerobot-eval = "lerobot_robot_ufactory.scripts.uf_lerobot_eval:main"
 uf-vive-calibrate = "lerobot_robot_ufactory.scripts.vive_calibrate:main"
 uf-camera-view = "lerobot_robot_ufactory.scripts.uf_camera_view:main"
+uf-camera-test = "lerobot_robot_ufactory.scripts.uf_camera_test:main"
 
 [project.optional-dependencies]
 # GELLO 遥操作

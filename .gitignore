@@ -88,3 +88,4 @@ models/
 *.trt
 *.xvcd
 ufactory_usage/
+.history/

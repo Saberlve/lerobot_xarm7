@@ -165,7 +165,18 @@ uv run uf-xarm-manual-mode --config_path config/manual_mode/xarm_manual_mode_con
 
 Set `manual_mode` to `true` to enter drag mode. Press Enter to restore normal mode; set it to `false` to restore normal mode directly. With `return_to_initial: true`, the script reads the saved initial point through the xArm Studio API and returns to it when drag mode exits.
 
-### 3. Data Collection
+### 3. Manual Drag Data Collection
+
+Manual drag recording uses `manual_mode: true` in the robot configuration and does not configure a teleoperator. During recording, the actual joint state is written as both the observation and action in the LeRobot dataset:
+
+```bash
+uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml
+uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml --resume true
+```
+
+Press `Space` to start an episode, `Right` to save it, `Left` to discard and re-record it, and `Esc` to stop recording. Reset the arm manually between episodes.
+
+### 4. Teleop Data Collection
 
 Record datasets via teleop.
 
@@ -178,7 +189,7 @@ uv run uf-lerobot-record --config_path path/to/config.yaml --resume true        
 uv run uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
 ```
 
-### 4. Policy Training
+### 5. Policy Training
 
 Train imitation learning policies on collected data.
 
@@ -209,7 +220,7 @@ uv run lerobot-train \
   --save_freq=20000
 ```
 
-### 5. Inference & Evaluation
+### 6. Inference & Evaluation
 
 Run inference with a trained policy.
 

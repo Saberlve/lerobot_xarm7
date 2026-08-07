@@ -18,6 +18,8 @@ class UFRobotConfig(RobotConfig):
     gripper_speed: int = -1     # auto
     gripper_force: int = -1     # auto
     observe_joint_vel: bool = False # only effective in joint control mode
+    manual_mode: bool = False  # xArm joint teaching mode; records state without sending actions
+    teach_sensitivity: int | None = None  # xArm teaching sensitivity, valid range: 1-5
     start_joints: Tuple[float, ...] = (0, 0, 0, 90, 0, 90, 0) # °
     start_tcp_pose: Tuple[float, ...] = None # [x, y, z, roll(°), pitch(°), yaw(°)]
     max_joint_velocity: int = 90   # °/s, only effective in joint control mode
@@ -27,3 +29,8 @@ class UFRobotConfig(RobotConfig):
     def __post_init__(self):
         super().__post_init__()
         self.id = 'uf_robot' if self.id is None else self.id
+        if self.manual_mode:
+            if self.control_space != "joint":
+                raise ValueError("manual_mode requires control_space='joint'")
+            if self.teach_sensitivity is not None and not 1 <= self.teach_sensitivity <= 5:
+                raise ValueError("teach_sensitivity must be between 1 and 5")

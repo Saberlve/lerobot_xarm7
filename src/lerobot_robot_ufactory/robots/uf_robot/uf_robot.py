@@ -221,6 +221,26 @@ class UFRobot(Robot, Thread):
         self.real_arm.set_state(0)  # set to start state
         time.sleep(0.5)
 
+        if self.config.manual_mode:
+            if self.config.teach_sensitivity is not None:
+                code = self.real_arm.set_teach_sensitivity(self.config.teach_sensitivity)
+                if code != 0:
+                    raise RuntimeError(f"set_teach_sensitivity failed, code={code}")
+
+            code = self.real_arm.set_mode(2)
+            if code != 0:
+                raise RuntimeError(f"set_mode(2) failed, code={code}")
+            code = self.real_arm.set_state(0)
+            if code != 0:
+                raise RuntimeError(f"set_state(0) failed, code={code}")
+
+            _, err_warn = self.real_arm.get_err_warn_code()
+            if err_warn[0] != 0:
+                raise RuntimeError(
+                    f"Failed to set manual mode for UF robot! Controller Error code: {err_warn[0]} !"
+                )
+            return
+
         _, err_warn = self.real_arm.get_err_warn_code()
         if err_warn[0] != 0:
             raise RuntimeError(f"Failed to set correct state to UF robot! Controller Error code: {err_warn[0]} !")
@@ -353,6 +373,8 @@ class UFRobot(Robot, Thread):
     def send_action(self, action: dict) -> np.ndarray:
         if not self._is_connected:
             raise ConnectionError()
+        if self.config.manual_mode:
+            return action
         if self.real_arm.error_code != 0:
             return action
         if self.config.no_action:

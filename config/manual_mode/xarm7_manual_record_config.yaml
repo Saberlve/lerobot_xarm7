@@ -1,0 +1,32 @@
+robot:
+  type: uf::robot
+  id: "uf_manual_robot"
+  robot_dof: 7
+  control_space: "joint"
+  # IP address of the xArm controller.
+  robot_ip: "192.168.1.245"
+  # Gripper type: 1 is the xArm gripper.
+  gripper_type: 1
+  manual_mode: true
+  # Teaching sensitivity, valid range is 1-5, affecting vel of the robot.
+  teach_sensitivity: 3
+  # Whether to record joint velocities in observations.
+  observe_joint_vel: false
+
+  # Camera definitions; leave empty when no cameras are used.
+  cameras: {}
+
+dataset:
+  root: "/home/uf/Data/lerobot_datas/record/ufactory/xarm7_manual_datas"
+  repo_id: "ufactory/xarm7_manual_datas"
+  # Task description stored with each recorded frame.
+  single_task: "Describe the task being demonstrated."
+  fps: 30
+  episode_time_s: 60
+  # Reserved reset duration between episodes in seconds.
+  reset_time_s: 20
+  # Number of episodes to record.
+  num_episodes: 50
+  # Store camera observations as videos.
+  video: true
+  push_to_hub: false

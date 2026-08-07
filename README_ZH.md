@@ -164,7 +164,18 @@ uv run uf-xarm-manual-mode --config_path config/manual_mode/xarm_manual_mode_con
 
 配置中的 `manual_mode` 为 `true` 时进入拖拽模式，按回车后恢复为普通模式；设置为 `false` 可直接恢复为普通模式。`return_to_initial: true` 会通过 xArm Studio 接口读取保存的初始位置，并在退出拖拽后自动回位。
 
-### 3. 数据采集
+### 3. 人工拖拽数据采集
+
+人工拖拽录制使用 robot 配置中的 `manual_mode: true`，不需要配置 teleop。录制过程中，机械臂的实际关节状态会同时作为 observation 和 action 写入 LeRobot 数据集：
+
+```bash
+uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml
+uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml --resume true
+```
+
+按 `Space` 开始当前 episode，按 `Right` 保存，按 `Left` 放弃并重录当前 episode，按 `Esc` 停止录制。episode 之间可以手动复位机械臂。
+
+### 4. 遥操作数据采集
 
 通过遥操作录制数据集。
 
@@ -177,7 +188,7 @@ uv run uf-lerobot-record --config_path path/to/config.yaml --resume true     # �
 uv run uf-lerobot-record --config_path config/umi/xarm6_umi_record_config.yaml
 ```
 
-### 4. Lerobot训练
+### 5. Lerobot训练
 
 采集数据后，使用 LeRobot 训练管道进行模仿学习训练。
 
@@ -205,7 +216,7 @@ uv run lerobot-train \
   --save_freq=20000 
 ```
 
-### 5. 推理
+### 6. 推理
 
 指定模型进行推理
 

@@ -6,12 +6,27 @@ import argparse
 import logging
 import shutil
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 import lerobot_robot_ufactory # patch
 from lerobot.scripts.lerobot_record import *
+from lerobot.scripts.lerobot_record import RecordConfig as LeRobotRecordConfig
 from lerobot_robot_ufactory.teleoperators.uf_mock_teleop import UFMockTeleop
 from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
+
+
+@dataclass
+class UFRecordConfig(LeRobotRecordConfig):
+    """RecordConfig variant that permits UFACTORY manual-mode recording."""
+
+    def __post_init__(self):
+        manual_mode = getattr(self.robot, "manual_mode", False)
+        if manual_mode:
+            if self.teleop is not None or self.policy is not None:
+                raise ValueError("manual_mode recording cannot be combined with a teleop or policy")
+            return
+        super().__post_init__()
 
 
 def _get_dataset_writer(dataset):
@@ -81,6 +96,11 @@ def _current_episode_index(dataset):
         return dataset.num_episodes
 
 
+def _manual_action_from_observation(observation, action_features):
+    """Keep only robot action fields when mirroring manual-mode state."""
+    return {key: value for key, value in observation.items() if key in action_features}
+
+
 def _create_empty_episode_buffer(dataset, episode_index, template_episode_buffer):
     writer = _get_dataset_writer(dataset)
 
@@ -121,6 +141,7 @@ class AsyncEpisodeSaver:
         self._total_cnts = 0
         self._finish_cnts = 0
         self._exception = None
+        self._closed = False
         self._thread = threading.Thread(target=self._run, name="uf-async-episode-saver", daemon=True)
         self._thread.start()
 
@@ -141,10 +162,13 @@ class AsyncEpisodeSaver:
         self._raise_if_failed()
 
     def close(self):
+        if self._closed:
+            return
         self._queue.join()
         self._queue.put(self._STOP)
         self._queue.join()
         self._thread.join()
+        self._closed = True
         self._raise_if_failed()
 
     def _run(self):
@@ -187,6 +211,39 @@ class AsyncEpisodeSaver:
     def _raise_if_failed(self):
         if self._exception is not None:
             raise RuntimeError("Async episode save failed.") from self._exception
+
+
+def _disconnect_recording_resources(robot, teleop, listener):
+    """Release recording devices while preserving cleanup after partial failures."""
+    try:
+        if getattr(robot, "_is_connected", False) or getattr(robot, "real_arm", None) is not None:
+            robot.disconnect()
+    finally:
+        try:
+            if teleop is not None and getattr(teleop, "is_connected", False):
+                teleop.disconnect()
+        finally:
+            if listener is not None:
+                listener.stop()
+
+
+class _RecordingCleanup:
+    def __init__(self, robot, teleop, listener, async_episode_saver):
+        self.robot = robot
+        self.teleop = teleop
+        self.listener = listener
+        self.async_episode_saver = async_episode_saver
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            if self.async_episode_saver is not None:
+                self.async_episode_saver.close()
+        finally:
+            _disconnect_recording_resources(self.robot, self.teleop, self.listener)
+        return False
     
 
 @safe_stop_image_writer
@@ -213,6 +270,7 @@ def record_loop(
     display_data: bool = False,
     display_compressed_images: bool = False,
     frame_callback: callable = None,
+    manual_mode: bool = False,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -285,6 +343,12 @@ def record_loop(
 
             act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
 
+        elif policy is None and manual_mode:
+            # In manual mode the physical arm is the source of both the
+            # observation and the demonstrated target state.
+            act = _manual_action_from_observation(obs_processed, robot.action_features)
+            act_processed_teleop = teleop_action_processor((act, obs))
+
         elif policy is None and isinstance(teleop, Teleoperator):
             act = teleop.get_action()
 
@@ -344,7 +408,7 @@ def record_loop(
         timestamp = time.perf_counter() - start_episode_t
 
 
-def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
+def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
@@ -352,6 +416,7 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
+    manual_mode = bool(getattr(cfg.robot, "manual_mode", False))
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
@@ -413,14 +478,22 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
             },
         )
 
-    robot.connect()
-    if teleop is not None:
-        teleop.connect()
+    try:
+        robot.connect()
+        if teleop is not None:
+            teleop.connect()
+    except BaseException:
+        try:
+            _disconnect_recording_resources(robot, teleop, None)
+        except BaseException:
+            logging.exception("Failed to clean up after recording device connection failure")
+        raise
 
     is_evt = not is_headless()
     is_uf_teleop = isinstance(teleop, UFBaseTeleop)
     is_recorded = False
     key_dict = {}
+    listener = None
     events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
 
     if is_evt:
@@ -477,7 +550,7 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
     if async_episode_saver is not None:
         print('Async episode saving is enabled.')
 
-    with VideoEncodingManager(dataset):
+    with _RecordingCleanup(robot, teleop, listener, async_episode_saver), VideoEncodingManager(dataset):
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
             time.sleep(0.01)
@@ -501,10 +574,11 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
             if is_recorded:
                 events["rerecord_episode"] = False
                 events["exit_early"] = False
-                if is_uf_teleop:
+                if is_uf_teleop or manual_mode:
                     robot.configure()
-                    obs = robot.get_observation()
-                    teleop.set_teleop_enabled(True, obs)
+                    if is_uf_teleop:
+                        obs = robot.get_observation()
+                        teleop.set_teleop_enabled(True, obs)
                 log_say(f"Recording episode {_current_episode_index(dataset)}", cfg.play_sounds)
                 record_loop(
                     robot=robot,
@@ -522,6 +596,7 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
                     frame_callback=frame_callback,
+                    manual_mode=manual_mode,
                 )
             else:
                 continue
@@ -576,13 +651,6 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
 
     print("\n********** Episode Record Loop Exit **********")
 
-    robot.disconnect()
-    if teleop is not None:
-        teleop.disconnect()
-
-    if is_evt and listener is not None:
-        listener.stop()
-
     if cfg.dataset.push_to_hub:
         dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
 
@@ -590,7 +658,7 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
     return dataset
 
 @parser.wrap()
-def get_cfg(cfg: RecordConfig) -> RecordConfig:
+def get_cfg(cfg: UFRecordConfig) -> UFRecordConfig:
     return cfg
 
 def main():
