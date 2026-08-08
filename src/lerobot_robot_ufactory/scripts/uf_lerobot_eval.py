@@ -38,6 +38,7 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.scripts.lerobot_record import DatasetRecordConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
+from lerobot_robot_ufactory.utils.action_safety import ActionSafetyConfig, ActionSafetyGuard
 from lerobot_robot_ufactory.devices.umi.vive_tracker.transformations import Transformations
 
 
@@ -120,9 +121,11 @@ class EvalConfig:
         return ["policy"]
 
 
-def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
+def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False, safety_guard: ActionSafetyGuard | None = None):
     init_logging()
     logging.info(pformat(asdict(cfg)))
+    if safety_guard is not None:
+        safety_guard.log_config()
 
     robot = make_robot_from_config(cfg.robot)
 
@@ -261,6 +264,8 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
             prev_robot_dict[key] = {'type': 1 if is_tcp else 0, 'pose': np.array(pose)}
             prev_action_dict[key] = {'type': 1 if is_tcp else 0, 'pose': np.array(pose)}
 
+        safety_halted = False
+
         while True:
             start_loop_t = time.perf_counter()
 
@@ -268,6 +273,12 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
                 events["reset"] = False
                 print("\n********** Policy Eval Episode (Reset) **********")
                 break
+
+            # Safety halt: stop inference and stop sending actions,
+            # wait for the operator to press the right arrow key to resume
+            if safety_halted:
+                precise_sleep(sleep_time_s)
+                continue
 
             # Get robot observation
             obs = robot.get_observation()
@@ -398,6 +409,16 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
             #     gripper_raw = (future_gripper_norm + 1) / 2 * (_gripper_max - _gripper_min) + _gripper_min
             # robot_action_to_send['right.gripper.pos'] = 1.0 if gripper_raw > 0.4 else 0.0
 
+            # Safety check: any violation triggers an e-stop; the action is
+            # NOT sent and the loop waits for the operator to press right arrow
+            if safety_guard is not None:
+                violation = safety_guard.check(robot_action_to_send, curr_robot_dict, keys)
+                if violation is not None:
+                    safety_halted = True
+                    logging.error(f"*** SAFETY HALT *** {violation}")
+                    print(f"\n*** SAFETY HALT *** {violation}\nAction was NOT sent. Press right arrow (->) to reset and resume, ESC to exit.")
+                    continue
+
             robot.send_action(robot_action_to_send)
         
             dt_s = time.perf_counter() - start_loop_t
@@ -418,11 +439,15 @@ def main():
     parser = argparse.ArgumentParser(description='configuration args')
     parser.add_argument('--relative', action='store_true', help='is relative motion or not')
     parser.add_argument('--rx_continuous', action='store_true', help='rx continuous or not')
+    parser.add_argument('--enable_safety', action='store_true', help='enable action safety guard (thresholds in ActionSafetyConfig)')
     args, unknown = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + unknown
     register_third_party_plugins()
     cfg = get_cfg()
-    eval_loop(cfg, args.relative, args.rx_continuous)
+    # Action safety guard: tune thresholds in ActionSafetyConfig directly.
+    # Any violation triggers an e-stop; press right arrow to resume.
+    safety_guard = ActionSafetyGuard(ActionSafetyConfig(enabled=args.enable_safety))
+    eval_loop(cfg, args.relative, args.rx_continuous, safety_guard)
 
 
 if __name__ == "__main__":
