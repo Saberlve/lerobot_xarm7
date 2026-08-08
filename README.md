@@ -227,8 +227,9 @@ The robot first moves to the xArm SDK initial point, then replays the episode an
 
 ### Power-off
 
-1. **Press the emergency-stop button.**
-2. **Turn off the controller power.**
+1. **Use the web console to return the arm to its initial position.**
+2. **Press the emergency-stop button.**
+3. **Turn off the controller power.**
 
 ## Tools
 

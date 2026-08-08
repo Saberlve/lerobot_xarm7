@@ -227,8 +227,9 @@ uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 1
 
 ### 关机
 
-1. **先按下急停按钮。**
-2. **关闭控制器电源。**
+1. **先通过网页控制将机械臂返回到初始位置。**
+2. **再按下急停按钮。**
+3. **关闭控制器电源。**
 
 ## 工具
 
