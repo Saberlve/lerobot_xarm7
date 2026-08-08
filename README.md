@@ -164,6 +164,8 @@ Pass `-r` to resume directly without asking. Note that `./start_manual_record.sh
 
 During recording the arm is in teach mode: the actual joint state is written as both the observation and the action. Hold `C` to slowly close the gripper and `O` to slowly open it. Controls: `Space` start, `→` save, `←` discard & re-record, `Esc` stop. Reset the arm manually between episodes.
 
+> **IMPORTANT: At the start of every episode, wait until the arm has finished resetting and then wait another 5 seconds before operating it, or wait until the console prints `Start Recording` before operating it.** This prevents reset commands from conflicting with operation commands and causing errors.
+
 ### 4. Policy training
 
 ```bash
@@ -213,6 +215,20 @@ uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 1
 ```
 
 The robot first moves to the xArm SDK initial point, then replays the episode and stays at the last state. Make sure the workspace is clear and the recorded initial pose matches the current arm setup.
+
+## IMPORTANT: Robot Power-On and Power-Off
+
+### Power-on
+
+1. **Connect the computer to the robot controller with an Ethernet cable.**
+2. **Configure the computer's Ethernet interface to the same IP subnet as the robot IP shown on the controller** (for example, `192.168.1.xxx`).
+3. **Open `http://192.168.1.245:18333/` in a browser.** The controller console should be displayed.
+4. **Release the emergency-stop button before operating the robot.**
+
+### Power-off
+
+1. **Press the emergency-stop button.**
+2. **Turn off the controller power.**
 
 ## Tools
 

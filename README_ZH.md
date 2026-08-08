@@ -163,6 +163,8 @@ uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.ya
 
 录制时机械臂处于示教模式，实际关节状态会同时作为 observation 和 action 写入数据集。按住 `C` 缓慢闭合夹爪，按住 `O` 缓慢张开。按键控制：`Space` 开始，`→` 保存，`←` 放弃并重录，`Esc` 停止。episode 之间手动复位机械臂。
 
+> **重要：每个 episode 开始时，必须等待机械臂复位完成后再等待 5 秒，然后才能开始操作；或者确认控制台打印 `Start Recording` 后再开始操作。** 这样可以避免机械臂复位控制指令与操作指令冲突导致报错。
+
 ### 4. 策略训练
 
 ```bash
@@ -200,6 +202,7 @@ uv run uf-lerobot-eval \
 将手动拖拽数据集的绝对关节状态（`observation.state`）回放到 xArm7。脚本按数据集 FPS（默认 30）将状态作为**绝对目标值**发送，不做差分或累加，因此运动轨迹与录制时一致：
 
 ```bash
+# 默认回放第一条
 uv run uf-lerobot-replay \
   --dataset-root /path/to/xarm7_manual_datas \
   --robot-ip 192.168.1.245
@@ -212,6 +215,20 @@ uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 1
 ```
 
 回放开始前机械臂会先移动到 xArm SDK 初始点，播放结束后保持最后一帧姿态并断开连接。执行前请确认工作空间无障碍物，且数据中的初始姿态与当前设备一致。
+
+## 重要：机械臂开关机事项
+
+### 开机
+
+1. **使用网线将电脑连接到机械臂控制器。**
+2. **参考控制器上标注的机械臂 IP，将电脑以太网接口配置到同一网段**（例如 `192.168.1.xxx`）。
+3. **在浏览器中访问 `http://192.168.1.245:18333/`**，应出现控制台界面。
+4. **操作机械臂前，抬起急停按钮。**
+
+### 关机
+
+1. **先按下急停按钮。**
+2. **关闭控制器电源。**
 
 ## 工具
 
