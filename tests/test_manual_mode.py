@@ -315,6 +315,27 @@ def test_prepare_dataset_root_rejects_incomplete_resume(tmp_path):
         _prepare_dataset_root(cfg)
 
 
+def test_prepare_dataset_root_rejects_resume_when_root_is_missing(tmp_path):
+    cfg = SimpleNamespace(dataset=SimpleNamespace(root=tmp_path / "missing"), resume=True)
+
+    with pytest.raises(RuntimeError, match="does not exist"):
+        _prepare_dataset_root(cfg)
+
+
+def test_prepare_dataset_root_resumes_complete_dataset_without_prompt(tmp_path, monkeypatch):
+    root = tmp_path / "dataset"
+    (root / "meta" / "episodes" / "chunk-000").mkdir(parents=True)
+    (root / "data" / "chunk-000").mkdir(parents=True)
+    (root / "meta" / "info.json").write_text("{}")
+    (root / "meta" / "tasks.parquet").write_bytes(b"tasks")
+    (root / "meta" / "episodes" / "chunk-000" / "file-000.parquet").write_bytes(b"episodes")
+    (root / "data" / "chunk-000" / "file-000.parquet").write_bytes(b"data")
+    cfg = SimpleNamespace(dataset=SimpleNamespace(root=root), resume=True)
+    monkeypatch.setattr(record_module.sys.stdin, "isatty", lambda: True)
+
+    _prepare_dataset_root(cfg)
+
+
 def test_manual_record_loop_writes_actual_state_as_action(tmp_path):
     class FakeRobot:
         name = "fake_manual_robot"

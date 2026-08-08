@@ -510,26 +510,40 @@ def _ask_choice(prompt: str, options: dict[str, str]) -> str:
         print(f"Invalid choice, please enter {keys}.")
 
 
+def _missing_dataset_files(root: Path) -> list[str]:
+    """Return the local files required before a dataset can be resumed."""
+    missing = []
+    for relative_path in ("meta/info.json", "meta/tasks.parquet"):
+        if not (root / relative_path).is_file():
+            missing.append(relative_path)
+    if not any((root / "meta" / "episodes").glob("*/*.parquet")):
+        missing.append("meta/episodes/*/*.parquet")
+    if not any((root / "data").glob("*/*.parquet")):
+        missing.append("data/*/*.parquet")
+    return missing
+
+
 def _prepare_dataset_root(cfg: UFRecordConfig) -> None:
-    """Create the dataset root and ask how to handle an existing dataset."""
+    """Prepare an existing dataset root without pre-creating a new one."""
     root = Path(cfg.dataset.root)
     existed = root.exists()
 
-    # Create the dataset root (and any parent directories) first.
-    root.mkdir(parents=True, exist_ok=True)
-
-    if not existed or cfg.resume:
+    if not existed:
+        if cfg.resume:
+            raise RuntimeError(f"Cannot resume because the dataset directory does not exist: {root}")
         return
 
-    if not (root / "meta" / "info.json").is_file():
-        # The directory exists but is not a valid LeRobot dataset.
-        if not sys.stdin.isatty():
-            raise RuntimeError(
-                f"Dataset directory exists but is not a valid LeRobot dataset: {root}\n"
-                "Choose a new dataset.root, or remove this empty/incomplete directory before recording."
-            )
+    missing = _missing_dataset_files(root)
+    if missing:
+        missing_text = ", ".join(missing)
+        message = (
+            f"Dataset directory is incomplete and cannot be resumed: {root}\n"
+            f"Missing: {missing_text}"
+        )
+        if cfg.resume or not sys.stdin.isatty():
+            raise RuntimeError(message)
         choice = _ask_choice(
-            f"Directory exists but is not a valid LeRobot dataset: {root}",
+            message,
             options={
                 "o": "Overwrite: remove this directory and record a new dataset",
                 "c": "Cancel",
@@ -539,6 +553,9 @@ def _prepare_dataset_root(cfg: UFRecordConfig) -> None:
             shutil.rmtree(root)
         else:
             raise SystemExit("Recording cancelled.")
+        return
+
+    if cfg.resume:
         return
 
     # A valid LeRobot dataset already exists.

@@ -449,9 +449,9 @@ class UFRobot(Robot, Thread):
         warn_code = getattr(arm, "warn_code", "unknown")
         return f"mode={mode}, state={state}, error_code={error_code}, warn_code={warn_code}"
 
-    def _check_motion_code(self, command: str, code: int) -> None:
-        """Fail loudly when the SDK rejects a joint command."""
-        if code != 0:
+    def _check_motion_code(self, command: str, code: int | None) -> None:
+        """Fail loudly when the SDK explicitly rejects a motion command."""
+        if code is not None and code != 0:
             raise RuntimeError(f"{command} failed, code={code}, {self._motion_status()}")
 
     def send_action(self, action: dict) -> np.ndarray:
