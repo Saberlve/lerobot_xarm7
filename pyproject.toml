@@ -39,6 +39,7 @@ uf-lerobot-eval = "lerobot_robot_ufactory.scripts.uf_lerobot_eval:main"
 uf-lerobot-replay = "lerobot_robot_ufactory.scripts.uf_lerobot_replay:main"
 uf-vive-calibrate = "lerobot_robot_ufactory.scripts.vive_calibrate:main"
 uf-camera-view = "lerobot_robot_ufactory.scripts.uf_camera_view:main"
+uf-realsense-view = "lerobot_robot_ufactory.scripts.uf_realsense_view:main"
 uf-camera-test = "lerobot_robot_ufactory.scripts.uf_camera_test:main"
 
 [project.optional-dependencies]

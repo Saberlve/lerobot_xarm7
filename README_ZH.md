@@ -150,14 +150,14 @@ uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.ya
 ./start_manual_record.sh -r   # 强制续录；数据集目录不存在时会报错
 ```
 
-录制脚本（`uf-lerobot-record`）会从配置读取 `dataset.root` 并先执行 `mkdir -p` 创建路径，然后：
+录制脚本（`uf-lerobot-record`）会从配置读取 `dataset.root` 并在录制前检查路径，然后：
 
 - 目录不存在：直接录制新数据集。
 - 目录已存在（有效 LeRobot 数据集）且未加 `-r`：交互询问：
   - `o` 覆盖：删除已有数据集，重新录制
   - `r` 续录：保留已有 episode，继续录制
   - `c` 取消
-- 目录存在但不是有效 LeRobot 数据集（缺少 `meta/info.json`）：询问覆盖或取消；非交互运行时直接报错。
+- 目录存在但不完整（缺少必要元数据或数据 parquet 文件）：询问覆盖或取消；非交互运行时直接报错。
 
 加 `-r` 可跳过询问直接续录。注意 `./start_manual_record.sh` 保持原有启动脚本行为——检测到有效数据集会自动续录（相当于 `-r`），如果想看到覆盖/续录的询问，请直接用 `uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml` 运行。
 
@@ -221,6 +221,31 @@ uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 1
 uv run uf-camera-view -l                # 列出所有摄像头
 uv run uf-camera-view -T realsense      # 查看 RealSense 摄像头
 ```
+
+网页预览会扫描所有 RealSense 摄像头，默认使用 `640x480`、`30fps`，页面中可勾选设备切换或同时显示多路画面：
+
+```bash
+uv run uf-realsense-view
+```
+
+脚本使用 LeRobot 的 `RealSenseCamera`。如果当前环境中的 OpenCV 是 LeRobot 默认的
+headless 版本，会自动启动网页预览。同一台机器上打开
+`http://127.0.0.1:8765/`；从其他机器访问时，请将 `127.0.0.1` 替换为运行脚本机器的实际 IP。
+网页服务默认监听 `0.0.0.0`，也可以用 `--host 127.0.0.1` 限制为本机访问；还可以通过
+`--backend opencv` 强制使用 OpenCV 窗口。
+
+也可以只打开指定设备；需要多个设备时重复 `--serial`：
+
+```bash
+uv run uf-realsense-view \
+  --serial 148522072685 --width 640 --height 480 --fps 30
+
+uv run uf-realsense-view \
+  --serial 148522072685 --serial SECOND_CAMERA_SERIAL
+```
+
+OpenCV 窗口按 `q` 或 `Esc` 退出；网页模式按 `Ctrl+C` 退出。无桌面环境时可以用
+`--no-display` 检查是否能持续取帧。
 
 ### LeRobot 数据集工具
 

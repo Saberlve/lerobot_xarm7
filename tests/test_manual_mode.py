@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from lerobot_robot_ufactory.scripts.uf_lerobot_record import (
     _manual_action_from_observation,
     _update_manual_gripper_key_state,
     _update_manual_gripper_target,
+    _prepare_dataset_root,
     _prepare_recording_episode,
     get_cfg,
 )
@@ -292,6 +294,25 @@ def test_manual_record_config_has_no_teleop(monkeypatch):
     assert config.robot.manual_gripper_speed == 0.5
     assert config.teleop is None
     assert config.dataset.fps == 30
+
+
+def test_prepare_dataset_root_leaves_new_root_for_lerobot_create(tmp_path):
+    root = tmp_path / "nested" / "dataset"
+    cfg = SimpleNamespace(dataset=SimpleNamespace(root=root), resume=False)
+
+    _prepare_dataset_root(cfg)
+
+    assert not root.exists()
+
+
+def test_prepare_dataset_root_rejects_incomplete_resume(tmp_path):
+    root = tmp_path / "dataset"
+    (root / "meta").mkdir(parents=True)
+    (root / "meta" / "info.json").write_text("{}")
+    cfg = SimpleNamespace(dataset=SimpleNamespace(root=root), resume=True)
+
+    with pytest.raises(RuntimeError, match="meta/tasks.parquet"):
+        _prepare_dataset_root(cfg)
 
 
 def test_manual_record_loop_writes_actual_state_as_action(tmp_path):

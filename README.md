@@ -151,14 +151,14 @@ Controls: `Space` start the episode, `→` save it, `←` discard and re-record 
 ./start_manual_record.sh -r   # force resume; fails if the dataset directory does not exist
 ```
 
-The record script (`uf-lerobot-record`) reads `dataset.root` from the config and creates the path with `mkdir -p` first, then:
+The record script (`uf-lerobot-record`) reads `dataset.root` from the config and checks the path before recording, then:
 
 - Directory does not exist → records a new dataset.
 - Directory already exists (valid LeRobot dataset) and no `-r` was given → asks interactively:
   - `o` overwrite: delete the existing dataset and record a new one
   - `r` resume: keep existing episodes and continue recording
   - `c` cancel
-- Directory exists but is not a valid LeRobot dataset (missing `meta/info.json`) → asks to overwrite it or cancel; non-interactive runs error out instead.
+- Directory exists but is incomplete (missing required metadata or data parquet files) → asks to overwrite it or cancel; non-interactive runs error out instead.
 
 Pass `-r` to resume directly without asking. Note that `./start_manual_record.sh` keeps its original launcher behavior — it automatically resumes an existing valid dataset (equivalent to `-r`), so run `uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml` directly if you want to see the overwrite/resume prompt.
 

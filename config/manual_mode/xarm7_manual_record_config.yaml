@@ -24,10 +24,10 @@ robot:
       fps: 30
 
 dataset:
-  root: "/home/wsx/code/lerobot_robot_ufactory/datasets/xarm7_manual_replay_pick_pen"
-  repo_id: "ufactory/xarm7_manual_datas"
+  root: "/home/wsx/code/lerobot_robot_ufactory/datasets/xarm7_manual_replay_pick_bottle"
+  repo_id: "zjuscl/xarm7_manual_replay_pick_bottle"
   # Task description stored with each recorded frame.
-  single_task: "Describe the task being demonstrated."
+  single_task: "Pick up the black bottle and place it on the blue bag"
   fps: 30
   episode_time_s: 60
   # Reserved reset duration between episodes in seconds.
