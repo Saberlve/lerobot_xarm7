@@ -1,5 +1,6 @@
 import sys
 import argparse
+import atexit
 import logging
 import time
 from pathlib import Path
@@ -53,8 +54,37 @@ def teleop_loop(cfg: TeleopConfig):
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
+    robot_connected = False
+    teleop_connected = False
+    listener = None
+    cleanup_done = False
+
+    def cleanup_connections():
+        nonlocal cleanup_done
+        if cleanup_done:
+            return
+        cleanup_done = True
+        if teleop_connected:
+            try:
+                teleop.disconnect()
+            except Exception:
+                logging.exception("Failed to disconnect teleoperator cleanly")
+        if robot_connected:
+            try:
+                robot.disconnect()
+            except Exception:
+                logging.exception("Failed to disconnect robot cleanly")
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                logging.exception("Failed to stop keyboard listener cleanly")
+
+    atexit.register(cleanup_connections)
     robot.connect()
+    robot_connected = True
     teleop.connect()
+    teleop_connected = True
 
     sleep_time_s = 1 / cfg.fps
 
@@ -77,7 +107,6 @@ def teleop_loop(cfg: TeleopConfig):
     is_reset = is_uf_teleop
     is_paused = True
     events = {"exit": False}
-    listener = None
     key_dict = {}
 
     if is_evt:
@@ -185,10 +214,8 @@ def teleop_loop(cfg: TeleopConfig):
         precise_sleep(sleep_time_s - dt_s)
     
     print("\n********** Teleop Control Loop Exit **********")
-    robot.disconnect()
-    teleop.disconnect()
-    if is_evt and listener is not None:
-        listener.stop()
+    cleanup_connections()
+    atexit.unregister(cleanup_connections)
 
 @parser.wrap()
 def get_cfg(cfg: TeleopConfig) -> TeleopConfig:

@@ -743,9 +743,13 @@ wheels = [
 [[package]]
 name = "dynamixel-sdk"
 version = "4.0.5"
-source = { git = "https://github.com/ROBOTIS-GIT/DynamixelSDK.git?subdirectory=python#2ded684dff05a40ac78d6a16105c6ddc1b3b9930" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyserial" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/de/ad/05bb6c7fe54c01d2712398872b300891a5b6a0181e69335f4e1717d72805/dynamixel_sdk-4.0.5.tar.gz", hash = "sha256:498ba2090f5f9844ac0610553cc70b8c79e3f6f52f7911425cdb2857210b9630", size = 29695, upload-time = "2026-05-06T02:12:08.389Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/52/a5/319d15afd31997e54e5c88b2fe1d53d15c9e63c3b8d51eda40ddff629443/dynamixel_sdk-4.0.5-py3-none-any.whl", hash = "sha256:36f9c0c078cbb8e87f5413bfcf76da8f50ce07d17690c52e52ad0f0180a7d6d8", size = 103493, upload-time = "2026-05-06T02:12:06.77Z" },
 ]
 
 [[package]]
@@ -931,12 +935,15 @@ http = [
 [[package]]
 name = "gello"
 version = "0.0.1"
-source = { git = "https://github.com/xArm-Developer/gello_software.git#523437fa4615155813124efeae26fdef32e546a0" }
+source = { editable = "third_party/gello_software" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
+
+[package.metadata]
+requires-dist = [{ name = "numpy" }]
 
 [[package]]
 name = "gitdb"
@@ -1246,8 +1253,8 @@ spacemouse = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dynamixel-sdk", marker = "extra == 'gello'", git = "https://github.com/ROBOTIS-GIT/DynamixelSDK.git?subdirectory=python" },
-    { name = "gello", marker = "extra == 'gello'", git = "https://github.com/xArm-Developer/gello_software.git" },
+    { name = "dynamixel-sdk", marker = "extra == 'gello'", specifier = ">=4.0.5" },
+    { name = "gello", marker = "extra == 'gello'", editable = "third_party/gello_software" },
     { name = "lerobot", extras = ["intelrealsense"], specifier = "==0.4.3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "numpy", specifier = ">=1.24" },

@@ -10,7 +10,6 @@ from .gello_teleop_config import GelloTeleopConfig
 
 logger = logging.getLogger(__name__)
 
-GELLO_RESET_SPEED_DEG = 30.0
 GELLO_RESET_TOLERANCE_DEG = 2.0
 GELLO_RESET_CONTROL_HZ = 50.0
 GELLO_RESET_TIMEOUT_MARGIN_S = 5.0
@@ -44,13 +43,26 @@ class GelloTeleop(UFBaseTeleop):
             driver.get_joints()  # warmup
         curr_joints = driver.get_joints()
         driver.close()
-        joint_offsets = []
         start_joints = list(map(math.radians, self.config.start_joints))
-        for i in range(len(start_joints)):
-            offset = curr_joints[i] - start_joints[i] / self.config.joint_signs[i]
-            joint_offsets.append(offset)
+        if self.config.joint_offsets is not None:
+            joint_offsets = list(map(math.radians, self.config.joint_offsets))
+        else:
+            joint_offsets = []
+            for i in range(len(start_joints)):
+                offset = curr_joints[i] - start_joints[i] / self.config.joint_signs[i]
+                joint_offsets.append(offset)
         if self.config.gripper_id >= 0:
-            gripper_config = [self.config.gripper_id, np.rad2deg(curr_joints[-1]) - 0.2, np.rad2deg(curr_joints[-1]) - 42]
+            if self.config.gripper_open_deg is not None:
+                gripper_open_deg = self.config.gripper_open_deg
+                gripper_close_deg = self.config.gripper_close_deg
+            else:
+                gripper_open_deg = np.rad2deg(curr_joints[-1]) - 0.2
+                gripper_close_deg = np.rad2deg(curr_joints[-1]) - 42
+            gripper_config = [
+                self.config.gripper_id,
+                gripper_open_deg,
+                gripper_close_deg,
+            ]
         else:
             gripper_config = None
 
@@ -150,7 +162,7 @@ class GelloTeleop(UFBaseTeleop):
             target_raw[self.dof] = gripper_open + gripper_pos * (gripper_close - gripper_open)
 
         arm_delta = np.max(np.abs(target_raw[: self.dof] - current_raw[: self.dof]))
-        reset_speed_rad_s = math.radians(GELLO_RESET_SPEED_DEG)
+        reset_speed_rad_s = math.radians(self.config.reset_speed_deg_s)
         duration_s = max(0.5, float(arm_delta / reset_speed_rad_s))
         deadline = time.perf_counter() + duration_s + GELLO_RESET_TIMEOUT_MARGIN_S
         success = False

@@ -1,0 +1,3 @@
+[submodule "third_party/gello_software"]
+	path = third_party/gello_software
+	url = https://github.com/xArm-Developer/gello_software.git

@@ -12,9 +12,17 @@ robot:
 teleop:
   type: uf::gello_teleop
   id: "gello_teleop"
-  port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAJZYC7-if00-port0"
-  # GELLO calibration reference; matches the xArm SDK initial point.
+  port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
+  joint_ids: [1, 2, 3, 4, 5, 6, 7]
+  joint_signs: [1, 1, 1, 1, 1, 1, 1]
+  # Fixed from xarm7_gello_reset_calibration.yaml. The captured GELLO pose
+  # below maps to the xArm SDK initial point instead of recalibrating at startup.
+  joint_offsets: [89.472656, 239.794922, 176.396484, 155.039062, 181.669922, 126.621094, 176.132812]
   start_joints: [0, -30, 0, 0, 0, 30, 0]
+  gripper_id: 8
+  gripper_open_deg: 198.017578
+  gripper_close_deg: 155.75
+  reset_speed_deg_s: 10.0
 
 dataset:
   # root of local repo: /home/<user_name>/.cache/huggingface/lerobot (default)
