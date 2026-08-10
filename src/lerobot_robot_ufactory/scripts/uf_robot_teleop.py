@@ -101,7 +101,6 @@ def teleop_loop(cfg: TeleopConfig):
         reset()
         if is_uf_teleop:
             obs = robot.get_observation()
-            teleop.reset_to_robot_observation(obs)
             teleop.set_teleop_enabled(True, obs)
 
     is_reset = is_uf_teleop

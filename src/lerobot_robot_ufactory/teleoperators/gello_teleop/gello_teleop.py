@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 import logging
 import time
-import math
 import numpy as np
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from ..base_teleop import UFBaseTeleop
@@ -9,10 +8,6 @@ from .gello_teleop_config import GelloTeleopConfig
 
 
 logger = logging.getLogger(__name__)
-
-GELLO_RESET_TOLERANCE_DEG = 2.0
-GELLO_RESET_CONTROL_HZ = 50.0
-GELLO_RESET_TIMEOUT_MARGIN_S = 5.0
 
 class GelloTeleop(UFBaseTeleop):
     """
@@ -30,34 +25,19 @@ class GelloTeleop(UFBaseTeleop):
         self._needs_alignment = True
         self._is_calibrated = True # CHECK!!
 
-        from gello.dynamixel.driver import DynamixelDriver
         from gello.agents.gello_agent import DynamixelRobotConfig
 
-        # auto get joint offset from gello
-        joint_ids = []
-        joint_ids.extend(self.config.joint_ids)
-        if self.config.gripper_id >= 0:
-            joint_ids.append(self.config.gripper_id)
-        driver = DynamixelDriver(joint_ids, port=self.config.port, baudrate=57600)
-        for _ in range(10):
-            driver.get_joints()  # warmup
-        curr_joints = driver.get_joints()
-        driver.close()
-        start_joints = list(map(math.radians, self.config.start_joints))
-        if self.config.joint_offsets is not None:
-            joint_offsets = list(map(math.radians, self.config.joint_offsets))
-        else:
-            joint_offsets = []
-            for i in range(len(start_joints)):
-                offset = curr_joints[i] - start_joints[i] / self.config.joint_signs[i]
-                joint_offsets.append(offset)
+        joint_offsets = [0.0] * len(self.config.joint_ids)
+        self._align_gripper_to_current = self.config.gripper_open_deg is None
         if self.config.gripper_id >= 0:
             if self.config.gripper_open_deg is not None:
                 gripper_open_deg = self.config.gripper_open_deg
                 gripper_close_deg = self.config.gripper_close_deg
             else:
-                gripper_open_deg = np.rad2deg(curr_joints[-1]) - 0.2
-                gripper_close_deg = np.rad2deg(curr_joints[-1]) - 42
+                # Only the range matters. It is shifted to the current GELLO
+                # gripper position whenever teleoperation is enabled.
+                gripper_open_deg = 0.0
+                gripper_close_deg = -42.0
             gripper_config = [
                 self.config.gripper_id,
                 gripper_open_deg,
@@ -74,7 +54,7 @@ class GelloTeleop(UFBaseTeleop):
         }
         self._dynamixel_robo_config = DynamixelRobotConfig(**param_dict)
         print(self._dynamixel_robo_config)
-        self.dof = len(start_joints)
+        self.dof = len(self.config.joint_ids)
 
     @property
     def action_features(self) -> dict:
@@ -138,67 +118,49 @@ class GelloTeleop(UFBaseTeleop):
         pass
 
     def reset_to_robot_observation(self, obs):
-        """Move the physical Gello to the robot's post-reset joint state."""
+        """Map the current passive GELLO pose to the robot's current pose."""
         if not self._is_connected:
             raise DeviceNotConnectedError("Gello teleop is not connected")
 
         self._teleop_enabled = False
         gello_robot = self.gello_agent._robot
         driver = gello_robot._driver
+        gello_robot.set_torque_mode(False)
         current_raw = np.asarray(driver.get_joints(), dtype=float)
-        target_raw = current_raw.copy()
         signs = np.asarray(gello_robot._joint_signs, dtype=float)
-        offsets = np.asarray(gello_robot._joint_offsets, dtype=float)
 
-        target_robot_joints = np.asarray(
+        robot_joints = np.asarray(
             [obs[f"J{i + 1}.pos"] for i in range(self.dof)], dtype=float
         )
-        target_raw[: self.dof] = target_robot_joints * signs[: self.dof] + offsets[: self.dof]
+        gello_robot._joint_offsets[: self.dof] = (
+            current_raw[: self.dof] - robot_joints * signs[: self.dof]
+        )
 
-        if gello_robot.gripper_open_close is not None and len(target_raw) > self.dof:
+        if (
+            self._align_gripper_to_current
+            and gello_robot.gripper_open_close is not None
+            and len(current_raw) > self.dof
+        ):
             gripper_pos = float(obs.get("gripper.pos", 0.0))
             gripper_open, gripper_close = gello_robot.gripper_open_close
             gripper_pos = min(max(gripper_pos, 0.0), 1.0)
-            target_raw[self.dof] = gripper_open + gripper_pos * (gripper_close - gripper_open)
+            gripper_span = gripper_close - gripper_open
+            gripper_open = current_raw[self.dof] - gripper_pos * gripper_span
+            gello_robot.gripper_open_close = (
+                gripper_open,
+                gripper_open + gripper_span,
+            )
 
-        arm_delta = np.max(np.abs(target_raw[: self.dof] - current_raw[: self.dof]))
-        reset_speed_rad_s = math.radians(self.config.reset_speed_deg_s)
-        duration_s = max(0.5, float(arm_delta / reset_speed_rad_s))
-        deadline = time.perf_counter() + duration_s + GELLO_RESET_TIMEOUT_MARGIN_S
-        success = False
-
-        try:
-            gello_robot.set_torque_mode(True)
-            start_t = time.perf_counter()
-            while True:
-                elapsed_s = time.perf_counter() - start_t
-                progress = min(elapsed_s / duration_s, 1.0)
-                command = current_raw + (target_raw - current_raw) * progress
-                driver.set_joints(command.tolist())
-                if progress >= 1.0:
-                    break
-                time.sleep(1.0 / GELLO_RESET_CONTROL_HZ)
-
-            while time.perf_counter() < deadline:
-                measured_raw = np.asarray(driver.get_joints(), dtype=float)
-                if np.max(np.abs(measured_raw - target_raw)) <= math.radians(GELLO_RESET_TOLERANCE_DEG):
-                    success = True
-                    break
-                driver.set_joints(target_raw.tolist())
-                time.sleep(1.0 / GELLO_RESET_CONTROL_HZ)
-
-            if not success:
-                raise RuntimeError("Gello did not reach the robot initial point before timeout")
-        finally:
-            gello_robot.set_torque_mode(False)
-            gello_robot._last_pos = None
-
+        gello_robot._last_pos = None
         self._needs_alignment = False
+        logger.info("Current GELLO pose aligned to current robot observation")
 
     def set_teleop_enabled(self, enabled: bool, obs=None):
         if enabled and not self._is_connected:
             raise DeviceNotConnectedError("Gello teleop is not connected")
-        if enabled and self._needs_alignment and obs is not None:
+        if enabled and self._needs_alignment:
+            if obs is None:
+                raise ValueError("Robot observation is required to enable GELLO teleoperation")
             self.reset_to_robot_observation(obs)
         if not enabled and self._is_connected and hasattr(self, "gello_agent"):
             self.gello_agent._robot.set_torque_mode(False)

@@ -478,7 +478,6 @@ def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode):
 
     if is_uf_teleop:
         obs = robot.get_observation()
-        teleop.reset_to_robot_observation(obs)
         teleop.set_teleop_enabled(True, obs)
 
 
