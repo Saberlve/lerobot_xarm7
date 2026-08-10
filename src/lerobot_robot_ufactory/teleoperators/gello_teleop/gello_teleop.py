@@ -4,6 +4,7 @@ import time
 import numpy as np
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from ..base_teleop import UFBaseTeleop
+from .gello_adapter import PatchedDynamixelRobotConfig
 from .gello_teleop_config import GelloTeleopConfig
 
 
@@ -24,8 +25,6 @@ class GelloTeleop(UFBaseTeleop):
         self._teleop_enabled = False
         self._needs_alignment = True
         self._is_calibrated = True # CHECK!!
-
-        from gello.agents.gello_agent import DynamixelRobotConfig
 
         joint_offsets = [0.0] * len(self.config.joint_ids)
         self._align_gripper_to_current = self.config.gripper_open_deg is None
@@ -52,7 +51,7 @@ class GelloTeleop(UFBaseTeleop):
                 "joint_offsets": joint_offsets,
                 "gripper_config": gripper_config
         }
-        self._dynamixel_robo_config = DynamixelRobotConfig(**param_dict)
+        self._dynamixel_robo_config = PatchedDynamixelRobotConfig(**param_dict)
         print(self._dynamixel_robo_config)
         self.dof = len(self.config.joint_ids)
 

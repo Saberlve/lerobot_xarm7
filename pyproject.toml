@@ -45,7 +45,7 @@ uf-camera-test = "lerobot_robot_ufactory.scripts.uf_camera_test:main"
 [project.optional-dependencies]
 # GELLO 遥操作
 gello = [
-    "gello",
+    "gello @ git+https://github.com/xArm-Developer/gello_software.git",
     "dynamixel-sdk>=4.0.5",
 ]
 # SpaceMouse 遥操作
@@ -69,9 +69,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "lerobot_robot_ufactory.devices.umi.xvlib" = ["*.so", "*.so.*"]
-
-[tool.uv.sources]
-gello = { path = "third_party/gello_software", editable = true }
 
 [tool.ruff]
 line-length = 100

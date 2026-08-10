@@ -3,7 +3,9 @@ import pytest
 
 from lerobot_robot_ufactory.teleoperators.gello_teleop import gello_teleop as gello_module
 from lerobot_robot_ufactory.scripts.uf_lerobot_record import _prepare_recording_episode
-from gello.robots.dynamixel import DynamixelRobot
+from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_adapter import (
+    ContinuousDynamixelRobot,
+)
 
 
 class FakeDriver:
@@ -88,7 +90,7 @@ def test_fixed_gripper_endpoints_are_not_shifted_during_arm_alignment():
 
 
 def test_dynamixel_arm_joint_is_continuous_across_encoder_wrap():
-    robot = DynamixelRobot(
+    robot = ContinuousDynamixelRobot(
         joint_ids=[1],
         joint_offsets=[0.0],
         joint_signs=[1],

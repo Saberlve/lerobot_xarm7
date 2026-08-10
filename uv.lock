@@ -935,15 +935,12 @@ http = [
 [[package]]
 name = "gello"
 version = "0.0.1"
-source = { editable = "third_party/gello_software" }
+source = { git = "https://github.com/xArm-Developer/gello_software.git#523437fa4615155813124efeae26fdef32e546a0" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
-
-[package.metadata]
-requires-dist = [{ name = "numpy" }]
 
 [[package]]
 name = "gitdb"
@@ -1254,7 +1251,7 @@ spacemouse = [
 [package.metadata]
 requires-dist = [
     { name = "dynamixel-sdk", marker = "extra == 'gello'", specifier = ">=4.0.5" },
-    { name = "gello", marker = "extra == 'gello'", editable = "third_party/gello_software" },
+    { name = "gello", marker = "extra == 'gello'", git = "https://github.com/xArm-Developer/gello_software.git" },
     { name = "lerobot", extras = ["intelrealsense"], specifier = "==0.4.3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "numpy", specifier = ">=1.24" },
