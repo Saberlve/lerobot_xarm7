@@ -16,6 +16,8 @@ class UFRobotConfig(RobotConfig):
     gripper_port: str = None    # only used by pika gripper (gripper_type=10)
     gripper_speed: int = -1     # auto
     gripper_force: int = -1     # auto
+    gripper_command_threshold: float = 0.01  # normalized change required before sending a new command
+    gripper_error_log_path: str | None = "logs/xarm_gripper_errors.log"
     observe_joint_vel: bool = False # only effective in joint control mode
     manual_mode: bool = False  # xArm joint teaching mode; records state and optional gripper actions
     manual_gripper_speed: float = 0.5  # normalized gripper position per second in manual mode
@@ -37,5 +39,7 @@ class UFRobotConfig(RobotConfig):
                 raise ValueError("teach_sensitivity must be between 1 and 5")
         if self.manual_gripper_speed < 0:
             raise ValueError("manual_gripper_speed must be non-negative")
+        if not 0 <= self.gripper_command_threshold <= 1:
+            raise ValueError("gripper_command_threshold must be between 0 and 1")
         if self.control_space == "joint" and self.joint_command_mode not in (1, 6):
             raise ValueError("joint_command_mode must be 1 or 6 for joint control")

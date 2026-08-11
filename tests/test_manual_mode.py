@@ -279,6 +279,35 @@ def test_manual_mode_initializes_gripper_without_opening_and_sends_only_gripper(
     robot.disconnect()
 
 
+def test_gripper_command_is_only_sent_after_target_changes(monkeypatch, tmp_path):
+    from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
+
+    arm = FakeXArm("192.168.1.245")
+    monkeypatch.setattr(uf_robot_module, "XArmAPI", lambda robot_ip: arm)
+    monkeypatch.setattr(uf_robot_module.time, "sleep", lambda _: None)
+
+    config = UFRobotConfig(
+        id="test_gripper_command_threshold",
+        calibration_dir=tmp_path,
+        robot_ip=arm.robot_ip,
+        robot_dof=6,
+        control_space="joint",
+        gripper_type=1,
+        manual_mode=True,
+        gripper_command_threshold=0.01,
+    )
+    robot = uf_robot_module.UFRobot(config)
+    robot.connect()
+
+    robot.send_action({"gripper.pos": 0.5})
+    robot.send_action({"gripper.pos": 0.505})
+    robot.send_action({"gripper.pos": 0.52})
+
+    writes = [call for call in arm.calls if call[0] == "getset_tgpio_modbus_data"]
+    assert len(writes) == 2
+    robot.disconnect()
+
+
 def test_manual_record_config_has_no_teleop(monkeypatch):
     config_path = Path("config/manual_mode/xarm7_manual_record_config.yaml").resolve()
     monkeypatch.setattr(

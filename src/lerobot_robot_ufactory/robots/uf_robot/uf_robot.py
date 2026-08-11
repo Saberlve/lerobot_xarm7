@@ -5,8 +5,10 @@ import math
 import logging
 import struct
 import numpy as np
+from datetime import datetime
 from enum import IntEnum
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Thread, Event, Lock
 from lerobot.robots import Robot
 from lerobot.cameras.utils import make_cameras_from_configs
@@ -88,6 +90,8 @@ class UFRobot(Robot, Thread):
         self.logs = {}
 
         self._cmd_cnt = 0
+        self._last_gripper_command = None
+        self._last_logged_controller_error = 0
 
         self._max_joint_velocity = math.radians(self.config.max_joint_velocity)
         self._max_linear_velocity = self.config.max_linear_velocity
@@ -302,11 +306,14 @@ class UFRobot(Robot, Thread):
         self.real_arm._arm._baud_checkset = True
         try:
             if self._gripper_type == GripperType.xArmGripper:
-                self.real_arm.set_gripper_enable(True)
-                self.real_arm.set_gripper_mode(0)
-                self.real_arm.set_gripper_speed(self._gripper_param.speed)
+                self._check_gripper_code("set_gripper_enable", self.real_arm.set_gripper_enable(True))
+                self._check_gripper_code("set_gripper_mode", self.real_arm.set_gripper_mode(0))
+                self._check_gripper_code("set_gripper_speed", self.real_arm.set_gripper_speed(self._gripper_param.speed))
                 if move_to_open:
-                    self.real_arm.set_gripper_position(self._gripper_param.open_pos)
+                    self._check_gripper_code(
+                        "set_gripper_position",
+                        self.real_arm.set_gripper_position(self._gripper_param.open_pos),
+                    )
             elif self._gripper_type == GripperType.xArmGripperG2:
                 self.real_arm.set_gripper_enable(True)
                 self.real_arm.set_gripper_mode(0)
@@ -346,6 +353,7 @@ class UFRobot(Robot, Thread):
 
     def get_observation(self) -> dict[str, np.ndarray]:
         obs_dict = {}
+        self._log_controller_error_if_changed("get_observation")
 
         # Read Stretch state
         before_read_t = time.perf_counter()
@@ -377,6 +385,8 @@ class UFRobot(Robot, Thread):
         if self._gripper_type > GripperType.NoGripper:
             if self._gripper_type == GripperType.xArmGripper:
                 code, grippos = self.real_arm.get_gripper_position()
+                if code != 0 or grippos is None:
+                    self._log_gripper_error("get_gripper_position", code, f"position={grippos}")
                 grippos_norm = self._gripper_param.get_gripper_norm(grippos)
             elif self._gripper_type == GripperType.xArmGripperG2:
                 code, grippos = self.real_arm.get_gripper_g2_position()
@@ -411,11 +421,18 @@ class UFRobot(Robot, Thread):
 
     def _send_gripper_action(self, gripper_norm: float) -> None:
         gripper_norm = min(max(float(gripper_norm), 0.0), 1.0)
+        if (
+            self._last_gripper_command is not None
+            and abs(gripper_norm - self._last_gripper_command)
+            < self.config.gripper_command_threshold
+        ):
+            return
+
         if self._gripper_type == GripperType.xArmGripper:
             grippos = self._gripper_param.get_grippos(gripper_norm)
             modbus_datas = [0x08, 0x10, 0x07, 0x00, 0x00, 0x02, 0x04]
             modbus_datas.extend(list(struct.pack('>i', grippos)))
-            self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+            result = self.real_arm.getset_tgpio_modbus_data(modbus_datas)
         elif self._gripper_type == GripperType.xArmGripperG2:
             grippos = self._gripper_param.get_grippos(gripper_norm)
             grippos = int((math.degrees(math.asin((grippos - 16) / 110)) + 8.33) * 18.28)
@@ -423,7 +440,7 @@ class UFRobot(Robot, Thread):
             modbus_datas.extend(list(struct.pack('>h', self._gripper_param.speed)))
             modbus_datas.extend(list(struct.pack('>h', self._gripper_param.force)))
             modbus_datas.extend(list(struct.pack('>i', grippos)))
-            self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+            result = self.real_arm.getset_tgpio_modbus_data(modbus_datas)
         elif self._gripper_type == GripperType.BioGripperG2:
             grippos = self._gripper_param.get_grippos(gripper_norm)
             grippos = int(grippos * 3.7342 - 265.13)
@@ -431,14 +448,53 @@ class UFRobot(Robot, Thread):
             modbus_datas.extend(list(struct.pack('>h', self._gripper_param.speed)))
             modbus_datas.extend(list(struct.pack('>h', self._gripper_param.force)))
             modbus_datas.extend(list(struct.pack('>i', grippos)))
-            self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+            result = self.real_arm.getset_tgpio_modbus_data(modbus_datas)
         elif self._gripper_type == GripperType.PikaGripper:
             grippos = self._gripper_param.get_grippos(gripper_norm)
             self.pika_gripper.set_gripper_distance(grippos)
+            result = 0
         elif self._gripper_type == GripperType.RobotiqGripper:
             grippos = self._gripper_param.get_grippos(gripper_norm)
             modbus_datas = [0x09, 0x10, 0x03, 0xE8, 0x00, 0x03, 0x06, 0x09, 0x00, 0x00, grippos, self._gripper_param.speed, self._gripper_param.force]
-            self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+            result = self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+
+        code = result[0] if isinstance(result, (tuple, list)) else result
+        if code not in (None, 0):
+            self._log_gripper_error("send_gripper_action", code, f"target={gripper_norm:.6f}")
+            return
+        self._last_gripper_command = gripper_norm
+
+    def _log_gripper_error(self, operation: str, code, detail: str = "") -> None:
+        controller_error = getattr(self.real_arm, "error_code", None)
+        message = (
+            f"gripper communication error: operation={operation}, code={code}, "
+            f"controller_error={controller_error}, {detail}"
+        ).rstrip(", ")
+        logging.error(message)
+
+        log_path = self.config.gripper_error_log_path
+        if not log_path:
+            return
+        try:
+            path = Path(log_path).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(f"{timestamp} {message}\n")
+        except OSError:
+            logging.exception("Failed to write gripper error log to %s", log_path)
+
+    def _check_gripper_code(self, operation: str, code) -> None:
+        if code in (None, 0):
+            return
+        self._log_gripper_error(operation, code)
+        raise RuntimeError(f"{operation} failed, code={code}, {self._motion_status()}")
+
+    def _log_controller_error_if_changed(self, operation: str) -> None:
+        controller_error = getattr(self.real_arm, "error_code", 0)
+        if controller_error and controller_error != self._last_logged_controller_error:
+            self._log_gripper_error(operation, "controller", "controller error became active")
+        self._last_logged_controller_error = controller_error
 
     def _motion_status(self) -> str:
         """Return controller state details for a failed motion command."""
@@ -457,6 +513,7 @@ class UFRobot(Robot, Thread):
     def send_action(self, action: dict) -> np.ndarray:
         if not self._is_connected:
             raise ConnectionError()
+        self._log_controller_error_if_changed("send_action")
         if self.config.manual_mode:
             gripper_key = f"{self.prefix}gripper.pos"
             if (

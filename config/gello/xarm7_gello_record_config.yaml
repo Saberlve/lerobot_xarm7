@@ -5,6 +5,8 @@ robot:
   control_space: "joint"
   robot_ip: "192.168.1.245"
   gripper_type: 1
+  # Append gripper initialization/read/write failures here.
+  gripper_error_log_path: "logs/xarm7_gripper_errors.log"
   # Redundant args, indicating the initial pose of xarm7. Set by 192.168.1.245:18333
   # start_joints: [0, -30, 0, 0, 0, 30, 0]
 
@@ -21,7 +23,7 @@ teleop:
 
 dataset:
   # root of local repo: /home/<user_name>/.cache/huggingface/lerobot (default)
-  root: "/home/uf/Data/lerobot_datas/record/ufactory/xarm6_gello_datas"
+  root: "/home/user/projects/lerobot_xarm7/datasets"
   repo_id: "ufactory/xarm6_gello_datas"
   single_task: "Pick up the purple grape and drop into the box on the left."
   fps: 30

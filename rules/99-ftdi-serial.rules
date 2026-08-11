@@ -1,0 +1,2 @@
+# FTDI FT232H (GELLO 示教臂串口) — 自动授予读写权限
+KERNEL=="ttyUSB*", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6014", MODE:="0666", SYMLINK+="ttyFTDI"
