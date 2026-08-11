@@ -16,8 +16,8 @@ teleop:
   gripper_id: 8
 
 dataset:
-  # root of local repo: /home/<user_name>/.cache/huggingface/lerobot (default)
-  root: "/home/uf/Data/lerobot_datas/record/ufactory/xarm6_gello_datas"
+  # Dataset path relative to the directory where the command is started.
+  root: "datasets/xarm6_gello_datas"
   repo_id: "ufactory/xarm6_gello_datas"
   single_task: "Pick up the purple grape and drop into the box on the left."
   fps: 30

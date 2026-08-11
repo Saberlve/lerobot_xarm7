@@ -24,8 +24,8 @@ teleop:
   robot_base_pose: [400, 0, 400, 180, 0, 0]
 
 dataset:
-  # root of local repo: /home/<user_name>/.cache/huggingface/lerobot (default)
-  root: "/home/uf/Data/lerobot_datas/record/ufactory/umi_datas"
+  # Dataset path relative to the directory where the command is started.
+  root: "datasets/umi_datas"
   repo_id: "ufactory/umi_datas"
   single_task: "Pick up the purple grape and drop into the box on the left."
   fps: 60
