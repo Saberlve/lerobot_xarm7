@@ -131,7 +131,7 @@ def test_manual_mode_robot_enters_teaching_mode_without_sending_actions(monkeypa
             "set_servo_angle",
             {
                 "angle": arm.initial_point,
-                "speed": 60,
+                "speed": 20,
                 "is_radian": False,
                 "wait": True,
             },
@@ -177,12 +177,47 @@ def test_robot_reset_uses_sdk_initial_point_in_normal_mode(monkeypatch, tmp_path
             "set_servo_angle",
             {
                 "angle": arm.initial_point,
-                "speed": 60,
+                "speed": 20,
                 "is_radian": False,
                 "wait": True,
             },
         )
     ]
+
+    robot.disconnect()
+
+
+def test_normal_mode_waits_for_gripper_to_open_before_control(monkeypatch, tmp_path):
+    from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
+
+    arm = FakeXArm("192.168.1.245")
+    arm.gripper_position = 400
+    monkeypatch.setattr(uf_robot_module, "XArmAPI", lambda robot_ip: arm)
+    monkeypatch.setattr(uf_robot_module.time, "sleep", lambda _: None)
+
+    config = UFRobotConfig(
+        id="test_wait_for_gripper",
+        calibration_dir=tmp_path,
+        robot_ip=arm.robot_ip,
+        robot_dof=6,
+        control_space="joint",
+        gripper_type=1,
+    )
+    robot = uf_robot_module.UFRobot(config)
+    robot.connect()
+
+    open_calls = [call for call in arm.calls if call[0] == "set_gripper_position"]
+    assert open_calls == [("set_gripper_position", 800, {"wait": True})]
+    assert robot._last_gripper_command == 0.0
+
+    before_writes = len(
+        [call for call in arm.calls if call[0] == "getset_tgpio_modbus_data"]
+    )
+    robot._send_gripper_action(0.0)
+    after_writes = len(
+        [call for call in arm.calls if call[0] == "getset_tgpio_modbus_data"]
+    )
+    assert after_writes == before_writes
 
     robot.disconnect()
 

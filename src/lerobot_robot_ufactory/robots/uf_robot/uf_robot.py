@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 ## Configurations:
 INIT_SYNC_JOINT_VELOCITY_RAD = 0.2
-ROBOT_RESET_SPEED_DEG = 60
+ROBOT_RESET_SPEED_DEG = 20
 TCP_Z_CLAMP_TOLERANCE_MM = 1e-3
 TCP_Z_LOG_INTERVAL_S = 1.0
 TCP_Z_MAX_IK_JOINT_STEP_RAD = math.radians(10.0)
@@ -519,7 +519,10 @@ class UFRobot(Robot, Thread):
                 if move_to_open:
                     self._check_gripper_code(
                         "set_gripper_position",
-                        self.real_arm.set_gripper_position(self._gripper_param.open_pos),
+                        self.real_arm.set_gripper_position(
+                            self._gripper_param.open_pos,
+                            wait=True,
+                        ),
                     )
             elif self._gripper_type == GripperType.xArmGripperG2:
                 self.real_arm.set_gripper_enable(True)
@@ -553,6 +556,7 @@ class UFRobot(Robot, Thread):
         if move_to_open:
             self._gripper_param.grippos = self._gripper_param.open_pos
             self._gripper_param.gripper_norm = 0.0
+            self._last_gripper_command = 0.0
 
     def calibrate(self) -> None:
         self._is_calibrated = True
