@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+from threading import Lock
 
 import numpy as np
 import pytest
@@ -13,10 +14,11 @@ class FakeKinematicsArm:
     def __init__(self, requested_pose=None, safe_pose=None):
         self.requested_pose = requested_pose or [300.0, 10.0, 90.0, 0.1, 0.2, 0.3]
         self.safe_pose = safe_pose or [300.0, 10.0, 100.0, 0.1, 0.2, 0.3]
-        self.inverse_result = [0.9] * 7
+        self.inverse_result = [0.3] * 7
         self.inverse_calls = []
         self.fail_forward = False
         self.fail_inverse = False
+        self.joint_limit = False
 
     def get_forward_kinematics(self, angles, **kwargs):
         if self.fail_forward:
@@ -30,6 +32,9 @@ class FakeKinematicsArm:
         if self.fail_inverse:
             return 2, []
         return 0, self.inverse_result.copy()
+
+    def is_joint_limit(self, target, **kwargs):
+        return 0, self.joint_limit
 
 
 def make_guard_robot(arm, min_tcp_z_mm=100.0, control_space="joint"):
@@ -58,6 +63,20 @@ def test_joint_target_above_floor_is_unchanged():
     assert np.allclose(robot._last_safe_joint_target, requested)
 
 
+def test_joint_guard_uses_rt_report_fast_path_far_above_floor():
+    arm = FakeKinematicsArm()
+    robot = make_guard_robot(arm)
+    robot._rt_report_normal = True
+    robot._update_lock = Lock()
+    robot.rt_actual_tcp_pose = [0.0, 0.0, 200.0, 0.0, 0.0, 0.0]
+    robot._tcp_z_guard_activation_margin_mm = 50.0
+
+    result = robot._guard_joint_target([0.1] * 7)
+
+    assert np.allclose(result, [0.1] * 7)
+    assert arm.inverse_calls == []
+
+
 def test_joint_target_below_floor_clamps_only_tcp_z_before_inverse_kinematics():
     arm = FakeKinematicsArm()
     robot = make_guard_robot(arm)
@@ -69,8 +88,21 @@ def test_joint_target_below_floor_clamps_only_tcp_z_before_inverse_kinematics():
     inverse_pose, inverse_kwargs = arm.inverse_calls[0]
     assert inverse_pose == pytest.approx([300.0, 10.0, 100.0, 0.1, 0.2, 0.3])
     assert inverse_kwargs["limited"] is True
-    assert inverse_kwargs["ref_angles"] == requested
+    assert inverse_kwargs["ref_angles"] == pytest.approx([0.25] * 7)
     assert np.allclose(robot._last_safe_joint_target, arm.inverse_result)
+
+
+def test_successive_clamped_ik_uses_last_accepted_solution_as_reference():
+    arm = FakeKinematicsArm()
+    robot = make_guard_robot(arm)
+
+    first_result = robot._guard_joint_target([0.1] * 7)
+    arm.inverse_result = [0.32] * 7
+    second_result = robot._guard_joint_target([0.05] * 7)
+
+    assert first_result == pytest.approx([0.3] * 7)
+    assert second_result == pytest.approx([0.32] * 7)
+    assert arm.inverse_calls[1][1]["ref_angles"] == pytest.approx([0.3] * 7)
 
 
 @pytest.mark.parametrize("failed_stage", ["forward", "inverse", "verification"])
@@ -82,6 +114,27 @@ def test_joint_guard_holds_last_safe_target_when_kinematics_fails(failed_stage):
         arm.fail_inverse = True
     else:
         arm.safe_pose[2] = 99.0
+    robot = make_guard_robot(arm)
+
+    result = robot._guard_joint_target([0.1] * 7)
+
+    assert np.allclose(result, [0.25] * 7)
+
+
+def test_joint_guard_holds_last_safe_target_when_ik_hits_joint_limit():
+    arm = FakeKinematicsArm()
+    arm.joint_limit = True
+    robot = make_guard_robot(arm)
+
+    result = robot._guard_joint_target([0.1] * 7)
+
+    assert np.allclose(result, [0.25] * 7)
+
+
+def test_joint_guard_rejects_discontinuous_ik_solution():
+    arm = FakeKinematicsArm()
+    arm.inverse_result = [1.5] * 7
+    arm.safe_pose[2] = 100.0
     robot = make_guard_robot(arm)
 
     result = robot._guard_joint_target([0.1] * 7)

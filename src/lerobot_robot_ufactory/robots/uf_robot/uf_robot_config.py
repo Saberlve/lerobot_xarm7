@@ -32,6 +32,10 @@ class UFRobotConfig(RobotConfig):
     # Optional TCP height floor in the xArm base coordinate system (mm).
     # The value should include any desired safety margin above the table.
     min_tcp_z_mm: float | None = None
+    # Skip synchronous FK while the actual TCP is this far above the floor.
+    # The RT report keeps this fast path asynchronous and avoids jitter during
+    # normal teleoperation; FK/IK remains active near the configured floor.
+    tcp_z_guard_activation_margin_mm: float = 100.0
 
     def __post_init__(self):
         super().__post_init__()
@@ -49,3 +53,8 @@ class UFRobotConfig(RobotConfig):
             raise ValueError("joint_command_mode must be 1 or 6 for joint control")
         if self.min_tcp_z_mm is not None and not math.isfinite(self.min_tcp_z_mm):
             raise ValueError("min_tcp_z_mm must be finite when provided")
+        if (
+            not math.isfinite(self.tcp_z_guard_activation_margin_mm)
+            or self.tcp_z_guard_activation_margin_mm < 0
+        ):
+            raise ValueError("tcp_z_guard_activation_margin_mm must be finite and non-negative")

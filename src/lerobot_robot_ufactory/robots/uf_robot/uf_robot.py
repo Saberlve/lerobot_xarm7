@@ -25,6 +25,7 @@ INIT_SYNC_JOINT_VELOCITY_RAD = 0.2
 ROBOT_RESET_SPEED_DEG = 60
 TCP_Z_CLAMP_TOLERANCE_MM = 1e-3
 TCP_Z_LOG_INTERVAL_S = 1.0
+TCP_Z_MAX_IK_JOINT_STEP_RAD = math.radians(10.0)
 
 CARTESIAN_OBS_KEYS = [
     "pose.x", "pose.y", "pose.z", "pose.rx", "pose.ry", "pose.rz",
@@ -102,6 +103,7 @@ class UFRobot(Robot, Thread):
         self._max_linear_velocity = self.config.max_linear_velocity
 
         self._min_tcp_z_mm = self.config.min_tcp_z_mm
+        self._tcp_z_guard_activation_margin_mm = self.config.tcp_z_guard_activation_margin_mm
         self._last_safe_joint_target = None
         self._last_safe_cartesian_target = None
         self._tcp_z_is_clamped = False
@@ -111,7 +113,11 @@ class UFRobot(Robot, Thread):
         self.report_stop_event = Event()
         self._rt_report_normal = False
         self._update_lock = Lock()
-        self._use_rt_report = (self._control_space == "cartesian") # Cartesian observations must utilize rt_report
+        # The TCP z guard uses the asynchronous RT report to avoid a blocking
+        # FK request on every GELLO servo cycle.
+        self._use_rt_report = (
+            self._control_space == "cartesian" or self._min_tcp_z_mm is not None
+        )
         self._cart_obs_has_vel = any('velo.' in key for key in CARTESIAN_OBS_KEYS)
         self._jnt_obs_has_vel = self.config.observe_joint_vel
 
@@ -323,6 +329,15 @@ class UFRobot(Robot, Thread):
             if desired.shape != (self._dof,) or not np.all(np.isfinite(desired)):
                 raise ValueError("joint target has invalid shape or contains NaN/Inf")
 
+            # Far above the floor, the current TCP height is available from
+            # the RT report. Bypass the synchronous controller FK call so the
+            # normal GELLO path keeps a stable command cadence. A large
+            # activation margin absorbs ordinary per-cycle motion changes.
+            if self._rt_actual_tcp_is_far_above_floor():
+                self._last_safe_joint_target = desired.copy()
+                self._log_tcp_z_clamp(False)
+                return desired
+
             code, pose = self.real_arm.get_forward_kinematics(
                 desired.tolist(), input_is_radian=True, return_is_radian=True
             )
@@ -332,24 +347,27 @@ class UFRobot(Robot, Thread):
 
             requested_z = float(pose[2])
             if requested_z >= self._min_tcp_z_mm:
+                self._validate_guard_joint_target(desired, fallback, "GELLO target")
                 self._last_safe_joint_target = desired.copy()
                 self._log_tcp_z_clamp(False)
                 return desired
 
             clamped_pose = pose[:6].copy()
             clamped_pose[2] = self._min_tcp_z_mm
+            ik_reference = fallback if fallback is not None else desired
             code, inverse = self.real_arm.get_inverse_kinematics(
                 clamped_pose.tolist(),
                 input_is_radian=True,
                 return_is_radian=True,
                 limited=True,
-                ref_angles=desired.tolist(),
+                ref_angles=np.asarray(ik_reference, dtype=np.float64).tolist(),
             )
             inverse = np.asarray(inverse, dtype=np.float64)
             if code != 0 or inverse.shape[0] < self._dof or not np.all(np.isfinite(inverse)):
                 raise RuntimeError(f"inverse kinematics failed, code={code}")
 
             safe_target = inverse[:self._dof].copy()
+            self._validate_guard_joint_target(safe_target, fallback, "clamped IK target")
             code, verified_pose = self.real_arm.get_forward_kinematics(
                 safe_target.tolist(), input_is_radian=True, return_is_radian=True
             )
@@ -370,6 +388,48 @@ class UFRobot(Robot, Thread):
             if fallback is None:
                 return None
             return np.asarray(fallback, dtype=np.float64).copy()
+
+    def _validate_guard_joint_target(
+        self,
+        target: np.ndarray,
+        previous_safe_target: np.ndarray | None,
+        label: str,
+    ) -> None:
+        code, is_limited = self.real_arm.is_joint_limit(target.tolist(), is_radian=True)
+        if code != 0 or is_limited is not False:
+            raise RuntimeError(
+                f"{label} violates a joint limit, code={code}, limited={is_limited}, "
+                f"target={target.tolist()}"
+            )
+
+        if previous_safe_target is None:
+            return
+        previous = np.asarray(previous_safe_target, dtype=np.float64)
+        if previous.shape != target.shape or not np.all(np.isfinite(previous)):
+            raise RuntimeError("previous safe joint target is invalid")
+        delta = (target - previous + math.pi) % (2 * math.pi) - math.pi
+        max_delta = float(np.max(np.abs(delta)))
+        if max_delta > TCP_Z_MAX_IK_JOINT_STEP_RAD:
+            raise RuntimeError(
+                f"{label} jumps {math.degrees(max_delta):.1f} deg from the previous safe target"
+            )
+
+    def _rt_actual_tcp_is_far_above_floor(self) -> bool:
+        if self._min_tcp_z_mm is None or not getattr(self, "_rt_report_normal", False):
+            return False
+        update_lock = getattr(self, "_update_lock", None)
+        if update_lock is None:
+            return False
+        with update_lock:
+            pose = getattr(self, "rt_actual_tcp_pose", None)
+            if pose is None or len(pose) < 3:
+                return False
+            actual_z = float(pose[2])
+        activation_margin = getattr(self, "_tcp_z_guard_activation_margin_mm", 100.0)
+        return (
+            math.isfinite(actual_z)
+            and actual_z > self._min_tcp_z_mm + activation_margin
+        )
 
     def _guard_cartesian_target(self, command: list[float]) -> np.ndarray | None:
         """Clamp a Cartesian target without changing its other five components."""
