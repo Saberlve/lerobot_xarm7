@@ -445,6 +445,10 @@ def record_loop(
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
         _sent_action = robot.send_action(robot_action_to_send)
+        # Robots may clamp or otherwise sanitize a command before sending it.
+        # Store that effective command so demonstrations match the motion.
+        if isinstance(_sent_action, dict):
+            action_values = _sent_action
 
         # Write to dataset
         if dataset is not None:

@@ -125,6 +125,20 @@ uv run uf-robot-teleop --config_path config/gello/xarm7_gello_record_config.yaml
 
 `Space` reset & start, `←` reset, `Esc` exit.
 
+#### Configure the GELLO TCP height floor
+
+Stop other robot control processes, move the TCP to its lowest safe pose, then read its height:
+
+```bash
+uv run uf-read-tcp-z \
+  --config-path config/gello/xarm7_gello_record_config.yaml \
+  --margin-mm 5
+```
+
+The command does not move the arm. Put the recommended `min_tcp_z_mm` value in the GELLO YAML. Teleop, recording, and other control entry points using that robot configuration will then enforce the floor immediately before sending each command. For joint control, targets below the floor retain their TCP x/y position and orientation while z is clamped.
+
+> This protects the TCP against crossing a horizontal plane. It does not detect collisions involving links, the elbow, or the gripper body, and it does not replace the emergency stop. Measure again after changing the tool, TCP offset, robot base, or table position.
+
 ### 2. GELLO data collection
 
 ```bash

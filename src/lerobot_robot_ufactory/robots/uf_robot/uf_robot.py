@@ -17,9 +17,14 @@ from .uf_robot_config import UFRobotConfig
 from xarm.wrapper import XArmAPI
 from xarm.core.utils import convert
 
+
+logger = logging.getLogger(__name__)
+
 ## Configurations:
 INIT_SYNC_JOINT_VELOCITY_RAD = 0.2
 ROBOT_RESET_SPEED_DEG = 60
+TCP_Z_CLAMP_TOLERANCE_MM = 1e-3
+TCP_Z_LOG_INTERVAL_S = 1.0
 
 CARTESIAN_OBS_KEYS = [
     "pose.x", "pose.y", "pose.z", "pose.rx", "pose.ry", "pose.rz",
@@ -95,6 +100,13 @@ class UFRobot(Robot, Thread):
 
         self._max_joint_velocity = math.radians(self.config.max_joint_velocity)
         self._max_linear_velocity = self.config.max_linear_velocity
+
+        self._min_tcp_z_mm = self.config.min_tcp_z_mm
+        self._last_safe_joint_target = None
+        self._last_safe_cartesian_target = None
+        self._tcp_z_is_clamped = False
+        self._tcp_z_last_log_time = 0.0
+        self._tcp_z_last_error_log_time = 0.0
 
         self.report_stop_event = Event()
         self._rt_report_normal = False
@@ -214,6 +226,8 @@ class UFRobot(Robot, Thread):
             self.configure()
         else:
             self.reset_to_initial()
+        if self._min_tcp_z_mm is not None and self.config.manual_mode:
+            self._initialize_tcp_z_guard()
         if calibrate:  
             self.calibrate()
 
@@ -247,6 +261,139 @@ class UFRobot(Robot, Thread):
             raise RuntimeError(f"Failed to move to xArm initial point, code={code}")
 
         self.configure()
+        if self._min_tcp_z_mm is not None:
+            self._initialize_tcp_z_guard()
+
+    def _initialize_tcp_z_guard(self) -> None:
+        """Initialize guard state from the robot's current physical target."""
+        if self._min_tcp_z_mm is None or self.real_arm is None:
+            return
+
+        if self._control_space == "joint":
+            code, states = self.real_arm.get_joint_states(is_radian=True, num=1)
+            if code != 0 or not states or len(states[0]) < self._dof:
+                raise RuntimeError(f"Unable to initialize TCP z guard from joint state, code={code}")
+            target = np.asarray(states[0][:self._dof], dtype=np.float64)
+            if not np.all(np.isfinite(target)):
+                raise RuntimeError("Unable to initialize TCP z guard from non-finite joint state")
+            self._last_safe_joint_target = target
+        else:
+            code, pose = self.real_arm.get_position_aa(is_radian=True)
+            if code != 0 or len(pose) < 6:
+                raise RuntimeError(f"Unable to initialize TCP z guard from TCP pose, code={code}")
+            target = np.asarray(pose[:6], dtype=np.float64)
+            if not np.all(np.isfinite(target)):
+                raise RuntimeError("Unable to initialize TCP z guard from non-finite TCP pose")
+            self._last_safe_cartesian_target = target
+
+        self._tcp_z_is_clamped = False
+        self._tcp_z_last_log_time = 0.0
+        self._tcp_z_last_error_log_time = 0.0
+
+    def _log_tcp_z_clamp(self, clamped: bool, requested_z: float | None = None) -> None:
+        """Log clamp state changes while avoiding per-cycle console spam."""
+        now = time.monotonic()
+        if clamped:
+            should_log = not self._tcp_z_is_clamped or now - self._tcp_z_last_log_time >= TCP_Z_LOG_INTERVAL_S
+            if should_log:
+                logger.warning(
+                    "TCP z safety clamp active: requested %.2f mm, limiting to %.2f mm",
+                    requested_z if requested_z is not None else float("nan"),
+                    self._min_tcp_z_mm,
+                )
+                self._tcp_z_last_log_time = now
+        elif self._tcp_z_is_clamped:
+            logger.info("TCP z safety clamp released")
+        self._tcp_z_is_clamped = clamped
+
+    def _log_tcp_z_guard_error(self, message: str) -> None:
+        now = time.monotonic()
+        if now - self._tcp_z_last_error_log_time >= TCP_Z_LOG_INTERVAL_S:
+            logger.error("TCP z safety guard rejected target: %s", message)
+            self._tcp_z_last_error_log_time = now
+
+    def _guard_joint_target(self, command: list[float]) -> np.ndarray | None:
+        """Return a safe joint target, or None when motion must be skipped."""
+        desired = np.asarray(command, dtype=np.float64)
+        if self._min_tcp_z_mm is None:
+            return desired
+
+        fallback = self._last_safe_joint_target
+        try:
+            if desired.shape != (self._dof,) or not np.all(np.isfinite(desired)):
+                raise ValueError("joint target has invalid shape or contains NaN/Inf")
+
+            code, pose = self.real_arm.get_forward_kinematics(
+                desired.tolist(), input_is_radian=True, return_is_radian=True
+            )
+            pose = np.asarray(pose, dtype=np.float64)
+            if code != 0 or pose.shape[0] < 6 or not np.all(np.isfinite(pose)):
+                raise RuntimeError(f"forward kinematics failed, code={code}")
+
+            requested_z = float(pose[2])
+            if requested_z >= self._min_tcp_z_mm:
+                self._last_safe_joint_target = desired.copy()
+                self._log_tcp_z_clamp(False)
+                return desired
+
+            clamped_pose = pose[:6].copy()
+            clamped_pose[2] = self._min_tcp_z_mm
+            code, inverse = self.real_arm.get_inverse_kinematics(
+                clamped_pose.tolist(),
+                input_is_radian=True,
+                return_is_radian=True,
+                limited=True,
+                ref_angles=desired.tolist(),
+            )
+            inverse = np.asarray(inverse, dtype=np.float64)
+            if code != 0 or inverse.shape[0] < self._dof or not np.all(np.isfinite(inverse)):
+                raise RuntimeError(f"inverse kinematics failed, code={code}")
+
+            safe_target = inverse[:self._dof].copy()
+            code, verified_pose = self.real_arm.get_forward_kinematics(
+                safe_target.tolist(), input_is_radian=True, return_is_radian=True
+            )
+            verified_pose = np.asarray(verified_pose, dtype=np.float64)
+            if (
+                code != 0
+                or verified_pose.shape[0] < 3
+                or not np.all(np.isfinite(verified_pose))
+                or verified_pose[2] < self._min_tcp_z_mm - TCP_Z_CLAMP_TOLERANCE_MM
+            ):
+                raise RuntimeError(f"inverse-kinematics result is below the TCP z floor, code={code}")
+
+            self._last_safe_joint_target = safe_target
+            self._log_tcp_z_clamp(True, requested_z)
+            return safe_target
+        except Exception as exc:
+            self._log_tcp_z_guard_error(str(exc))
+            if fallback is None:
+                return None
+            return np.asarray(fallback, dtype=np.float64).copy()
+
+    def _guard_cartesian_target(self, command: list[float]) -> np.ndarray | None:
+        """Clamp a Cartesian target without changing its other five components."""
+        target = np.asarray(command, dtype=np.float64)
+        if self._min_tcp_z_mm is None:
+            return target
+
+        fallback = self._last_safe_cartesian_target
+        try:
+            if target.shape != (6,) or not np.all(np.isfinite(target)):
+                raise ValueError("Cartesian target has invalid shape or contains NaN/Inf")
+            requested_z = float(target[2])
+            if requested_z < self._min_tcp_z_mm:
+                target[2] = self._min_tcp_z_mm
+                self._log_tcp_z_clamp(True, requested_z)
+            else:
+                self._log_tcp_z_clamp(False)
+            self._last_safe_cartesian_target = target.copy()
+            return target
+        except Exception as exc:
+            self._log_tcp_z_guard_error(str(exc))
+            if fallback is None:
+                return None
+            return np.asarray(fallback, dtype=np.float64).copy()
 
     def configure(self) -> None:
         self.real_arm.motion_enable()
@@ -530,6 +677,7 @@ class UFRobot(Robot, Thread):
             return action
 
         before_write_t = time.perf_counter()
+        safe_action = dict(action)
         if self._control_space == "joint":
             # first sync with gello or other control device SLOWLY!
             jnt_spd = INIT_SYNC_JOINT_VELOCITY_RAD if self._cmd_cnt < 20 else self._max_joint_velocity
@@ -538,8 +686,16 @@ class UFRobot(Robot, Thread):
             cmd_list = [0]*(self._dof)
             for i in range(self._dof):
                 cmd_list[i] = action[f"{self.prefix}J{i+1}.pos"]
+            safe_cmd = self._guard_joint_target(cmd_list)
+            if safe_cmd is None:
+                # Do not send an unverified arm target. Gripper handling below
+                # remains independent and can continue safely.
+                safe_cmd = None
+            else:
+                for i in range(self._dof):
+                    safe_action[f"{self.prefix}J{i+1}.pos"] = float(safe_cmd[i])
 
-            if self.config.joint_command_mode == 1:
+            if safe_cmd is not None and self.config.joint_command_mode == 1:
                 # set_servo_angle_j is an absolute target command. It is the
                 # SDK's high-frequency interface and executes only the latest
                 # target, so it must be used with servo motion mode (1).
@@ -550,10 +706,10 @@ class UFRobot(Robot, Thread):
                     self._check_motion_code("set_state(0)", code)
                     time.sleep(0.1)
                 code = self.real_arm.set_servo_angle_j(
-                    cmd_list[:self._dof], speed=jnt_spd, is_radian=True
+                    safe_cmd[:self._dof].tolist(), speed=jnt_spd, is_radian=True
                 )
                 self._check_motion_code("set_servo_angle_j", code)
-            else:
+            elif safe_cmd is not None:
                 # The legacy mode-6 path uses the absolute move_joint API.
                 # The first blocking command must be sent in position mode.
                 if wait_ == False and self.real_arm.mode != 6:
@@ -570,7 +726,7 @@ class UFRobot(Robot, Thread):
                     time.sleep(0.1)
 
                 code = self.real_arm.set_servo_angle(
-                    angle=cmd_list[:self._dof],
+                    angle=safe_cmd[:self._dof].tolist(),
                     speed=jnt_spd,
                     is_radian=True,
                     wait=wait_,
@@ -582,16 +738,21 @@ class UFRobot(Robot, Thread):
             if not self._rt_report_normal:
                 raise ConnectionError("RT Report for target robot NOT READY! ")
             cmd_list = [action[f"{self.prefix}pose.x"], action[f"{self.prefix}pose.y"], action[f"{self.prefix}pose.z"], action[f"{self.prefix}pose.rx"], action[f"{self.prefix}pose.ry"], action[f"{self.prefix}pose.rz"]]
-            self.real_arm.set_position_aa(axis_angle_pose=cmd_list, speed=lin_spd, is_radian=True, wait=False)
+            safe_cmd = self._guard_cartesian_target(cmd_list)
+            if safe_cmd is not None:
+                safe_cmd = safe_cmd.tolist()
+                for i, key in enumerate(("x", "y", "z", "rx", "ry", "rz")):
+                    safe_action[f"{self.prefix}pose.{key}"] = float(safe_cmd[i])
+                self.real_arm.set_position_aa(axis_angle_pose=safe_cmd, speed=lin_spd, is_radian=True, wait=False)
             # self.real_arm.set_position(*cmd_list, radius=0, speed=lin_spd, is_radian=True, wait=False)
 
         if self._cmd_cnt < 99999:
             self._cmd_cnt += 1 # CHECK!! possibility of overflow?
         if self._gripper_type > GripperType.NoGripper:
-            self._send_gripper_action(action[f"{self.prefix}gripper.pos"])
+            self._send_gripper_action(safe_action[f"{self.prefix}gripper.pos"])
 
         self.logs["write_pos_dt_s"] = time.perf_counter() - before_write_t
-        return action
+        return safe_action
 
     def print_logs(self) -> None:
         pass

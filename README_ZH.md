@@ -113,16 +113,22 @@ uv run uf-camera-view -l -T realsense     # 列出每台相机的序列号
 
 ## 使用
 
-### 1. GELLO 遥操作测试
-
-不录制数据，仅测试 GELLO 与机械臂的联动：
-
-```bash
-uv run uf-robot-teleop --config_path config/gello/xarm7_gello_record_config.yaml
-uv run uf-robot-teleop --config_path config/gello/xarm7_gello_record_config.yaml --fps 60  # 可选，指定循环频率
-```
 
 `Space` 复位并开始，`←` 复位，`Esc` 退出。
+
+#### 设置 GELLO TCP 最低高度
+
+先停止其他控制程序，将机械臂 TCP 移到最低安全位置，然后只读当前高度：
+
+```bash
+uv run uf-read-tcp-z \
+  --config-path config/gello/xarm7_gello_record_config.yaml \
+  --margin-mm 5
+```
+
+该命令不会移动机械臂。把输出的 `min_tcp_z_mm` 建议值填入 GELLO YAML；测试遥操作、数据采集及其他使用该机器人配置的控制入口都会在最终下发前启用保护。关节控制下，低于下限的目标会保留 TCP 的 x/y 和姿态，只把 z 钳制到下限。
+
+> 该限制只保护 TCP 不低于一个水平面，不能检测机械臂连杆、肘部或夹爪外形与桌子的碰撞，也不能替代急停。更换工具、TCP 偏置、底座或桌面位置后必须重新测量。
 
 ### 2. GELLO 数据采集
 

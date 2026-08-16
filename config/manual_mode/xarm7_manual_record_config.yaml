@@ -11,14 +11,14 @@ robot:
   # Normalized gripper position change per second while holding C/O.
   manual_gripper_speed: 0.5
   # Teaching sensitivity, valid range is 1-5, affecting vel of the robot.
-  teach_sensitivity: 3
+  teach_sensitivity: 5
   # Whether to record joint velocities in observations.
   observe_joint_vel: false
 
   cameras:
     camera:
       type: intelrealsense
-      serial_number_or_name: "148522072685"
+      serial_number_or_name: "242622070583"
       width: 640
       height: 480
       fps: 30

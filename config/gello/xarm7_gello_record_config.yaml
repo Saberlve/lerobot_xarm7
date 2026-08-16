@@ -8,6 +8,8 @@ robot:
   # Use the high-frequency servo interface for lower-latency GELLO tracking.
   joint_command_mode: 1
   max_joint_velocity: 120
+  # TCP z floor in the xArm base coordinate system (mm).
+  min_tcp_z_mm: -2.0
   # Append gripper initialization/read/write failures here.
   gripper_error_log_path: "logs/xarm7_gripper_errors.log"
   # Redundant args, indicating the initial pose of xarm7. Set by 192.168.1.245:18333
@@ -27,7 +29,7 @@ teleop:
 dataset:
   # Dataset path relative to the directory where the command is started.
   root: "datasets/xarm7_gello_datas"
-  repo_id: "ufactory/xarm6_gello_datas"
+  repo_id: "ufactory/xarm7_gello_datas"
   single_task: "Pick up the purple grape and drop into the box on the left."
   fps: 60
   episode_time_s: 60  # max duration for one episode

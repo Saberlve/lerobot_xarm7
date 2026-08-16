@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 from lerobot.cameras import CameraConfig
 from lerobot.robots import RobotConfig
@@ -28,6 +29,9 @@ class UFRobotConfig(RobotConfig):
     max_joint_velocity: int = 90   # °/s, only effective in joint control mode
     max_linear_velocity: int = 200 # mm/s, only effective in cartesian control mode
     no_action: bool = False # only for debug
+    # Optional TCP height floor in the xArm base coordinate system (mm).
+    # The value should include any desired safety margin above the table.
+    min_tcp_z_mm: float | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -43,3 +47,5 @@ class UFRobotConfig(RobotConfig):
             raise ValueError("gripper_command_threshold must be between 0 and 1")
         if self.control_space == "joint" and self.joint_command_mode not in (1, 6):
             raise ValueError("joint_command_mode must be 1 or 6 for joint control")
+        if self.min_tcp_z_mm is not None and not math.isfinite(self.min_tcp_z_mm):
+            raise ValueError("min_tcp_z_mm must be finite when provided")
