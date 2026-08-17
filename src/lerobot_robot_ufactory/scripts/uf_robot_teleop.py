@@ -30,6 +30,7 @@ from lerobot.utils.utils import (
 from lerobot_robot_ufactory.configs import parser
 from lerobot_robot_ufactory.utils.utils import is_headless, init_keyboard_listener
 from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
+from lerobot_robot_ufactory.utils.realtime_teleop import RealtimeTeleopController
 
 
 @dataclass
@@ -283,6 +284,35 @@ def teleop_loop(cfg: TeleopConfig):
     latency_samples: list[GuardLatencyTiming] = []
     experiment_start_t = None
     previous_command_t = None
+    realtime_controller = None
+
+    def start_realtime_controller():
+        nonlocal realtime_controller
+        if (
+            cfg.guard_latency_experiment
+            or not is_uf_teleop
+            or getattr(robot, "_control_space", None) != "joint"
+        ):
+            return
+        obs = robot.get_realtime_observation()
+        realtime_controller = RealtimeTeleopController(
+            robot,
+            teleop,
+            teleop_action_processor,
+            robot_action_processor,
+            cfg.fps,
+            obs,
+        )
+        realtime_controller.start()
+
+    def stop_realtime_controller():
+        nonlocal realtime_controller
+        if realtime_controller is not None:
+            realtime_controller.stop()
+            realtime_controller = None
+
+    if not is_evt and not is_paused:
+        start_realtime_controller()
 
     while not events["exit"]:
         start_loop_t = time.perf_counter()
@@ -293,6 +323,7 @@ def teleop_loop(cfg: TeleopConfig):
                 is_reset = True
                 if not is_paused:
                     is_paused = True
+                    stop_realtime_controller()
                     if is_uf_teleop:
                         teleop.set_teleop_enabled(False)
                 print('⌨   [ESC] Exit  [Space] Reset / Start  [←] Reset')
@@ -303,6 +334,7 @@ def teleop_loop(cfg: TeleopConfig):
                 key_space_pressed = True
                 is_paused = not is_paused
                 if is_paused:
+                    stop_realtime_controller()
                     if is_uf_teleop:
                         teleop.set_teleop_enabled(False)
                     # print('========== Teleop is paused ==========')
@@ -315,6 +347,7 @@ def teleop_loop(cfg: TeleopConfig):
                     elif is_uf_teleop:
                         obs = robot.get_observation()
                         teleop.set_teleop_enabled(True, obs)
+                    start_realtime_controller()
                     print('⌨   [ESC] Exit  [Space] Pause  [←] Reset')
                 continue
             elif not key_dict[keyboard.Key.space] and key_space_pressed:
@@ -357,19 +390,22 @@ def teleop_loop(cfg: TeleopConfig):
             if cycle_end_t - experiment_start_t >= cfg.experiment_duration_s:
                 events["exit"] = True
         else:
-            # Get robot observation
-            obs = robot.get_observation()
-
-            act = teleop.get_action()
-            act_processed_teleop = teleop_action_processor((act, obs))
-
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
-            robot.send_action(robot_action_to_send)
-
-            dt_s = time.perf_counter() - start_loop_t
-            precise_sleep(max(sleep_time_s - dt_s, 0.0))
+            if realtime_controller is not None:
+                realtime_controller.heartbeat()
+                realtime_controller.raise_if_failed()
+                precise_sleep(sleep_time_s)
+            else:
+                # Generic non-UFACTORY teleoperators retain the standard loop.
+                obs = robot.get_observation()
+                act = teleop.get_action()
+                act_processed_teleop = teleop_action_processor((act, obs))
+                robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+                robot.send_action(robot_action_to_send)
+                dt_s = time.perf_counter() - start_loop_t
+                precise_sleep(max(sleep_time_s - dt_s, 0.0))
     
     print("\n********** Teleop Control Loop Exit **********")
+    stop_realtime_controller()
     if latency_samples:
         output_path = _write_guard_latency_timings(latency_samples, cfg.timing_log_dir, cfg.fps)
         print(f"Guard latency timing log: {output_path}")

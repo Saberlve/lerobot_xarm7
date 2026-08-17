@@ -228,6 +228,41 @@ def test_normal_mode_waits_for_gripper_to_open_before_control(monkeypatch, tmp_p
     robot.disconnect()
 
 
+def test_gripper_rs485_commands_are_rate_limited(monkeypatch, tmp_path):
+    from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
+
+    arm = FakeXArm("192.168.1.245")
+    monkeypatch.setattr(uf_robot_module, "XArmAPI", lambda robot_ip: arm)
+    monkeypatch.setattr(uf_robot_module.time, "sleep", lambda _: None)
+    config = UFRobotConfig(
+        id="test_gripper_rate_limit",
+        calibration_dir=tmp_path,
+        robot_ip=arm.robot_ip,
+        robot_dof=6,
+        control_space="joint",
+        gripper_type=1,
+        gripper_command_interval_s=0.1,
+        gripper_error_log_path=None,
+    )
+    robot = uf_robot_module.UFRobot(config)
+    robot.connect()
+
+    robot._send_gripper_action(0.2)
+    robot._send_gripper_action(0.4)
+    writes = [call for call in arm.calls if call[0] == "set_gripper_position"]
+    # One initialization/open write and one runtime write; the second runtime
+    # target is coalesced by the RS485 rate limiter.
+    assert len(writes) == 2
+    assert writes[-1][2] == {
+        "wait": False,
+        "wait_motion": False,
+        "check_baud": False,
+        "check_err": False,
+    }
+
+    robot.disconnect()
+
+
 def test_manual_mode_config_rejects_cartesian_control(tmp_path):
     with pytest.raises(ValueError, match="control_space='joint'"):
         UFRobotConfig(
@@ -304,6 +339,7 @@ def test_manual_mode_initializes_gripper_without_opening_and_sends_only_gripper(
         control_space="joint",
         gripper_type=1,
         manual_mode=True,
+        gripper_error_log_path=None,
     )
     robot = uf_robot_module.UFRobot(config)
     robot.connect()
@@ -315,7 +351,9 @@ def test_manual_mode_initializes_gripper_without_opening_and_sends_only_gripper(
 
     robot.send_action({"J1.pos": 1.0, "gripper.pos": 0.5})
 
-    assert any(call[0] == "getset_tgpio_modbus_data" for call in arm.calls)
+    runtime_writes = [call for call in arm.calls if call[0] == "set_gripper_position"]
+    assert len(runtime_writes) == 1
+    assert runtime_writes[0][2]["wait_motion"] is False
     assert not any(call[0] == "set_servo_angle" for call in arm.calls)
     robot.disconnect()
 
@@ -336,6 +374,8 @@ def test_gripper_command_is_only_sent_after_target_changes(monkeypatch, tmp_path
         gripper_type=1,
         manual_mode=True,
         gripper_command_threshold=0.01,
+        gripper_command_interval_s=0.0,
+        gripper_error_log_path=None,
     )
     robot = uf_robot_module.UFRobot(config)
     robot.connect()
@@ -344,7 +384,7 @@ def test_gripper_command_is_only_sent_after_target_changes(monkeypatch, tmp_path
     robot.send_action({"gripper.pos": 0.505})
     robot.send_action({"gripper.pos": 0.52})
 
-    writes = [call for call in arm.calls if call[0] == "getset_tgpio_modbus_data"]
+    writes = [call for call in arm.calls if call[0] == "set_gripper_position"]
     assert len(writes) == 2
     robot.disconnect()
 

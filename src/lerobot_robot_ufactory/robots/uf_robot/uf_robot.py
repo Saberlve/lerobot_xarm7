@@ -17,6 +17,12 @@ from .uf_robot_config import UFRobotConfig
 from xarm.wrapper import XArmAPI
 from xarm.core.utils import convert
 
+from .local_kinematics import (
+    XArm7Kinematics,
+    read_xarm7_kinematics,
+    xarm_rpy_transform,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +32,14 @@ ROBOT_RESET_SPEED_DEG = 20
 TCP_Z_CLAMP_TOLERANCE_MM = 1e-3
 TCP_Z_LOG_INTERVAL_S = 1.0
 TCP_Z_MAX_IK_JOINT_STEP_RAD = math.radians(10.0)
+LOCAL_GUARD_MAX_ITERATIONS = 8
+LOCAL_GUARD_JACOBIAN_DAMPING = 1e-6
+XARM7_JOINT_LOWER_RAD = np.asarray(
+    [-2 * math.pi, -2.059, -2 * math.pi, -0.19198, -2 * math.pi, -1.69297, -2 * math.pi]
+)
+XARM7_JOINT_UPPER_RAD = np.asarray(
+    [2 * math.pi, 2.0944, 2 * math.pi, 3.927, 2 * math.pi, math.pi, 2 * math.pi]
+)
 
 CARTESIAN_OBS_KEYS = [
     "pose.x", "pose.y", "pose.z", "pose.rx", "pose.ry", "pose.rz",
@@ -97,6 +111,7 @@ class UFRobot(Robot, Thread):
 
         self._cmd_cnt = 0
         self._last_gripper_command = None
+        self._last_gripper_command_attempt_s = float("-inf")
         self._last_logged_controller_error = 0
 
         self._max_joint_velocity = math.radians(self.config.max_joint_velocity)
@@ -104,6 +119,15 @@ class UFRobot(Robot, Thread):
 
         self._min_tcp_z_mm = self.config.min_tcp_z_mm
         self._tcp_z_guard_activation_margin_mm = self.config.tcp_z_guard_activation_margin_mm
+        self._tcp_z_guard_backend = self.config.tcp_z_guard_backend
+        self._tcp_z_soft_floor_mm = (
+            None
+            if self._min_tcp_z_mm is None
+            else self._min_tcp_z_mm + self.config.tcp_z_soft_margin_mm
+        )
+        self._local_kinematics = None
+        self._local_joint_origins = None
+        self._local_model_fault_count = 0
         self._last_safe_joint_target = None
         self._last_safe_cartesian_target = None
         self._last_guard_path = "not_run"
@@ -197,6 +221,8 @@ class UFRobot(Robot, Thread):
         return action_ft
 
     def connect(self, calibrate: bool = True) -> None:
+        if self._tcp_z_guard_backend == "local_projection":
+            self._local_joint_origins = read_xarm7_kinematics(self.config.robot_ip)
         self.real_arm = XArmAPI(self.config.robot_ip)
         time.sleep(0.2)
         self._is_connected = self.real_arm.connected
@@ -216,6 +242,9 @@ class UFRobot(Robot, Thread):
             raise RuntimeError(f"Invalid initial point returned by xArm: {initial_point}")
         self._initial_point = list(initial_point[:self._dof])
 
+        if self._tcp_z_guard_backend == "local_projection":
+            self._initialize_local_kinematics()
+
         for cam in self.cameras.values():
             cam.connect()
             self._is_connected = self._is_connected and cam.is_connected
@@ -233,6 +262,13 @@ class UFRobot(Robot, Thread):
             self.configure()
         else:
             self.reset_to_initial()
+        # reset_to_initial clears any pre-existing controller error before
+        # configuring APIs that may otherwise be rejected with code 1.
+        if (
+            self._tcp_z_guard_backend == "local_projection"
+            and self.config.controller_safety_boundary
+        ):
+            self._configure_controller_safety_boundary()
         if self._min_tcp_z_mm is not None and self.config.manual_mode:
             self._initialize_tcp_z_guard()
         if calibrate:  
@@ -284,6 +320,15 @@ class UFRobot(Robot, Thread):
             if not np.all(np.isfinite(target)):
                 raise RuntimeError("Unable to initialize TCP z guard from non-finite joint state")
             self._last_safe_joint_target = target
+            if self._tcp_z_guard_backend == "local_projection":
+                if self._local_kinematics is None:
+                    raise RuntimeError("Local xArm7 kinematics has not been initialized")
+                current_z = float(self._local_kinematics.tcp_position(target)[2])
+                if current_z < self._min_tcp_z_mm:
+                    raise RuntimeError(
+                        f"Current TCP z {current_z:.2f} mm is below the hard floor "
+                        f"{self._min_tcp_z_mm:.2f} mm"
+                    )
         else:
             code, pose = self.real_arm.get_position_aa(is_radian=True)
             if code != 0 or len(pose) < 6:
@@ -296,6 +341,91 @@ class UFRobot(Robot, Thread):
         self._tcp_z_is_clamped = False
         self._tcp_z_last_log_time = 0.0
         self._tcp_z_last_error_log_time = 0.0
+
+    def _controller_pose_offset(self, name: str) -> np.ndarray:
+        pose = np.asarray(getattr(self.real_arm, name), dtype=np.float64)
+        if pose.shape != (6,) or not np.all(np.isfinite(pose)):
+            raise RuntimeError(f"Controller returned an invalid {name}: {pose}")
+        if not self.real_arm.default_is_radian:
+            pose[3:6] = np.radians(pose[3:6])
+        return pose
+
+    def _initialize_local_kinematics(self) -> None:
+        if self._local_joint_origins is None:
+            raise RuntimeError("xArm7 calibration parameters were not loaded")
+        code, states = self.real_arm.get_joint_states(is_radian=True, num=1)
+        if code != 0 or not states or len(states[0]) < 7:
+            raise RuntimeError(f"Unable to validate local kinematics from joint state, code={code}")
+        current = np.asarray(states[0][:7], dtype=np.float64)
+        world_offset = self._controller_pose_offset("world_offset")
+        chain_kinematics = XArm7Kinematics(
+            self._local_joint_origins,
+            world_offset=world_offset,
+        )
+        code, current_pose = self.real_arm.get_forward_kinematics(
+            current.tolist(), input_is_radian=True, return_is_radian=True
+        )
+        if code != 0 or current_pose is None or len(current_pose) < 6:
+            raise RuntimeError(f"Controller FK failed while identifying its TCP endpoint, code={code}")
+        controller_transform = xarm_rpy_transform(current_pose[:6])
+        endpoint_transform = (
+            np.linalg.inv(chain_kinematics.forward_matrix(current)) @ controller_transform
+        )
+        self._local_kinematics = XArm7Kinematics(
+            self._local_joint_origins,
+            world_offset=world_offset,
+            end_transform=endpoint_transform,
+        )
+
+        current_z = float(self._local_kinematics.tcp_position(current)[2])
+        if current_z < self._min_tcp_z_mm:
+            raise RuntimeError(
+                f"Current TCP z {current_z:.2f} mm is below the configured hard floor "
+                f"{self._min_tcp_z_mm:.2f} mm"
+            )
+        validation_points = [current.copy(), current.copy()]
+        validation_points[0][1] = np.clip(
+            validation_points[0][1] + 0.05,
+            XARM7_JOINT_LOWER_RAD[1],
+            XARM7_JOINT_UPPER_RAD[1],
+        )
+        validation_points[1][3] = np.clip(
+            validation_points[1][3] + 0.05,
+            XARM7_JOINT_LOWER_RAD[3],
+            XARM7_JOINT_UPPER_RAD[3],
+        )
+        for joints in validation_points:
+            code, pose = self.real_arm.get_forward_kinematics(
+                joints.tolist(), input_is_radian=True, return_is_radian=True
+            )
+            if code != 0 or pose is None or len(pose) < 3:
+                raise RuntimeError(f"Controller FK failed during local model validation, code={code}")
+            local_position = self._local_kinematics.tcp_position(joints)
+            error_mm = float(np.linalg.norm(local_position - np.asarray(pose[:3], dtype=np.float64)))
+            if not math.isfinite(error_mm) or error_mm > self.config.local_kinematics_max_error_mm:
+                raise RuntimeError(
+                    f"Local kinematics differs from controller FK by {error_mm:.3f} mm "
+                    f"(limit {self.config.local_kinematics_max_error_mm:.3f} mm)"
+                )
+
+    @staticmethod
+    def _motion_code(code):
+        return code[0] if isinstance(code, (tuple, list)) else code
+
+    def _configure_controller_safety_boundary(self) -> None:
+        floor = int(math.ceil(self._min_tcp_z_mm))
+        boundary = [9999, -9999, 9999, -9999, 9999, floor]
+        code = self._motion_code(self.real_arm.set_reduced_tcp_boundary(boundary))
+        self._check_motion_code("set_reduced_tcp_boundary", code)
+        code = self._motion_code(self.real_arm.set_fence_mode(True))
+        self._check_motion_code("set_fence_mode(True)", code)
+
+        code, states = self.real_arm.get_reduced_states(is_radian=True)
+        self._check_motion_code("get_reduced_states", code)
+        if len(states) < 2 or list(map(int, states[1][:6])) != boundary:
+            raise RuntimeError(f"Controller safety boundary readback mismatch: {states}")
+        if len(states) >= 6 and not bool(states[5]):
+            raise RuntimeError("Controller fence mode did not remain enabled")
 
     def _log_tcp_z_clamp(self, clamped: bool, requested_z: float | None = None) -> None:
         """Log clamp state changes while avoiding per-cycle console spam."""
@@ -320,6 +450,110 @@ class UFRobot(Robot, Thread):
             self._tcp_z_last_error_log_time = now
 
     def _guard_joint_target(self, command: list[float]) -> np.ndarray | None:
+        if getattr(self, "_tcp_z_guard_backend", "controller_rpc") == "local_projection":
+            return self._guard_joint_target_local(command)
+        return self._guard_joint_target_controller_rpc(command)
+
+    def _guard_joint_target_local(self, command: list[float]) -> np.ndarray | None:
+        """Project a joint update onto the local TCP-height constraint."""
+        desired = np.asarray(command, dtype=np.float64)
+        fallback = self._last_safe_joint_target
+        try:
+            if self._local_kinematics is None:
+                raise RuntimeError("local kinematics is unavailable")
+            if not self._local_model_matches_rt():
+                self._last_guard_path = "model_fault"
+                return None if fallback is None else np.asarray(fallback, dtype=np.float64).copy()
+            if desired.shape != (7,) or not np.all(np.isfinite(desired)):
+                raise ValueError("joint target has invalid shape or contains NaN/Inf")
+            if fallback is None:
+                raise RuntimeError("last safe joint target is unavailable")
+
+            previous = np.asarray(fallback, dtype=np.float64)
+            if previous.shape != (7,) or not np.all(np.isfinite(previous)):
+                raise RuntimeError("last safe joint target is invalid")
+            delta = (desired - previous + math.pi) % (2 * math.pi) - math.pi
+            delta = np.clip(delta, -TCP_Z_MAX_IK_JOINT_STEP_RAD, TCP_Z_MAX_IK_JOINT_STEP_RAD)
+            candidate = np.clip(previous + delta, XARM7_JOINT_LOWER_RAD, XARM7_JOINT_UPPER_RAD)
+            soft_floor = float(self._tcp_z_soft_floor_mm)
+
+            requested_z = float(self._local_kinematics.tcp_position(candidate)[2])
+            if requested_z >= soft_floor:
+                self._last_guard_path = "local_safe"
+                self._last_safe_joint_target = candidate.copy()
+                self._log_tcp_z_clamp(False)
+                return candidate
+
+            projected = candidate
+            for _ in range(LOCAL_GUARD_MAX_ITERATIONS):
+                z_value, jacobian_z = self._local_kinematics.tcp_z_and_jacobian(projected)
+                error = soft_floor - z_value
+                if error <= TCP_Z_CLAMP_TOLERANCE_MM:
+                    break
+                norm_sq = float(jacobian_z @ jacobian_z)
+                if not math.isfinite(norm_sq) or norm_sq < 1e-10:
+                    raise RuntimeError("TCP-height Jacobian is singular")
+                projected = projected + jacobian_z * error / (
+                    norm_sq + LOCAL_GUARD_JACOBIAN_DAMPING
+                )
+                projected = np.clip(projected, XARM7_JOINT_LOWER_RAD, XARM7_JOINT_UPPER_RAD)
+
+            projected_delta = (projected - previous + math.pi) % (2 * math.pi) - math.pi
+            max_delta = float(np.max(np.abs(projected_delta)))
+            if max_delta > TCP_Z_MAX_IK_JOINT_STEP_RAD:
+                projected = previous + projected_delta * (TCP_Z_MAX_IK_JOINT_STEP_RAD / max_delta)
+
+            projected_z = float(self._local_kinematics.tcp_position(projected)[2])
+            if projected_z < soft_floor - TCP_Z_CLAMP_TOLERANCE_MM:
+                # The linearized correction can overshoot near high curvature.
+                # Backtrack toward the known-safe previous command without an RPC.
+                accepted = None
+                for alpha in np.linspace(0.875, 0.0, 8):
+                    trial = previous + alpha * (projected - previous)
+                    if float(self._local_kinematics.tcp_position(trial)[2]) >= soft_floor:
+                        accepted = trial
+                        break
+                if accepted is None:
+                    self._last_guard_path = "local_hold"
+                    self._log_tcp_z_clamp(True, requested_z)
+                    return previous.copy()
+                projected = accepted
+
+            self._last_guard_path = "local_projected"
+            self._last_safe_joint_target = projected.copy()
+            self._log_tcp_z_clamp(True, requested_z)
+            return projected
+        except Exception as exc:
+            self._last_guard_path = "local_hold"
+            self._log_tcp_z_guard_error(str(exc))
+            return None if fallback is None else np.asarray(fallback, dtype=np.float64).copy()
+
+    def _local_model_matches_rt(self) -> bool:
+        """Compare co-timed RT joint/TCP feedback without making an SDK request."""
+        if not getattr(self, "_rt_report_normal", False):
+            return True
+        with self._update_lock:
+            joints = np.asarray(self.rt_actual_joint_pos, dtype=np.float64).copy()
+            reported = np.asarray(self.rt_actual_tcp_pose[:3], dtype=np.float64).copy()
+        try:
+            local = self._local_kinematics.tcp_position(joints)
+            error_mm = float(np.linalg.norm(local - reported))
+            limit = float(self.config.local_kinematics_max_error_mm)
+            self.logs["local_kinematics_error_mm"] = error_mm
+            if math.isfinite(error_mm) and error_mm <= limit:
+                self._local_model_fault_count = 0
+                return True
+        except Exception as exc:
+            self._log_tcp_z_guard_error(f"RT model validation failed: {exc}")
+        self._local_model_fault_count += 1
+        if self._local_model_fault_count >= 3:
+            self._log_tcp_z_guard_error(
+                f"local/RT TCP mismatch persisted for {self._local_model_fault_count} frames"
+            )
+            return False
+        return True
+
+    def _guard_joint_target_controller_rpc(self, command: list[float]) -> np.ndarray | None:
         """Return a safe joint target, or None when motion must be skipped."""
         desired = np.asarray(command, dtype=np.float64)
         if self._min_tcp_z_mm is None:
@@ -651,6 +885,68 @@ class UFRobot(Robot, Thread):
 
         return obs_dict
 
+    def get_realtime_observation(self) -> dict[str, np.ndarray]:
+        """Build a recording observation without controller command-channel reads.
+
+        Joint feedback comes from the asynchronous RT report, while gripper
+        feedback uses the latest commanded/cached value. Camera reads remain
+        outside the ServoJ control thread.
+        """
+        if self._control_space != "joint":
+            return self.get_observation()
+        if not self._rt_report_normal:
+            raise ConnectionError("RT Report for target robot NOT READY!")
+        with self._update_lock:
+            positions = self.rt_actual_joint_pos.copy()
+            velocities = self.rt_actual_joint_speed.copy()
+            # Timestamp the state snapshot before the slower camera reads.
+            self._last_realtime_observation_monotonic_s = time.perf_counter()
+        obs_dict = {
+            f"{self.prefix}J{index + 1}.pos": positions[index]
+            for index in range(self._dof)
+        }
+        if self._jnt_obs_has_vel:
+            obs_dict.update(
+                {
+                    f"{self.prefix}J{index + 1}.vel": velocities[index]
+                    for index in range(self._dof)
+                }
+            )
+        if self._gripper_type > GripperType.NoGripper:
+            gripper = self._last_gripper_command
+            if gripper is None:
+                gripper = self._gripper_param.gripper_norm
+            obs_dict[f"{self.prefix}gripper.pos"] = float(gripper)
+
+        for camera_key, camera in self.cameras.items():
+            before_camera_t = time.perf_counter()
+            frame = camera.async_read()
+            after_camera_t = time.perf_counter()
+            shape = frame.shape
+            if (
+                self.camera_height > 0
+                and self.camera_height != shape[0]
+                or self.camera_width > 0
+                and self.camera_width != shape[1]
+            ):
+                import cv2
+
+                width = self.camera_width if self.camera_width != 0 else shape[1]
+                height = self.camera_height if self.camera_height != 0 else shape[0]
+                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+            obs_dict[f"{self.prefix}{camera_key}"] = frame
+            self.logs[f"async_read_camera_{camera_key}_dt_s"] = (
+                after_camera_t - before_camera_t
+            )
+            if not hasattr(self, "_last_realtime_camera_timings"):
+                self._last_realtime_camera_timings = {}
+            self._last_realtime_camera_timings[camera_key] = (
+                before_camera_t,
+                after_camera_t,
+            )
+        self._last_realtime_observation_end_monotonic_s = time.perf_counter()
+        return obs_dict
+
     def _send_gripper_action(self, gripper_norm: float) -> None:
         gripper_norm = min(max(float(gripper_norm), 0.0), 1.0)
         if (
@@ -660,11 +956,29 @@ class UFRobot(Robot, Thread):
         ):
             return
 
+        # The gripper goes through the controller RS485 bridge. Driving that
+        # bridge at the 60 Hz ServoJ rate can trigger controller error 19.
+        # Intermediate targets are coalesced and failed attempts are also
+        # rate-limited so an error cannot cause a retry storm.
+        now = time.perf_counter()
+        if now - self._last_gripper_command_attempt_s < self.config.gripper_command_interval_s:
+            return
+        self._last_gripper_command_attempt_s = now
+        command_start_s = now
+
         if self._gripper_type == GripperType.xArmGripper:
             grippos = self._gripper_param.get_grippos(gripper_norm)
-            modbus_datas = [0x08, 0x10, 0x07, 0x00, 0x00, 0x02, 0x04]
-            modbus_datas.extend(list(struct.pack('>i', grippos)))
-            result = self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+            # Use the SDK's dedicated gripper command instead of injecting a
+            # generic RS485 packet through set_rs485_data. During continuous
+            # ServoJ motion the default wait_motion check cannot complete, so
+            # explicitly bypass it while retaining a non-blocking write.
+            result = self.real_arm.set_gripper_position(
+                grippos,
+                wait=False,
+                wait_motion=False,
+                check_baud=False,
+                check_err=False,
+            )
         elif self._gripper_type == GripperType.xArmGripperG2:
             grippos = self._gripper_param.get_grippos(gripper_norm)
             grippos = int((math.degrees(math.asin((grippos - 16) / 110)) + 8.33) * 18.28)
@@ -691,10 +1005,32 @@ class UFRobot(Robot, Thread):
             result = self.real_arm.getset_tgpio_modbus_data(modbus_datas)
 
         code = result[0] if isinstance(result, (tuple, list)) else result
+        command_dt_ms = (time.perf_counter() - command_start_s) * 1000
         if code not in (None, 0):
-            self._log_gripper_error("send_gripper_action", code, f"target={gripper_norm:.6f}")
+            self._log_gripper_error(
+                "send_gripper_action",
+                code,
+                f"target={gripper_norm:.6f}, pulse={grippos}, dt_ms={command_dt_ms:.3f}",
+            )
             return
+        self._log_gripper_command(gripper_norm, grippos, command_dt_ms)
         self._last_gripper_command = gripper_norm
+
+    def _log_gripper_command(self, target: float, pulse: int, dt_ms: float) -> None:
+        log_path = self.config.gripper_error_log_path
+        if not log_path:
+            return
+        try:
+            path = Path(log_path).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    f"{timestamp} gripper command: target={target:.6f}, "
+                    f"pulse={pulse}, dt_ms={dt_ms:.3f}, code=0\n"
+                )
+        except OSError:
+            logging.exception("Failed to write gripper command log to %s", log_path)
 
     def _log_gripper_error(self, operation: str, code, detail: str = "") -> None:
         controller_error = getattr(self.real_arm, "error_code", None)
@@ -893,18 +1229,21 @@ class UFRobot(Robot, Thread):
         pass
 
     def disconnect(self) -> None:
-        if not self._is_connected:
+        if not self._is_connected and self.real_arm is None:
             return
-        self.real_arm.set_state(4) # stop
-        self.real_arm.set_mode(0)
         if self._use_rt_report:
             self.report_stop_event.set()
-            self.join()
-        self.real_arm.disconnect()
+            if self.is_alive():
+                self.join()
+        if self.real_arm is not None and getattr(self.real_arm, "connected", False):
+            self.real_arm.set_state(4) # stop
+            self.real_arm.set_mode(0)
+            self.real_arm.disconnect()
         # CHECK!! how about gripper? 
 
         for cam in self.cameras.values():
-            cam.disconnect()
+            if getattr(cam, "is_connected", False):
+                cam.disconnect()
 
         self._is_connected = False
 

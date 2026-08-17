@@ -1,4 +1,5 @@
 import sys
+import csv
 import copy
 import time
 import queue
@@ -13,6 +14,7 @@ from lerobot.scripts.lerobot_record import *
 from lerobot.scripts.lerobot_record import RecordConfig as LeRobotRecordConfig
 from lerobot_robot_ufactory.teleoperators.uf_mock_teleop import UFMockTeleop
 from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
+from lerobot_robot_ufactory.utils.realtime_teleop import RealtimeTeleopController
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 
 
@@ -350,6 +352,47 @@ def record_loop(
     manual_gripper_target = None
     manual_gripper_action_key = _manual_gripper_action_key(robot.action_features)
 
+    realtime_controller = None
+    sync_log_file = None
+    sync_log_writer = None
+    sync_frame_index = 0
+    if (
+        policy is None
+        and isinstance(teleop, UFBaseTeleop)
+        and getattr(robot, "_control_space", None) == "joint"
+        and hasattr(robot, "get_realtime_observation")
+    ):
+        realtime_controller = RealtimeTeleopController(
+            robot=robot,
+            teleop=teleop,
+            teleop_action_processor=teleop_action_processor,
+            robot_action_processor=robot_action_processor,
+            fps=getattr(robot.config, "realtime_control_fps", fps),
+            initial_observation=last_robot_cmd,
+        )
+        realtime_controller.start()
+        sync_log_dir = Path("logs")
+        sync_log_dir.mkdir(parents=True, exist_ok=True)
+        sync_log_path = sync_log_dir / (
+            f"gello_record_sync_{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns() % 1_000_000:06d}.csv"
+        )
+        sync_log_file = sync_log_path.open("w", newline="", buffering=1)
+        sync_log_writer = csv.DictWriter(
+            sync_log_file,
+            fieldnames=[
+                "frame",
+                "state_sample_s",
+                "action_sent_s",
+                "action_age_ms",
+                "observation_end_s",
+                "state_to_observation_end_ms",
+                "camera_timings",
+                "frame_loop_ms",
+            ],
+        )
+        sync_log_writer.writeheader()
+        logging.info("Realtime dataset synchronization log: %s", sync_log_path)
+
     timestamp = 0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
@@ -360,7 +403,17 @@ def record_loop(
             break
 
         # Get robot observation
-        obs = robot.get_observation()
+        if realtime_controller is not None:
+            obs = robot.get_realtime_observation()
+            observation_monotonic_s = getattr(
+                robot, "_last_realtime_observation_monotonic_s", time.perf_counter()
+            )
+            realtime_controller.update_observation(obs)
+            matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
+                observation_monotonic_s
+            )
+        else:
+            obs = robot.get_observation()
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
@@ -407,7 +460,11 @@ def record_loop(
             act_processed_teleop = teleop_action_processor((act, obs))
 
         elif policy is None and isinstance(teleop, Teleoperator):
-            act = teleop.get_action()
+            if realtime_controller is not None:
+                act_processed_teleop = matched_action
+                act = None
+            else:
+                act = teleop.get_action()
 
             # GELLO reports absolute joint positions. In Cartesian robot mode,
             # convert them with the xArm FK before the normal action pipeline;
@@ -421,17 +478,19 @@ def record_loop(
                 getattr(robot, "_control_space", None) == "cartesian"
                 and hasattr(robot, "joint_action_to_cartesian")
                 and joint_action_keys
+                and act is not None
                 and all(key in act for key in joint_action_keys)
             ):
                 act = robot.joint_action_to_cartesian(act)
 
             # (space mouse) from delta Cartesian cmd to absolute command
-            if "pose.dx" in act:
+            if act is not None and "pose.dx" in act:
                 last_robot_cmd.update({"pose.x": last_robot_cmd["pose.x"] + act["pose.dx"], "pose.y": last_robot_cmd["pose.y"] + act["pose.dy"], "pose.z": last_robot_cmd["pose.z"] + act["pose.dz"]})
                 act = last_robot_cmd.copy() # watch out this is shallow copy, not for nested dict
 
             # Applies a pipeline to the raw teleop action, default is IdentityProcessor
-            act_processed_teleop = teleop_action_processor((act, obs))
+            if realtime_controller is None:
+                act_processed_teleop = teleop_action_processor((act, obs))
 
         elif policy is None and isinstance(teleop, list):
             arm_action = teleop_arm.get_action()
@@ -460,7 +519,10 @@ def record_loop(
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        _sent_action = robot.send_action(robot_action_to_send)
+        if realtime_controller is None:
+            _sent_action = robot.send_action(robot_action_to_send)
+        else:
+            _sent_action = matched_action
         # Robots may clamp or otherwise sanitize a command before sending it.
         # Store that effective command so demonstrations match the motion.
         if isinstance(_sent_action, dict):
@@ -474,6 +536,25 @@ def record_loop(
                 frame = frame_callback(frame)
             dataset.add_frame(frame)
 
+        if sync_log_writer is not None:
+            observation_end_s = getattr(
+                robot, "_last_realtime_observation_end_monotonic_s", observation_monotonic_s
+            )
+            camera_timings = getattr(robot, "_last_realtime_camera_timings", {})
+            sync_log_writer.writerow(
+                {
+                    "frame": sync_frame_index,
+                    "state_sample_s": f"{observation_monotonic_s:.9f}",
+                    "action_sent_s": f"{matched_action_sent_s:.9f}",
+                    "action_age_ms": f"{(observation_monotonic_s - matched_action_sent_s) * 1000:.3f}",
+                    "observation_end_s": f"{observation_end_s:.9f}",
+                    "state_to_observation_end_ms": f"{(observation_end_s - observation_monotonic_s) * 1000:.3f}",
+                    "camera_timings": repr(camera_timings),
+                    "frame_loop_ms": f"{(time.perf_counter() - start_loop_t) * 1000:.3f}",
+                }
+            )
+            sync_frame_index += 1
+
         if display_data:
             log_rerun_data(
                 observation=obs_processed, action=action_values, compress_images=display_compressed_images
@@ -483,6 +564,11 @@ def record_loop(
         precise_sleep(max(1 / fps - dt_s, 0.0))
 
         timestamp = time.perf_counter() - start_episode_t
+
+    if realtime_controller is not None:
+        realtime_controller.stop()
+    if sync_log_file is not None:
+        sync_log_file.close()
 
 
 def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode):

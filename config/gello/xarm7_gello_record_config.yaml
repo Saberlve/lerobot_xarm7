@@ -5,11 +5,22 @@ robot:
   control_space: "joint"
   robot_ip: "192.168.1.245"
   gripper_type: 1
+  # Up to 60 Hz goal updates; the first command after idle is immediate.
+  # Keeping the gripper below its 5000 maximum speed avoids C19 in testing.
+  gripper_command_interval_s: 0.0166667
+  # Avoid the previous maximum-speed (5000) default on the tool RS485 device.
+  gripper_speed: 1500
   # Use the high-frequency servo interface for lower-latency GELLO tracking.
   joint_command_mode: 1
+  realtime_control_fps: 60
   max_joint_velocity: 120
   # TCP z floor in the xArm base coordinate system (mm).
-  min_tcp_z_mm: -2.0
+  min_tcp_z_mm: 70.0
+  # CPU-local FK/Jacobian projection keeps ServoJ free of synchronous SDK queries.
+  tcp_z_guard_backend: "local_projection"
+  tcp_z_soft_margin_mm: 5.0
+  local_kinematics_max_error_mm: 2.0
+  controller_safety_boundary: true
   # Append gripper initialization/read/write failures here.
   gripper_error_log_path: "logs/xarm7_gripper_errors.log"
   cameras:
@@ -27,7 +38,6 @@ robot:
       fps: 30
   # Redundant args, indicating the initial pose of xarm7. Set by 192.168.1.245:18333
   # start_joints: [0, -30, 0, 0, 0, 30, 0]
-
 # make sure to edit with your correct configurations!
 teleop:
   type: uf::gello_teleop
@@ -41,10 +51,11 @@ teleop:
 
 dataset:
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_datas"
-  repo_id: "ufactory/xarm7_gello_datas"
+  root: "datasets/xarm7_gello_joint_safe_datas"
+  repo_id: "ufactory/xarm7_gello_joint_safe_datas"
   single_task: "Pick up the purple grape and drop into the box on the left."
-  fps: 60
+  # Cameras deliver 30 Hz; arm ServoJ remains independently fixed at 60 Hz.
+  fps: 30
   episode_time_s: 60  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes
   push_to_hub: False

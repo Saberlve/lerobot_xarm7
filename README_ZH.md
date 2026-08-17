@@ -130,11 +130,15 @@ uv run uf-robot-teleop \
 ```
 
 按 `Space` 复位并开始。实验期间可在确保安全的前提下分别经过远离高度下限和接近
-高度下限的区域。CSV 的 `guard_path` 会标记 `rt_fast_path`、`fk_safe`、
-`fk_ik_clamp` 或 `fallback`，终端也会按路径输出分组统计。结果写入
+高度下限的区域。使用 `tcp_z_guard_backend: local_projection` 时，CSV 的
+`guard_path` 会标记 `local_safe`、`local_projected`、`local_hold` 或
+`model_fault`，终端也会按路径输出分组统计。结果写入
 `logs/gello_guard_latency_<时间>.csv`。
 
 实验结果与分析见 [GELLO 安全高度 Guard 延迟实验记录](docs/gello_guard_latency_experiment_20260817.md)。
+
+完整的抖动修复、数据同步和夹爪 Error 19 排障过程见
+[xArm7 + GELLO 平滑安全录制实践](docs/gello_xarm7_smooth_safe_recording_zh.md)。
 
 #### 设置 GELLO TCP 最低高度
 
@@ -146,7 +150,10 @@ uv run uf-read-tcp-z \
   --margin-mm 5
 ```
 
-该命令不会移动机械臂。把输出的 `min_tcp_z_mm` 建议值填入 GELLO YAML；测试遥操作、数据采集及其他使用该机器人配置的控制入口都会在最终下发前启用保护。关节控制下，低于下限的目标会保留 TCP 的 x/y 和姿态，只把 z 钳制到下限。
+该命令不会移动机械臂。将硬下限填入 `min_tcp_z_mm`；CPU 本地投影会在其上
+额外叠加 `tcp_z_soft_margin_mm`。xArm7 GELLO 关节路径会保留全部七个关节目标，
+只投影会穿过 TCP 软高度面的运动分量；控制器 Safety Boundary 则在硬下限处
+作为最后一道停止保护。
 
 > 该限制只保护 TCP 不低于一个水平面，不能检测机械臂连杆、肘部或夹爪外形与桌子的碰撞，也不能替代急停。更换工具、TCP 偏置、底座或桌面位置后必须重新测量。
 

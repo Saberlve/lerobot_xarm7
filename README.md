@@ -140,9 +140,10 @@ uv run uf-robot-teleop \
 ```
 
 Press `Space` to reset and start. While staying safe, include motion both far
-from and near the configured height floor. The CSV `guard_path` column marks
-`rt_fast_path`, `fk_safe`, `fk_ik_clamp`, or `fallback`, and the terminal prints
-per-path summaries. Results are written to `logs/gello_guard_latency_<time>.csv`.
+from and near the configured height floor. With `tcp_z_guard_backend:
+local_projection`, the CSV `guard_path` column marks `local_safe`,
+`local_projected`, `local_hold`, or `model_fault`. The terminal prints per-path
+summaries. Results are written to `logs/gello_guard_latency_<time>.csv`.
 
 #### Configure the GELLO TCP height floor
 
@@ -154,7 +155,11 @@ uv run uf-read-tcp-z \
   --margin-mm 5
 ```
 
-The command does not move the arm. Put the recommended `min_tcp_z_mm` value in the GELLO YAML. Teleop, recording, and other control entry points using that robot configuration will then enforce the floor immediately before sending each command. For joint control, targets below the floor retain their TCP x/y position and orientation while z is clamped.
+The command does not move the arm. Put the hard floor in `min_tcp_z_mm`; the
+configured `tcp_z_soft_margin_mm` is added above it for CPU-local projection.
+The xArm7 GELLO joint path preserves all seven joint targets and projects only
+the component that would cross the soft TCP-height plane. Controller Safety
+Boundary remains enabled at the hard floor as a final stop.
 
 > This protects the TCP against crossing a horizontal plane. It does not detect collisions involving links, the elbow, or the gripper body, and it does not replace the emergency stop. Measure again after changing the tool, TCP offset, robot base, or table position.
 
