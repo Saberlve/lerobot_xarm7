@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import logging
-import time
 import numpy as np
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from ..base_teleop import UFBaseTeleop
@@ -170,11 +169,8 @@ class GelloTeleop(UFBaseTeleop):
     def get_action(self) -> dict[str, np.ndarray]:
         if not self._teleop_enabled:
             raise RuntimeError("Gello teleop is disabled")
-        start = time.perf_counter()
         fake_obs = dict({"joint_state": np.array([0.0]*(self.dof+1))}) # for agent.act() argument, actually no use
         action_array = self.gello_agent.act(fake_obs) # current gello joint pos as np.ndarray
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read action: {dt_ms:.1f}ms")
 
         action = {}
         for i in range(self.dof):

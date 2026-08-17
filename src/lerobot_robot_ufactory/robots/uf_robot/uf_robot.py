@@ -107,6 +107,7 @@ class UFRobot(Robot, Thread):
         self._is_connected = False
         self._is_calibrated =True
 
+        self.enable_logs = bool(getattr(config, "enable_logs", False))
         self.logs = {}
 
         self._cmd_cnt = 0
@@ -539,7 +540,8 @@ class UFRobot(Robot, Thread):
             local = self._local_kinematics.tcp_position(joints)
             error_mm = float(np.linalg.norm(local - reported))
             limit = float(self.config.local_kinematics_max_error_mm)
-            self.logs["local_kinematics_error_mm"] = error_mm
+            if getattr(self, "enable_logs", True):
+                self.logs["local_kinematics_error_mm"] = error_mm
             if math.isfinite(error_mm) and error_mm <= limit:
                 self._local_model_fault_count = 0
                 return True
@@ -820,9 +822,10 @@ class UFRobot(Robot, Thread):
     def get_observation(self) -> dict[str, np.ndarray]:
         obs_dict = {}
         self._log_controller_error_if_changed("get_observation")
+        logs_enabled = bool(getattr(self, "enable_logs", True))
 
-        # Read Stretch state
-        before_read_t = time.perf_counter()
+        # Read robot state
+        before_read_t = time.perf_counter() if logs_enabled else None
         if self._control_space == "joint":
             code, states = self.real_arm.get_joint_states(is_radian=True, num=3)
             pos_list = states[0].copy()
@@ -867,12 +870,13 @@ class UFRobot(Robot, Thread):
                 self.real_arm.robotiq_get_status(number_of_registers=3)
                 grippos = self.real_arm.robotiq_status['gPO']  # 0..255
                 grippos_norm = self._gripper_param.get_gripper_norm(grippos) # 0=open, 1=closed
-            self.logs["read_pos_dt_s"] = time.perf_counter() - before_read_t
+            if logs_enabled:
+                self.logs["read_pos_dt_s"] = time.perf_counter() - before_read_t
             obs_dict[f"{self.prefix}gripper.pos"] = grippos_norm
 
         # Capture images from cameras
         for cam_key, cam in self.cameras.items():
-            before_camread_t = time.perf_counter()
+            before_camread_t = time.perf_counter() if logs_enabled else None
             frame = cam.async_read()
             shape = frame.shape
             if (self.camera_height > 0 and self.camera_height != shape[0]) or (self.camera_width > 0 and self.camera_width != shape[1]):
@@ -881,7 +885,10 @@ class UFRobot(Robot, Thread):
                 import cv2
                 frame = cv2.resize(frame, (camera_height, camera_width), interpolation=cv2.INTER_AREA)
             obs_dict[f"{self.prefix}{cam_key}"] = frame
-            self.logs[f"async_read_camera_{cam_key}_dt_s"] = time.perf_counter() - before_camread_t
+            if logs_enabled:
+                self.logs[f"async_read_camera_{cam_key}_dt_s"] = (
+                    time.perf_counter() - before_camread_t
+                )
 
         return obs_dict
 
@@ -896,6 +903,7 @@ class UFRobot(Robot, Thread):
             return self.get_observation()
         if not self._rt_report_normal:
             raise ConnectionError("RT Report for target robot NOT READY!")
+        logs_enabled = bool(getattr(self, "enable_logs", True))
         with self._update_lock:
             positions = self.rt_actual_joint_pos.copy()
             velocities = self.rt_actual_joint_speed.copy()
@@ -919,9 +927,9 @@ class UFRobot(Robot, Thread):
             obs_dict[f"{self.prefix}gripper.pos"] = float(gripper)
 
         for camera_key, camera in self.cameras.items():
-            before_camera_t = time.perf_counter()
+            before_camera_t = time.perf_counter() if logs_enabled else None
             frame = camera.async_read()
-            after_camera_t = time.perf_counter()
+            after_camera_t = time.perf_counter() if logs_enabled else None
             shape = frame.shape
             if (
                 self.camera_height > 0
@@ -935,20 +943,23 @@ class UFRobot(Robot, Thread):
                 height = self.camera_height if self.camera_height != 0 else shape[0]
                 frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
             obs_dict[f"{self.prefix}{camera_key}"] = frame
-            self.logs[f"async_read_camera_{camera_key}_dt_s"] = (
-                after_camera_t - before_camera_t
-            )
-            if not hasattr(self, "_last_realtime_camera_timings"):
-                self._last_realtime_camera_timings = {}
-            self._last_realtime_camera_timings[camera_key] = (
-                before_camera_t,
-                after_camera_t,
-            )
-        self._last_realtime_observation_end_monotonic_s = time.perf_counter()
+            if logs_enabled:
+                self.logs[f"async_read_camera_{camera_key}_dt_s"] = (
+                    after_camera_t - before_camera_t
+                )
+                if not hasattr(self, "_last_realtime_camera_timings"):
+                    self._last_realtime_camera_timings = {}
+                self._last_realtime_camera_timings[camera_key] = (
+                    before_camera_t,
+                    after_camera_t,
+                )
+        if logs_enabled:
+            self._last_realtime_observation_end_monotonic_s = time.perf_counter()
         return obs_dict
 
     def _send_gripper_action(self, gripper_norm: float) -> None:
         gripper_norm = min(max(float(gripper_norm), 0.0), 1.0)
+        logs_enabled = bool(getattr(self, "enable_logs", True))
         if (
             self._last_gripper_command is not None
             and abs(gripper_norm - self._last_gripper_command)
@@ -964,7 +975,7 @@ class UFRobot(Robot, Thread):
         if now - self._last_gripper_command_attempt_s < self.config.gripper_command_interval_s:
             return
         self._last_gripper_command_attempt_s = now
-        command_start_s = now
+        command_start_s = now if logs_enabled else None
 
         if self._gripper_type == GripperType.xArmGripper:
             grippos = self._gripper_param.get_grippos(gripper_norm)
@@ -1005,15 +1016,23 @@ class UFRobot(Robot, Thread):
             result = self.real_arm.getset_tgpio_modbus_data(modbus_datas)
 
         code = result[0] if isinstance(result, (tuple, list)) else result
-        command_dt_ms = (time.perf_counter() - command_start_s) * 1000
+        command_dt_ms = (
+            (time.perf_counter() - command_start_s) * 1000
+            if logs_enabled
+            else None
+        )
         if code not in (None, 0):
+            detail = f"target={gripper_norm:.6f}, pulse={grippos}"
+            if command_dt_ms is not None:
+                detail += f", dt_ms={command_dt_ms:.3f}"
             self._log_gripper_error(
                 "send_gripper_action",
                 code,
-                f"target={gripper_norm:.6f}, pulse={grippos}, dt_ms={command_dt_ms:.3f}",
+                detail,
             )
             return
-        self._log_gripper_command(gripper_norm, grippos, command_dt_ms)
+        if logs_enabled:
+            self._log_gripper_command(gripper_norm, grippos, command_dt_ms)
         self._last_gripper_command = gripper_norm
 
     def _log_gripper_command(self, target: float, pulse: int, dt_ms: float) -> None:
@@ -1139,10 +1158,8 @@ class UFRobot(Robot, Thread):
         if self.config.no_action:
             return action
 
-        before_write_t = time.perf_counter()
-        self.logs["safety_guard_dt_s"] = 0.0
-        self.logs["servo_j_dt_s"] = 0.0
-        self.logs["safety_guard_path"] = "not_run"
+        logs_enabled = bool(getattr(self, "enable_logs", True))
+        before_write_t = time.perf_counter() if logs_enabled else None
         safe_action = dict(action)
         if self._control_space == "joint":
             # first sync with gello or other control device SLOWLY!
@@ -1152,10 +1169,11 @@ class UFRobot(Robot, Thread):
             cmd_list = [0]*(self._dof)
             for i in range(self._dof):
                 cmd_list[i] = action[f"{self.prefix}J{i+1}.pos"]
-            guard_start_t = time.perf_counter()
+            guard_start_t = time.perf_counter() if logs_enabled else None
             safe_cmd = self._guard_joint_target(cmd_list)
-            self.logs["safety_guard_dt_s"] = time.perf_counter() - guard_start_t
-            self.logs["safety_guard_path"] = self._last_guard_path
+            if logs_enabled:
+                self.logs["safety_guard_dt_s"] = time.perf_counter() - guard_start_t
+                self.logs["safety_guard_path"] = self._last_guard_path
             if safe_cmd is None:
                 # Do not send an unverified arm target. Gripper handling below
                 # remains independent and can continue safely.
@@ -1174,11 +1192,12 @@ class UFRobot(Robot, Thread):
                     code = self.real_arm.set_state(0)
                     self._check_motion_code("set_state(0)", code)
                     time.sleep(0.1)
-                servo_j_start_t = time.perf_counter()
+                servo_j_start_t = time.perf_counter() if logs_enabled else None
                 code = self.real_arm.set_servo_angle_j(
                     safe_cmd[:self._dof].tolist(), speed=jnt_spd, is_radian=True
                 )
-                self.logs["servo_j_dt_s"] = time.perf_counter() - servo_j_start_t
+                if logs_enabled:
+                    self.logs["servo_j_dt_s"] = time.perf_counter() - servo_j_start_t
                 self._check_motion_code("set_servo_angle_j", code)
             elif safe_cmd is not None:
                 # The legacy mode-6 path uses the absolute move_joint API.
@@ -1222,7 +1241,8 @@ class UFRobot(Robot, Thread):
         if self._gripper_type > GripperType.NoGripper:
             self._send_gripper_action(safe_action[f"{self.prefix}gripper.pos"])
 
-        self.logs["write_pos_dt_s"] = time.perf_counter() - before_write_t
+        if logs_enabled:
+            self.logs["write_pos_dt_s"] = time.perf_counter() - before_write_t
         return safe_action
 
     def print_logs(self) -> None:

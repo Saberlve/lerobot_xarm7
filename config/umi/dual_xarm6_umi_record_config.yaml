@@ -12,6 +12,7 @@ robot:
       control_space: "cartesian"
       robot_ip: "192.168.1.29"
       gripper_type: 2
+      enable_logs: false
       max_linear_velocity: 200
       cameras:
         fisheye:
@@ -28,6 +29,7 @@ robot:
       control_space: "cartesian"
       robot_ip: "192.168.1.83"
       gripper_type: 2
+      enable_logs: false
       max_linear_velocity: 200
       cameras:
         fisheye:

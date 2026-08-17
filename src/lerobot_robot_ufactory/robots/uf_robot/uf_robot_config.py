@@ -20,6 +20,7 @@ class UFRobotConfig(RobotConfig):
     gripper_command_threshold: float = 0.01  # normalized change required before sending a new command
     gripper_command_interval_s: float = 0.1  # minimum interval between tool RS485 goals
     gripper_error_log_path: str | None = "logs/xarm_gripper_errors.log"
+    enable_logs: bool = False  # optional per-cycle timing and diagnostic logs
     observe_joint_vel: bool = False # only effective in joint control mode
     manual_mode: bool = False  # xArm joint teaching mode; records state and optional gripper actions
     manual_gripper_speed: float = 0.5  # normalized gripper position per second in manual mode

@@ -84,6 +84,7 @@ Predefined configs are provided under `config/`:
 - `robot.teach_sensitivity` — teaching sensitivity, valid range 1–5
 - `robot.manual_gripper_speed` — gripper velocity in normalized position per second (default `0.5`)
 - `robot.observe_joint_vel` — record joint velocities in observations (`false` by default)
+- `robot.enable_logs` — enable optional per-cycle timing/diagnostic logs (`false` by default)
 - `robot.cameras.camera` — Intel RealSense camera (`serial_number_or_name`, resolution, fps)
 - `dataset.root` / `dataset.repo_id` / `single_task` / `fps` / `episode_time_s` / `reset_time_s` / `num_episodes` — dataset settings
 
@@ -134,6 +135,7 @@ records the loop period, GELLO read, safety guard, ServoJ, and complete
 ```bash
 uv run uf-robot-teleop \
   --config_path config/gello/xarm7_gello_record_config.yaml \
+  --robot.enable_logs=true \
   --fps 60 \
   --guard_latency_experiment=true \
   --experiment_duration_s 60

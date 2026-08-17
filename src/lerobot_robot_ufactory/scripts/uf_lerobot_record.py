@@ -102,6 +102,18 @@ def _manual_gripper_action_key(action_features):
     return next((key for key in action_features if key.endswith("gripper.pos")), None)
 
 
+def _diagnostic_logs_enabled(robot) -> bool:
+    """Return whether optional per-cycle diagnostics are enabled for a robot."""
+    config = getattr(robot, "config", None)
+    if config is not None and hasattr(config, "enable_logs"):
+        return bool(config.enable_logs)
+
+    child_robots = getattr(robot, "robots", None)
+    if child_robots:
+        return any(_diagnostic_logs_enabled(child) for child in child_robots.values())
+    return False
+
+
 def _manual_action_from_observation(observation, action_features, gripper_target=None):
     """Keep only robot action fields when mirroring manual-mode state."""
     action = {key: value for key, value in observation.items() if key in action_features}
@@ -353,6 +365,7 @@ def record_loop(
     manual_gripper_action_key = _manual_gripper_action_key(robot.action_features)
 
     realtime_controller = None
+    diagnostic_logs_enabled = _diagnostic_logs_enabled(robot)
     sync_log_file = None
     sync_log_writer = None
     sync_frame_index = 0
@@ -371,27 +384,29 @@ def record_loop(
             initial_observation=last_robot_cmd,
         )
         realtime_controller.start()
-        sync_log_dir = Path("logs")
-        sync_log_dir.mkdir(parents=True, exist_ok=True)
-        sync_log_path = sync_log_dir / (
-            f"gello_record_sync_{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns() % 1_000_000:06d}.csv"
-        )
-        sync_log_file = sync_log_path.open("w", newline="", buffering=1)
-        sync_log_writer = csv.DictWriter(
-            sync_log_file,
-            fieldnames=[
-                "frame",
-                "state_sample_s",
-                "action_sent_s",
-                "action_age_ms",
-                "observation_end_s",
-                "state_to_observation_end_ms",
-                "camera_timings",
-                "frame_loop_ms",
-            ],
-        )
-        sync_log_writer.writeheader()
-        logging.info("Realtime dataset synchronization log: %s", sync_log_path)
+        if diagnostic_logs_enabled:
+            sync_log_dir = Path("logs")
+            sync_log_dir.mkdir(parents=True, exist_ok=True)
+            sync_log_path = sync_log_dir / (
+                f"gello_record_sync_{time.strftime('%Y%m%d_%H%M%S')}_"
+                f"{time.time_ns() % 1_000_000:06d}.csv"
+            )
+            sync_log_file = sync_log_path.open("w", newline="", buffering=1)
+            sync_log_writer = csv.DictWriter(
+                sync_log_file,
+                fieldnames=[
+                    "frame",
+                    "state_sample_s",
+                    "action_sent_s",
+                    "action_age_ms",
+                    "observation_end_s",
+                    "state_to_observation_end_ms",
+                    "camera_timings",
+                    "frame_loop_ms",
+                ],
+            )
+            sync_log_writer.writeheader()
+            logging.info("Realtime dataset synchronization log: %s", sync_log_path)
 
     timestamp = 0
     start_episode_t = time.perf_counter()
@@ -405,13 +420,16 @@ def record_loop(
         # Get robot observation
         if realtime_controller is not None:
             obs = robot.get_realtime_observation()
-            observation_monotonic_s = getattr(
-                robot, "_last_realtime_observation_monotonic_s", time.perf_counter()
-            )
+            observation_monotonic_s = getattr(robot, "_last_realtime_observation_monotonic_s", None)
+            if observation_monotonic_s is None:
+                observation_monotonic_s = time.perf_counter()
             realtime_controller.update_observation(obs)
-            matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
-                observation_monotonic_s
-            )
+            if diagnostic_logs_enabled:
+                matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
+                    observation_monotonic_s
+                )
+            else:
+                matched_action = realtime_controller.action_at(observation_monotonic_s)
         else:
             obs = robot.get_observation()
 

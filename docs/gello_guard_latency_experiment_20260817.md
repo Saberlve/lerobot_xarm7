@@ -55,6 +55,7 @@ GELLO get_action
 ```bash
 uv run uf-robot-teleop \
   --config_path config/gello/xarm7_gello_record_config.yaml \
+  --robot.enable_logs=true \
   --fps 60 \
   --experiment_1_baseline=true \
   --experiment_duration_s 60

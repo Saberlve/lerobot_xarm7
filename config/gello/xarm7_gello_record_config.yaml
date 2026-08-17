@@ -5,6 +5,7 @@ robot:
   control_space: "joint"
   robot_ip: "192.168.1.245"
   gripper_type: 1
+  enable_logs: false
   # Up to 60 Hz goal updates; the first command after idle is immediate.
   # Keeping the gripper below its 5000 maximum speed avoids C19 in testing.
   gripper_command_interval_s: 0.0166667

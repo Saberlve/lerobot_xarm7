@@ -5,6 +5,7 @@ robot:
   control_space: "cartesian"
   robot_ip: "192.168.1.85"
   gripper_type: 10
+  enable_logs: false
   max_linear_velocity: 200
   cameras:
     fisheye:

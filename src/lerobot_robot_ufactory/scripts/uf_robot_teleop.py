@@ -162,6 +162,10 @@ def teleop_loop(cfg: TeleopConfig):
 
     if cfg.guard_latency_experiment:
         _validate_guard_latency_config(cfg)
+        if hasattr(cfg.robot, "enable_logs") and not cfg.robot.enable_logs:
+            raise ValueError(
+                "Guard latency experiment requires robot.enable_logs=true"
+            )
         logging.warning(
             "Guard latency experiment enabled: measuring GELLO, safety guard, ServoJ, "
             "and total send latency for %.1f active seconds",

@@ -84,6 +84,7 @@ ls /dev/serial/by-id/
 - `robot.teach_sensitivity` — 示教灵敏度，有效范围 1–5
 - `robot.manual_gripper_speed` — 夹爪速度（每秒归一化位置变化，默认 `0.5`）
 - `robot.observe_joint_vel` — 是否在观测中记录关节速度（默认 `false`）
+- `robot.enable_logs` — 是否启用每帧耗时和诊断日志（默认 `false`）
 - `robot.cameras.camera` — Intel RealSense 相机配置（`serial_number_or_name`、分辨率、fps）
 - `dataset.root` / `dataset.repo_id` / `single_task` / `fps` / `episode_time_s` / `reset_time_s` / `num_episodes` — 数据集配置
 
@@ -124,6 +125,7 @@ GELLO 读取、安全检测、ServoJ 和完整 `send_action` 耗时：
 ```bash
 uv run uf-robot-teleop \
   --config_path config/gello/xarm7_gello_record_config.yaml \
+  --robot.enable_logs=true \
   --fps 60 \
   --guard_latency_experiment=true \
   --experiment_duration_s 60

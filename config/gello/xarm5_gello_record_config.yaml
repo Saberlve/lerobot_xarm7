@@ -5,6 +5,7 @@ robot:
   control_space: "joint"
   robot_ip: "192.168.1.245"
   gripper_type: 1
+  enable_logs: false
 
 # make sure to edit with your correct configurations!
 teleop:
