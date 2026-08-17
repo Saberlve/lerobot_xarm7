@@ -134,6 +134,8 @@ uv run uf-robot-teleop \
 `fk_ik_clamp` 或 `fallback`，终端也会按路径输出分组统计。结果写入
 `logs/gello_guard_latency_<时间>.csv`。
 
+实验结果与分析见 [GELLO 安全高度 Guard 延迟实验记录](docs/gello_guard_latency_experiment_20260817.md)。
+
 #### 设置 GELLO TCP 最低高度
 
 先停止其他控制程序，将机械臂 TCP 移到最低安全位置，然后只读当前高度：
