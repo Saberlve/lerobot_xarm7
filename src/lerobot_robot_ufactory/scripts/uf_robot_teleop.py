@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pprint import pformat
 import lerobot_robot_ufactory # patch
-from lerobot.scripts.lerobot_record import register_third_party_plugins
 from lerobot.processor import (
     make_default_processors,
 )

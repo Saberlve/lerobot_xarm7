@@ -43,7 +43,6 @@ def make_guard_robot(arm, min_tcp_z_mm=100.0, control_space="joint"):
     robot._control_space = control_space
     robot._min_tcp_z_mm = min_tcp_z_mm
     robot._last_safe_joint_target = np.asarray([0.25] * 7)
-    robot._last_safe_cartesian_target = np.asarray([250.0, 0.0, 120.0, 0.0, 0.0, 0.0])
     robot._tcp_z_is_clamped = False
     robot._tcp_z_last_log_time = 0.0
     robot._tcp_z_last_error_log_time = 0.0
@@ -143,14 +142,6 @@ def test_joint_guard_rejects_discontinuous_ik_solution():
     result = robot._guard_joint_target([0.1] * 7)
 
     assert np.allclose(result, [0.25] * 7)
-
-
-def test_cartesian_guard_preserves_other_axes_and_clamps_z():
-    robot = make_guard_robot(object(), control_space="cartesian")
-
-    result = robot._guard_cartesian_target([300.0, 20.0, 90.0, 0.1, 0.2, 0.3])
-
-    assert result == pytest.approx([300.0, 20.0, 100.0, 0.1, 0.2, 0.3])
 
 
 def test_send_action_sends_and_returns_clamped_joint_target():

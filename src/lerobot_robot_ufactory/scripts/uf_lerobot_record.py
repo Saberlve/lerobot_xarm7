@@ -484,23 +484,6 @@ def record_loop(
             else:
                 act = teleop.get_action()
 
-            # GELLO reports absolute joint positions. In Cartesian robot mode,
-            # convert them with the xArm FK before the normal action pipeline;
-            # send_action() then applies the Cartesian safety guard and sends
-            # the resulting pose with set_position_aa().
-            joint_action_keys = [
-                f"{getattr(robot, 'prefix', '')}J{i}.pos"
-                for i in range(1, getattr(robot, "_dof", 0) + 1)
-            ]
-            if (
-                getattr(robot, "_control_space", None) == "cartesian"
-                and hasattr(robot, "joint_action_to_cartesian")
-                and joint_action_keys
-                and act is not None
-                and all(key in act for key in joint_action_keys)
-            ):
-                act = robot.joint_action_to_cartesian(act)
-
             # (space mouse) from delta Cartesian cmd to absolute command
             if act is not None and "pose.dx" in act:
                 last_robot_cmd.update({"pose.x": last_robot_cmd["pose.x"] + act["pose.dx"], "pose.y": last_robot_cmd["pose.y"] + act["pose.dy"], "pose.z": last_robot_cmd["pose.z"] + act["pose.dz"]})
@@ -602,11 +585,6 @@ def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode):
 
     if is_uf_teleop:
         obs = robot.get_observation()
-        # Cartesian observations expose TCP pose, while GELLO alignment needs
-        # the current absolute joint positions.
-        joint_observation = getattr(robot, "get_joint_observation", None)
-        if joint_observation is not None:
-            obs.update(joint_observation())
         teleop.set_teleop_enabled(True, obs)
 
 

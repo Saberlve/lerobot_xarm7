@@ -130,7 +130,6 @@ class UFRobot(Robot, Thread):
         self._local_joint_origins = None
         self._local_model_fault_count = 0
         self._last_safe_joint_target = None
-        self._last_safe_cartesian_target = None
         self._last_guard_path = "not_run"
         self._tcp_z_is_clamped = False
         self._tcp_z_last_log_time = 0.0
@@ -139,8 +138,8 @@ class UFRobot(Robot, Thread):
         self.report_stop_event = Event()
         self._rt_report_normal = False
         self._update_lock = Lock()
-        # The TCP z guard uses the asynchronous RT report to avoid a blocking
-        # FK request on every GELLO servo cycle.
+        # Cartesian observations and the joint-mode TCP z guard use the
+        # asynchronous RT report.
         self._use_rt_report = (
             self._control_space == "cartesian" or self._min_tcp_z_mm is not None
         )
@@ -310,35 +309,25 @@ class UFRobot(Robot, Thread):
 
     def _initialize_tcp_z_guard(self) -> None:
         """Initialize guard state from the robot's current physical target."""
-        if self._min_tcp_z_mm is None or self.real_arm is None:
+        if self._control_space != "joint" or self._min_tcp_z_mm is None or self.real_arm is None:
             return
 
-        if self._control_space == "joint":
-            code, states = self.real_arm.get_joint_states(is_radian=True, num=1)
-            if code != 0 or not states or len(states[0]) < self._dof:
-                raise RuntimeError(f"Unable to initialize TCP z guard from joint state, code={code}")
-            target = np.asarray(states[0][:self._dof], dtype=np.float64)
-            if not np.all(np.isfinite(target)):
-                raise RuntimeError("Unable to initialize TCP z guard from non-finite joint state")
-            self._last_safe_joint_target = target
-            if self._tcp_z_guard_backend == "local_projection":
-                if self._local_kinematics is None:
-                    raise RuntimeError("Local xArm7 kinematics has not been initialized")
-                current_z = float(self._local_kinematics.tcp_position(target)[2])
-                if current_z < self._min_tcp_z_mm:
-                    raise RuntimeError(
-                        f"Current TCP z {current_z:.2f} mm is below the hard floor "
-                        f"{self._min_tcp_z_mm:.2f} mm"
-                    )
-        else:
-            code, pose = self.real_arm.get_position_aa(is_radian=True)
-            if code != 0 or len(pose) < 6:
-                raise RuntimeError(f"Unable to initialize TCP z guard from TCP pose, code={code}")
-            target = np.asarray(pose[:6], dtype=np.float64)
-            if not np.all(np.isfinite(target)):
-                raise RuntimeError("Unable to initialize TCP z guard from non-finite TCP pose")
-            self._last_safe_cartesian_target = target
-
+        code, states = self.real_arm.get_joint_states(is_radian=True, num=1)
+        if code != 0 or not states or len(states[0]) < self._dof:
+            raise RuntimeError(f"Unable to initialize TCP z guard from joint state, code={code}")
+        target = np.asarray(states[0][:self._dof], dtype=np.float64)
+        if not np.all(np.isfinite(target)):
+            raise RuntimeError("Unable to initialize TCP z guard from non-finite joint state")
+        self._last_safe_joint_target = target
+        if self._tcp_z_guard_backend == "local_projection":
+            if self._local_kinematics is None:
+                raise RuntimeError("Local xArm7 kinematics has not been initialized")
+            current_z = float(self._local_kinematics.tcp_position(target)[2])
+            if current_z < self._min_tcp_z_mm:
+                raise RuntimeError(
+                    f"Current TCP z {current_z:.2f} mm is below the hard floor "
+                    f"{self._min_tcp_z_mm:.2f} mm"
+                )
         self._tcp_z_is_clamped = False
         self._tcp_z_last_log_time = 0.0
         self._tcp_z_last_error_log_time = 0.0
@@ -673,30 +662,6 @@ class UFRobot(Robot, Thread):
             and actual_z > self._min_tcp_z_mm + activation_margin
         )
 
-    def _guard_cartesian_target(self, command: list[float]) -> np.ndarray | None:
-        """Clamp a Cartesian target without changing its other five components."""
-        target = np.asarray(command, dtype=np.float64)
-        if self._min_tcp_z_mm is None:
-            return target
-
-        fallback = self._last_safe_cartesian_target
-        try:
-            if target.shape != (6,) or not np.all(np.isfinite(target)):
-                raise ValueError("Cartesian target has invalid shape or contains NaN/Inf")
-            requested_z = float(target[2])
-            if requested_z < self._min_tcp_z_mm:
-                target[2] = self._min_tcp_z_mm
-                self._log_tcp_z_clamp(True, requested_z)
-            else:
-                self._log_tcp_z_clamp(False)
-            self._last_safe_cartesian_target = target.copy()
-            return target
-        except Exception as exc:
-            self._log_tcp_z_guard_error(str(exc))
-            if fallback is None:
-                return None
-            return np.asarray(fallback, dtype=np.float64).copy()
-
     def configure(self) -> None:
         self.real_arm.motion_enable()
         self.real_arm.clean_error()
@@ -803,21 +768,6 @@ class UFRobot(Robot, Thread):
     def calibrate(self) -> None:
         self._is_calibrated = True
         pass # CHECK! currently No-op
-
-    def get_joint_observation(self) -> dict[str, float]:
-        """Read joint positions for teleoperator alignment in Cartesian mode."""
-        if self.real_arm is None or not self._is_connected:
-            raise ConnectionError("UF Robot is not connected")
-        code, states = self.real_arm.get_joint_states(is_radian=True, num=1)
-        if code != 0 or not states or len(states[0]) < self._dof:
-            raise RuntimeError(f"Failed to read xArm joint states, code={code}")
-        positions = np.asarray(states[0][:self._dof], dtype=np.float64)
-        if not np.all(np.isfinite(positions)):
-            raise RuntimeError("xArm joint states contain NaN or Inf")
-        return {
-            f"{self.prefix}J{i + 1}.pos": float(position)
-            for i, position in enumerate(positions)
-        }
 
     def get_observation(self) -> dict[str, np.ndarray]:
         obs_dict = {}
@@ -1097,48 +1047,6 @@ class UFRobot(Robot, Thread):
         if code is not None and code != 0:
             raise RuntimeError(f"{command} failed, code={code}, {self._motion_status()}")
 
-    def joint_action_to_cartesian(self, action: dict) -> dict:
-        """Convert an absolute joint action to an xArm axis-angle pose.
-
-        GELLO reports absolute joint positions while Cartesian control expects
-        ``pose.x/y/z/rx/ry/rz``. The xArm controller's FK is used so the
-        configured robot model and tool frame stay authoritative. The returned
-        action is passed through ``send_action`` for Cartesian safety checks.
-        """
-        if self.real_arm is None or not self._is_connected:
-            raise ConnectionError("UF Robot is not connected")
-
-        joint_keys = [f"{self.prefix}J{i}.pos" for i in range(1, self._dof + 1)]
-        try:
-            joints = [float(action[key]) for key in joint_keys]
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid joint action; expected keys {joint_keys}") from exc
-
-        if not np.all(np.isfinite(joints)):
-            raise ValueError("Joint action contains NaN or Inf")
-
-        code, pose = self.real_arm.get_forward_kinematics(
-            joints,
-            input_is_radian=True,
-            return_is_radian=True,
-        )
-        pose = np.asarray(pose, dtype=np.float64)
-        if code != 0 or pose.shape[0] < 6 or not np.all(np.isfinite(pose[:6])):
-            raise RuntimeError(f"xArm forward kinematics failed, code={code}, pose={pose}")
-
-        cartesian = {
-            f"{self.prefix}pose.x": float(pose[0]),
-            f"{self.prefix}pose.y": float(pose[1]),
-            f"{self.prefix}pose.z": float(pose[2]),
-            f"{self.prefix}pose.rx": float(pose[3]),
-            f"{self.prefix}pose.ry": float(pose[4]),
-            f"{self.prefix}pose.rz": float(pose[5]),
-        }
-        gripper_key = f"{self.prefix}gripper.pos"
-        if gripper_key in action:
-            cartesian[gripper_key] = float(action[gripper_key])
-        return cartesian
-
     def send_action(self, action: dict) -> np.ndarray:
         if not self._is_connected:
             raise ConnectionError()
@@ -1228,12 +1136,7 @@ class UFRobot(Robot, Thread):
             if not self._rt_report_normal:
                 raise ConnectionError("RT Report for target robot NOT READY! ")
             cmd_list = [action[f"{self.prefix}pose.x"], action[f"{self.prefix}pose.y"], action[f"{self.prefix}pose.z"], action[f"{self.prefix}pose.rx"], action[f"{self.prefix}pose.ry"], action[f"{self.prefix}pose.rz"]]
-            safe_cmd = self._guard_cartesian_target(cmd_list)
-            if safe_cmd is not None:
-                safe_cmd = safe_cmd.tolist()
-                for i, key in enumerate(("x", "y", "z", "rx", "ry", "rz")):
-                    safe_action[f"{self.prefix}pose.{key}"] = float(safe_cmd[i])
-                self.real_arm.set_position_aa(axis_angle_pose=safe_cmd, speed=lin_spd, is_radian=True, wait=False)
+            self.real_arm.set_position_aa(axis_angle_pose=cmd_list, speed=lin_spd, is_radian=True, wait=False)
             # self.real_arm.set_position(*cmd_list, radius=0, speed=lin_spd, is_radian=True, wait=False)
 
         if self._cmd_cnt < 99999:

@@ -8,7 +8,6 @@ from dataclasses import asdict, dataclass
 from pprint import pformat
 import numpy as np
 import lerobot_robot_ufactory # patch
-from lerobot.scripts.lerobot_record import register_third_party_plugins
 from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
 from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts
 from lerobot.policies.utils import make_robot_action
@@ -55,15 +54,6 @@ def continuous_rotvec(new_rv, prev_rv):
             axis = new_rv / angle
             new_rv = -(2 * np.pi - angle) * axis
     return new_rv
-
-def blend_poses(pose_a, pose_b, alpha):
-    """位姿混合: (1-alpha)*A + alpha*B, 旋转用 SO(3) 插值。
-    先将 pose_b 的 rotvec 归一化到与 pose_a 同符号半球，避免 ±π 跳变破坏线性混合。"""
-    blended_pos = (1 - alpha) * np.array(pose_a[:3]) + alpha * np.array(pose_b[:3])
-    # 旋转用线性混合 rotvec (delta 很小时近似 SLERP)
-    rot_b = continuous_rotvec(np.array(pose_b[3:6]), np.array(pose_a[3:6]))
-    blended_rot = (1 - alpha) * np.array(pose_a[3:6]) + alpha * rot_b
-    return np.concatenate([blended_pos, blended_rot]).tolist()
 
 def compute_relative_axis_angle(rot_prev, rot_curr):
     """
@@ -212,24 +202,6 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False, safety_guard
     device = get_safe_torch_device(policy.config.device, log=True)
     sleep_time_s = 1 / dataset_metadata.fps
 
-    # Gripper look-ahead: denormalization stats for peeking into the action queue
-    _gripper_mean = dataset_metadata.stats['action']['mean'][-1].item()
-    _gripper_std = dataset_metadata.stats['action']['std'][-1].item()
-    _gripper_min = dataset_metadata.stats['action']['min'][-1].item()
-    _gripper_max = dataset_metadata.stats['action']['max'][-1].item()
-    is_act_policy = hasattr(policy.config, 'chunk_size')
-    # ACT: lookahead 30 (~1s) 补偿 chunk 慢启动; DP: 队列仅 8 步，lookahead 4
-    GRIPPER_LOOKAHEAD = 0 if is_act_policy else 4
-
-    # =====================================================
-    # Chunk boundary smoothing: only damp large discontinuities at action chunk
-    # boundaries (mean ~6mm jump) while preserving smooth within-chunk motion (~1mm).
-    # When step-to-step cmd change exceeds SMOOTH_THRESHOLD, clamp it to that limit.
-    # =====================================================
-    SMOOTH_THRESHOLD = 0  # mm: smooth chunk boundary jumps while preserving trajectory
-    SMOOTH_ROT_THRESHOLD = 0.05  # rad: max allowed rotation jump per step
-    prev_smoothed_pose = None
-
     print("\n********** Policy Eval Episode Loop Start **********")
     print(f'relative: {relative}')
 
@@ -248,10 +220,8 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False, safety_guard
         prev_robot_dict = {}
         prev_action_dict = {}
 
-        is_multiple_robot = False
         if hasattr(cfg.robot, 'robots'):
             keys = cfg.robot.robots.keys()
-            is_multiple_robot = True
         else:
             keys = ['']
         for key in keys:
@@ -284,7 +254,6 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False, safety_guard
             obs = robot.get_observation()
 
             curr_robot_dict = {}
-            curr_action_dict = {}
             for key in keys:
                 prefix = f'.{key}' if key else ''
                 is_tcp = f'{prefix}pose.x' in obs and f'{prefix}pose.y' in obs and f'{prefix}pose.z' in obs and f'{prefix}pose.rx' in obs and f'{prefix}pose.ry' in obs and f'{prefix}pose.rz' in obs
@@ -348,66 +317,12 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False, safety_guard
 
                 # robot_action_to_send[f'{prefix}pose.z'] = max(robot_action_to_send[f'{prefix}pose.z'], 199)
 
-                # Rate-limited smoothing: cap position velocity to reduce chunk boundary jerks
-                # Uses vector-norm clamping to preserve motion direction
-                if SMOOTH_THRESHOLD > 0:
-                    pos_keys = [f'{prefix}pose.x', f'{prefix}pose.y', f'{prefix}pose.z']
-                    rot_keys = [f'{prefix}pose.rx', f'{prefix}pose.ry', f'{prefix}pose.rz']
-                    if prev_smoothed_pose is None:
-                        prev_smoothed_pose = {k: robot_action_to_send[k] for k in pos_keys + rot_keys}
-                    else:
-                        # Vector-norm clamp on position (preserves direction)
-                        delta_pos = np.array([robot_action_to_send[k] - prev_smoothed_pose[k] for k in pos_keys])
-                        norm = np.linalg.norm(delta_pos)
-                        if norm > SMOOTH_THRESHOLD:
-                            delta_pos = delta_pos * (SMOOTH_THRESHOLD / norm)
-                        for i, k in enumerate(pos_keys):
-                            prev_smoothed_pose[k] = prev_smoothed_pose[k] + delta_pos[i]
-                            robot_action_to_send[k] = prev_smoothed_pose[k]
-                        # Per-axis clamp on rotation
-                        for k in rot_keys:
-                            delta = robot_action_to_send[k] - prev_smoothed_pose[k]
-                            if abs(delta) > SMOOTH_ROT_THRESHOLD:
-                                delta = SMOOTH_ROT_THRESHOLD * (1 if delta > 0 else -1)
-                            prev_smoothed_pose[k] = prev_smoothed_pose[k] + delta
-                            robot_action_to_send[k] = prev_smoothed_pose[k]
-
                 if relative:
                     curr_action_pose = np.array([
                         robot_action_to_send[f'{prefix}pose.x'], robot_action_to_send[f'{prefix}pose.y'], robot_action_to_send[f'{prefix}pose.z'],
                         robot_action_to_send[f'{prefix}pose.rx'], robot_action_to_send[f'{prefix}pose.ry'], robot_action_to_send[f'{prefix}pose.rz']
                     ])
-                    # 相对增量模式: 漂移修正，将指令位姿温和拉回实际位姿
-                    # prev_action_pose = blend_poses(curr_action_pose, curr_robot_pose, 0.05)
                     prev_action_dict[key]['pose'] = curr_action_pose
-
-            # # Gripper look-ahead: peek ahead in the action queue to compensate
-            # # for the slow ramp in the ACT chunk (eliminates 1-2s gripper delay)
-            # gripper_raw = robot_action_to_send.get('left.gripper.pos', 0)
-            # if hasattr(policy, '_action_queue') and len(policy._action_queue) > 0:
-            #     # ACT: 队列为 deque of tensors, 归一化方式 MEAN_STD
-            #     lookahead_idx = min(GRIPPER_LOOKAHEAD, len(policy._action_queue) - 1)
-            #     future_gripper_norm = policy._action_queue[lookahead_idx][0, -1].item()
-            #     gripper_raw = future_gripper_norm * _gripper_std + _gripper_mean
-            # elif hasattr(policy, '_queues') and 'action' in policy._queues and len(policy._queues['action']) > 0:
-            #     # DP: 队列结构不同, 归一化方式 MIN_MAX → [-1,1] → [min,max]
-            #     lookahead_idx = min(GRIPPER_LOOKAHEAD, len(policy._queues['action']) - 1)
-            #     future_gripper_norm = policy._queues['action'][lookahead_idx][0, -1].item()
-            #     gripper_raw = (future_gripper_norm + 1) / 2 * (_gripper_max - _gripper_min) + _gripper_min
-            # robot_action_to_send['left.gripper.pos'] = 1.0 if gripper_raw > 0.4 else 0.0
-
-            # gripper_raw = robot_action_to_send.get('right.gripper.pos', 0)
-            # if hasattr(policy, '_action_queue') and len(policy._action_queue) > 0:
-            #     # ACT: 队列为 deque of tensors, 归一化方式 MEAN_STD
-            #     lookahead_idx = min(GRIPPER_LOOKAHEAD, len(policy._action_queue) - 1)
-            #     future_gripper_norm = policy._action_queue[lookahead_idx][0, -1].item()
-            #     gripper_raw = future_gripper_norm * _gripper_std + _gripper_mean
-            # elif hasattr(policy, '_queues') and 'action' in policy._queues and len(policy._queues['action']) > 0:
-            #     # DP: 队列结构不同, 归一化方式 MIN_MAX → [-1,1] → [min,max]
-            #     lookahead_idx = min(GRIPPER_LOOKAHEAD, len(policy._queues['action']) - 1)
-            #     future_gripper_norm = policy._queues['action'][lookahead_idx][0, -1].item()
-            #     gripper_raw = (future_gripper_norm + 1) / 2 * (_gripper_max - _gripper_min) + _gripper_min
-            # robot_action_to_send['right.gripper.pos'] = 1.0 if gripper_raw > 0.4 else 0.0
 
             # Safety check: any violation triggers an e-stop; the action is
             # NOT sent and the loop waits for the operator to press right arrow
