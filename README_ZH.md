@@ -116,6 +116,24 @@ uv run uf-camera-view -l -T realsense     # 列出每台相机的序列号
 
 `Space` 复位并开始，`←` 复位，`Esc` 退出。
 
+#### Guard 延迟实验
+
+以下命令在启用 `min_tcp_z_mm` 安全检测的情况下运行 60 秒，并记录控制周期、
+GELLO 读取、安全检测、ServoJ 和完整 `send_action` 耗时：
+
+```bash
+uv run uf-robot-teleop \
+  --config_path config/gello/xarm7_gello_record_config.yaml \
+  --fps 60 \
+  --guard_latency_experiment=true \
+  --experiment_duration_s 60
+```
+
+按 `Space` 复位并开始。实验期间可在确保安全的前提下分别经过远离高度下限和接近
+高度下限的区域。CSV 的 `guard_path` 会标记 `rt_fast_path`、`fk_safe`、
+`fk_ik_clamp` 或 `fallback`，终端也会按路径输出分组统计。结果写入
+`logs/gello_guard_latency_<时间>.csv`。
+
 #### 设置 GELLO TCP 最低高度
 
 先停止其他控制程序，将机械臂 TCP 移到最低安全位置，然后只读当前高度：

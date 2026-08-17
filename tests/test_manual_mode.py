@@ -119,6 +119,7 @@ def test_manual_mode_robot_enters_teaching_mode_without_sending_actions(monkeypa
     robot = uf_robot_module.UFRobot(config)
 
     robot.connect()
+    assert robot.is_connected
     assert arm.mode == 2
     assert ("set_teach_sensitivity", 4) in arm.calls
     assert robot._initial_point == arm.initial_point
@@ -147,8 +148,13 @@ def test_manual_mode_robot_enters_teaching_mode_without_sending_actions(monkeypa
     assert observation["J6.pos"] == 5.0
 
     robot.disconnect()
+    assert not robot.is_connected
     assert arm.mode == 0
     assert ("disconnect",) in arm.calls
+
+    call_count = len(arm.calls)
+    robot.disconnect()
+    assert len(arm.calls) == call_count
 
 
 def test_robot_reset_uses_sdk_initial_point_in_normal_mode(monkeypatch, tmp_path):

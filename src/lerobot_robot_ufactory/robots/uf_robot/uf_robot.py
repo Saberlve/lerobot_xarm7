@@ -106,6 +106,7 @@ class UFRobot(Robot, Thread):
         self._tcp_z_guard_activation_margin_mm = self.config.tcp_z_guard_activation_margin_mm
         self._last_safe_joint_target = None
         self._last_safe_cartesian_target = None
+        self._last_guard_path = "not_run"
         self._tcp_z_is_clamped = False
         self._tcp_z_last_log_time = 0.0
         self._tcp_z_last_error_log_time = 0.0
@@ -322,6 +323,7 @@ class UFRobot(Robot, Thread):
         """Return a safe joint target, or None when motion must be skipped."""
         desired = np.asarray(command, dtype=np.float64)
         if self._min_tcp_z_mm is None:
+            self._last_guard_path = "disabled"
             return desired
 
         fallback = self._last_safe_joint_target
@@ -334,6 +336,7 @@ class UFRobot(Robot, Thread):
             # normal GELLO path keeps a stable command cadence. A large
             # activation margin absorbs ordinary per-cycle motion changes.
             if self._rt_actual_tcp_is_far_above_floor():
+                self._last_guard_path = "rt_fast_path"
                 self._last_safe_joint_target = desired.copy()
                 self._log_tcp_z_clamp(False)
                 return desired
@@ -347,6 +350,7 @@ class UFRobot(Robot, Thread):
 
             requested_z = float(pose[2])
             if requested_z >= self._min_tcp_z_mm:
+                self._last_guard_path = "fk_safe"
                 self._validate_guard_joint_target(desired, fallback, "GELLO target")
                 self._last_safe_joint_target = desired.copy()
                 self._log_tcp_z_clamp(False)
@@ -367,6 +371,7 @@ class UFRobot(Robot, Thread):
                 raise RuntimeError(f"inverse kinematics failed, code={code}")
 
             safe_target = inverse[:self._dof].copy()
+            self._last_guard_path = "fk_ik_clamp"
             self._validate_guard_joint_target(safe_target, fallback, "clamped IK target")
             code, verified_pose = self.real_arm.get_forward_kinematics(
                 safe_target.tolist(), input_is_radian=True, return_is_radian=True
@@ -384,6 +389,7 @@ class UFRobot(Robot, Thread):
             self._log_tcp_z_clamp(True, requested_z)
             return safe_target
         except Exception as exc:
+            self._last_guard_path = "fallback"
             self._log_tcp_z_guard_error(str(exc))
             if fallback is None:
                 return None
@@ -562,6 +568,21 @@ class UFRobot(Robot, Thread):
         self._is_calibrated = True
         pass # CHECK! currently No-op
 
+    def get_joint_observation(self) -> dict[str, float]:
+        """Read joint positions for teleoperator alignment in Cartesian mode."""
+        if self.real_arm is None or not self._is_connected:
+            raise ConnectionError("UF Robot is not connected")
+        code, states = self.real_arm.get_joint_states(is_radian=True, num=1)
+        if code != 0 or not states or len(states[0]) < self._dof:
+            raise RuntimeError(f"Failed to read xArm joint states, code={code}")
+        positions = np.asarray(states[0][:self._dof], dtype=np.float64)
+        if not np.all(np.isfinite(positions)):
+            raise RuntimeError("xArm joint states contain NaN or Inf")
+        return {
+            f"{self.prefix}J{i + 1}.pos": float(position)
+            for i, position in enumerate(positions)
+        }
+
     def get_observation(self) -> dict[str, np.ndarray]:
         obs_dict = {}
         self._log_controller_error_if_changed("get_observation")
@@ -721,6 +742,48 @@ class UFRobot(Robot, Thread):
         if code is not None and code != 0:
             raise RuntimeError(f"{command} failed, code={code}, {self._motion_status()}")
 
+    def joint_action_to_cartesian(self, action: dict) -> dict:
+        """Convert an absolute joint action to an xArm axis-angle pose.
+
+        GELLO reports absolute joint positions while Cartesian control expects
+        ``pose.x/y/z/rx/ry/rz``. The xArm controller's FK is used so the
+        configured robot model and tool frame stay authoritative. The returned
+        action is passed through ``send_action`` for Cartesian safety checks.
+        """
+        if self.real_arm is None or not self._is_connected:
+            raise ConnectionError("UF Robot is not connected")
+
+        joint_keys = [f"{self.prefix}J{i}.pos" for i in range(1, self._dof + 1)]
+        try:
+            joints = [float(action[key]) for key in joint_keys]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid joint action; expected keys {joint_keys}") from exc
+
+        if not np.all(np.isfinite(joints)):
+            raise ValueError("Joint action contains NaN or Inf")
+
+        code, pose = self.real_arm.get_forward_kinematics(
+            joints,
+            input_is_radian=True,
+            return_is_radian=True,
+        )
+        pose = np.asarray(pose, dtype=np.float64)
+        if code != 0 or pose.shape[0] < 6 or not np.all(np.isfinite(pose[:6])):
+            raise RuntimeError(f"xArm forward kinematics failed, code={code}, pose={pose}")
+
+        cartesian = {
+            f"{self.prefix}pose.x": float(pose[0]),
+            f"{self.prefix}pose.y": float(pose[1]),
+            f"{self.prefix}pose.z": float(pose[2]),
+            f"{self.prefix}pose.rx": float(pose[3]),
+            f"{self.prefix}pose.ry": float(pose[4]),
+            f"{self.prefix}pose.rz": float(pose[5]),
+        }
+        gripper_key = f"{self.prefix}gripper.pos"
+        if gripper_key in action:
+            cartesian[gripper_key] = float(action[gripper_key])
+        return cartesian
+
     def send_action(self, action: dict) -> np.ndarray:
         if not self._is_connected:
             raise ConnectionError()
@@ -741,6 +804,9 @@ class UFRobot(Robot, Thread):
             return action
 
         before_write_t = time.perf_counter()
+        self.logs["safety_guard_dt_s"] = 0.0
+        self.logs["servo_j_dt_s"] = 0.0
+        self.logs["safety_guard_path"] = "not_run"
         safe_action = dict(action)
         if self._control_space == "joint":
             # first sync with gello or other control device SLOWLY!
@@ -750,7 +816,10 @@ class UFRobot(Robot, Thread):
             cmd_list = [0]*(self._dof)
             for i in range(self._dof):
                 cmd_list[i] = action[f"{self.prefix}J{i+1}.pos"]
+            guard_start_t = time.perf_counter()
             safe_cmd = self._guard_joint_target(cmd_list)
+            self.logs["safety_guard_dt_s"] = time.perf_counter() - guard_start_t
+            self.logs["safety_guard_path"] = self._last_guard_path
             if safe_cmd is None:
                 # Do not send an unverified arm target. Gripper handling below
                 # remains independent and can continue safely.
@@ -769,9 +838,11 @@ class UFRobot(Robot, Thread):
                     code = self.real_arm.set_state(0)
                     self._check_motion_code("set_state(0)", code)
                     time.sleep(0.1)
+                servo_j_start_t = time.perf_counter()
                 code = self.real_arm.set_servo_angle_j(
                     safe_cmd[:self._dof].tolist(), speed=jnt_spd, is_radian=True
                 )
+                self.logs["servo_j_dt_s"] = time.perf_counter() - servo_j_start_t
                 self._check_motion_code("set_servo_angle_j", code)
             elif safe_cmd is not None:
                 # The legacy mode-6 path uses the absolute move_joint API.
@@ -822,6 +893,8 @@ class UFRobot(Robot, Thread):
         pass
 
     def disconnect(self) -> None:
+        if not self._is_connected:
+            return
         self.real_arm.set_state(4) # stop
         self.real_arm.set_mode(0)
         if self._use_rt_report:
@@ -835,10 +908,12 @@ class UFRobot(Robot, Thread):
 
         self._is_connected = False
 
+    @property
     def is_calibrated(self) -> bool:
         """Whether the robot is currently calibrated or not. Should be always `True` if not applicable"""
         return self._is_calibrated
 
+    @property
     def is_connected(self) -> bool:
         """Whether the robot is currently calibrated or not. Should be always `True` if not applicable"""
         return self._is_connected

@@ -125,6 +125,25 @@ uv run uf-robot-teleop --config_path config/gello/xarm7_gello_record_config.yaml
 
 `Space` reset & start, `←` reset, `Esc` exit.
 
+#### Guard latency experiment
+
+This command runs for 60 seconds with the `min_tcp_z_mm` guard enabled and
+records the loop period, GELLO read, safety guard, ServoJ, and complete
+`send_action` latency:
+
+```bash
+uv run uf-robot-teleop \
+  --config_path config/gello/xarm7_gello_record_config.yaml \
+  --fps 60 \
+  --guard_latency_experiment=true \
+  --experiment_duration_s 60
+```
+
+Press `Space` to reset and start. While staying safe, include motion both far
+from and near the configured height floor. The CSV `guard_path` column marks
+`rt_fast_path`, `fk_safe`, `fk_ik_clamp`, or `fallback`, and the terminal prints
+per-path summaries. Results are written to `logs/gello_guard_latency_<time>.csv`.
+
 #### Configure the GELLO TCP height floor
 
 Stop other robot control processes, move the TCP to its lowest safe pose, then read its height:

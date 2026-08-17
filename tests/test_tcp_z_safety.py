@@ -59,6 +59,7 @@ def test_joint_target_above_floor_is_unchanged():
     result = robot._guard_joint_target(requested)
 
     assert np.allclose(result, requested)
+    assert robot._last_guard_path == "fk_safe"
     assert arm.inverse_calls == []
     assert np.allclose(robot._last_safe_joint_target, requested)
 
@@ -74,6 +75,7 @@ def test_joint_guard_uses_rt_report_fast_path_far_above_floor():
     result = robot._guard_joint_target([0.1] * 7)
 
     assert np.allclose(result, [0.1] * 7)
+    assert robot._last_guard_path == "rt_fast_path"
     assert arm.inverse_calls == []
 
 
@@ -85,6 +87,7 @@ def test_joint_target_below_floor_clamps_only_tcp_z_before_inverse_kinematics():
     result = robot._guard_joint_target(requested)
 
     assert np.allclose(result, arm.inverse_result)
+    assert robot._last_guard_path == "fk_ik_clamp"
     inverse_pose, inverse_kwargs = arm.inverse_calls[0]
     assert inverse_pose == pytest.approx([300.0, 10.0, 100.0, 0.1, 0.2, 0.3])
     assert inverse_kwargs["limited"] is True
@@ -175,6 +178,9 @@ def test_send_action_sends_and_returns_clamped_joint_target():
     sent_action = robot.send_action(action)
 
     assert arm.sent_joint_targets == [pytest.approx(arm.inverse_result)]
+    assert robot.logs["safety_guard_dt_s"] >= 0
+    assert robot.logs["safety_guard_path"] == "fk_ik_clamp"
+    assert robot.logs["servo_j_dt_s"] >= 0
     assert [sent_action[f"J{i + 1}.pos"] for i in range(7)] == pytest.approx(
         arm.inverse_result
     )
