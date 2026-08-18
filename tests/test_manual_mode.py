@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
@@ -28,6 +29,7 @@ class FakeXArm:
         self.initial_point = [0.0, -30.0, 0.0, 0.0, 0.0, 30.0]
         self._arm = type("FakeArmTransport", (), {"_baud_checkset": False})()
         self.gripper_position = 800
+        self.gripper_g2_position = 84
         self.calls = []
 
     def motion_enable(self, **kwargs):
@@ -84,6 +86,15 @@ class FakeXArm:
     def get_gripper_position(self):
         self.calls.append(("get_gripper_position",))
         return 0, self.gripper_position
+
+    def set_gripper_g2_position(self, position, **kwargs):
+        self.calls.append(("set_gripper_g2_position", position, kwargs))
+        self.gripper_g2_position = position
+        return 0
+
+    def get_gripper_g2_position(self):
+        self.calls.append(("get_gripper_g2_position",))
+        return 0, self.gripper_g2_position
 
     def getset_tgpio_modbus_data(self, data):
         self.calls.append(("getset_tgpio_modbus_data", data))
@@ -261,6 +272,100 @@ def test_gripper_rs485_commands_are_rate_limited(monkeypatch, tmp_path):
     }
 
     robot.disconnect()
+
+
+def test_xarm_gripper_g2_uses_sdk_units_and_dedicated_api(monkeypatch, tmp_path, caplog):
+    from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
+
+    arm = FakeXArm("192.168.1.245")
+    monkeypatch.setattr(uf_robot_module, "XArmAPI", lambda robot_ip: arm)
+    monkeypatch.setattr(uf_robot_module.time, "sleep", lambda _: None)
+    config = UFRobotConfig(
+        id="test_gripper_g2",
+        calibration_dir=tmp_path,
+        robot_ip=arm.robot_ip,
+        robot_dof=6,
+        control_space="joint",
+        gripper_type=2,
+        gripper_speed=100,
+        gripper_force=50,
+        gripper_command_interval_s=0.0,
+        gripper_error_log_path=None,
+    )
+    robot = uf_robot_module.UFRobot(config)
+    assert robot._gripper_g2_speed == 100
+    assert robot._gripper_param.speed == int(((100 * 60) / 9.88235 + 140) / 0.4)
+    robot.connect()
+
+    g2_writes = [call for call in arm.calls if call[0] == "set_gripper_g2_position"]
+    assert g2_writes == [
+        (
+            "set_gripper_g2_position",
+            84,
+            {
+                "speed": 100,
+                "force": 50,
+                "wait": True,
+                "check_baud": False,
+            },
+        )
+    ]
+
+    robot._send_gripper_action(0.5)
+    assert [call for call in arm.calls if call[0] == "set_gripper_g2_position"][-1] == (
+        "set_gripper_g2_position",
+        42,
+        {
+            "speed": 100,
+            "force": 50,
+            "wait": False,
+            "wait_motion": False,
+            "check_baud": False,
+            "check_err": False,
+        },
+    )
+    assert not any(call[0] == "getset_tgpio_modbus_data" for call in arm.calls)
+
+    observation = robot.get_observation()
+    assert observation["gripper.pos"] == pytest.approx(0.5)
+
+    arm.get_gripper_g2_position = lambda: (1, None)
+    observation = robot.get_observation()
+    assert observation["gripper.pos"] == pytest.approx(0.5)
+    assert "get_gripper_g2_position" in caplog.text
+    robot.disconnect()
+
+
+def test_xarm_gripper_g2_rejects_legacy_speed_and_invalid_force(tmp_path):
+    with pytest.raises(ValueError, match="15 and 225 mm/s"):
+        UFRobotConfig(
+            id="test_gripper_g2_speed",
+            calibration_dir=tmp_path,
+            robot_dof=6,
+            gripper_type=2,
+            gripper_speed=1500,
+        )
+
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        UFRobotConfig(
+            id="test_gripper_g2_force",
+            calibration_dir=tmp_path,
+            robot_dof=6,
+            gripper_type=2,
+            gripper_force=0,
+        )
+
+
+def test_gello_configs_select_xarm_gripper_g2():
+    config_dir = Path("config/gello")
+    config_paths = sorted(config_dir.glob("*.yaml"))
+    assert config_paths
+
+    for config_path in config_paths:
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["robot"]["gripper_type"] == 2, config_path
+        assert 15 <= config["robot"]["gripper_speed"] <= 225, config_path
+        assert 1 <= config["robot"]["gripper_force"] <= 100, config_path
 
 
 def test_manual_mode_config_rejects_cartesian_control(tmp_path):

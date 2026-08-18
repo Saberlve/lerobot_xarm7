@@ -12,7 +12,7 @@
 - 控制器 Safety Boundary 仍然开启，作为本地保护之外的最后一道硬保护。
 - 相机和数据集按真实的 30 Hz 记录，机械臂控制仍保持独立的 60 Hz。
 - 每条 action 带发送时刻；每次 RT joint state 采样也带时刻。写入数据集时，为 state 选择当时已经发送的最近 action，绝不拿“未来的 action”配较早的 state。
-- xArm Gripper 保持 60 Hz 的目标检查能力，但只有变化超过阈值才真正发送；夹爪速度从最大值 5000 降到 1500，解决 Error 19。
+- xArm Gripper G2 使用 SDK 专用接口和物理单位；目标最多按 60 Hz 检查，但只有变化超过阈值才真正发送。初始速度采用 SDK 默认的 100 mm/s。
 
 当前使用的配置是：
 
@@ -28,7 +28,9 @@ robot:
 
   gripper_command_interval_s: 0.0166667
   gripper_command_threshold: 0.01
-  gripper_speed: 1500
+  gripper_type: 2
+  gripper_speed: 100
+  gripper_force: 50
 
 teleop:
   realtime_control_fps: 60
@@ -118,7 +120,7 @@ logs/gello_record_sync_<时间>.csv
 
 30 Hz 数据集每帧记录的是该采样时刻有效的 60 Hz 控制命令，这是正常的降采样，不是不同步。
 
-## 四、夹爪 Error 19 是怎么消除的
+## 四、xArm Gripper G2 配置与 Error 19 排查
 
 现象是只要连续控制夹爪，就出现：
 
@@ -127,18 +129,16 @@ set_rs485_data -> code=1
 controller_error=19
 ```
 
-排查过程里先试过降低夹爪命令频率：2 Hz、5 Hz、6.7 Hz 都不报错，但低频带来明显跟手延迟。继续对照实验后发现，真正与故障一致的变量不是频率，而是夹爪速度：
+旧配置将实际安装的 G2 错写成了 `gripper_type: 1`，因此走的是老款 xArm Gripper 的 0–800 pulse、50–5000 r/min 参数和 `set_gripper_position` 路径。旧实验中“5000 降到 1500”的结论不适用于 G2，不能继续作为 G2 的速度依据。
 
-- 报错时使用默认最大速度 5000。
-- 速度降到 1500 后，从 2 Hz 一直提高到 20 Hz 都稳定。
-- 最后恢复到最高 60 Hz，仍然稳定。
-
-运行期发送也改成 SDK 专用的非阻塞 `set_gripper_position`，不再手工拼通用 RS485 数据包；持续 ServoJ 时关闭 `wait_motion`，否则 SDK 会等待机械臂停止。
+现在使用 `gripper_type: 2`。G2 的位置范围是 0–84 mm，速度范围是 15–225 mm/s，夹持力范围是 1–100。运行期直接调用 SDK 的非阻塞 `set_gripper_g2_position`，由 SDK 完成几何换算和 Modbus 帧构造；持续 ServoJ 时关闭 `wait_motion`，避免等待机械臂停止。
 
 最终参数为：
 
 ```yaml
-gripper_speed: 1500
+gripper_type: 2
+gripper_speed: 100
+gripper_force: 50
 gripper_command_interval_s: 0.0166667
 gripper_command_threshold: 0.01
 ```
@@ -151,9 +151,9 @@ gripper_command_threshold: 0.01
 logs/xarm7_gripper_errors.log
 ```
 
-成功记录包含目标值、脉冲位置、调用耗时和返回码。最终实验中单次调用通常只需要约 1.3–2.2 ms，60 Hz、速度 1500 时没有再次出现 C19。
+成功记录包含归一化目标、G2 开口位置、调用耗时和返回码。由于旧日志来自错误的夹爪类型配置，切换到 G2 后必须重新进行连续开合实机验收，确认没有新增 Error 19。
 
-如果以后更换夹爪、线缆或固件后 C19 再次出现，应先把速度降下来验证。如果低速也报错，就应该检查腕部线缆、接头、末端供电和末端 IO 板固件，而不是无限降低控制频率。
+如果仍出现 C19，应先降低 G2 的 mm/s 速度并降低发送频率做对照；低速低频仍报错时，再检查腕部线缆、接头、末端供电和末端 IO 板固件。
 
 ## 五、运行和验收
 

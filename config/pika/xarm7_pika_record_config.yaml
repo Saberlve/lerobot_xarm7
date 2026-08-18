@@ -5,6 +5,8 @@ robot:
   control_space: "cartesian"
   robot_ip: "192.168.1.85"
   gripper_type: 10
+  # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
+  gripper_force: 50
   enable_logs: false
   max_linear_velocity: 200
   cameras:

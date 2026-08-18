@@ -67,11 +67,14 @@ ls /dev/serial/by-id/
 
 - `robot.robot_ip` — xArm 控制器 IP（如 `192.168.1.245`）
 - `robot.robot_dof` — `7`
-- `robot.gripper_type` — `1` 表示 xArm 夹爪
+- `robot.gripper_type` — `2` 表示 xArm Gripper G2
+- `robot.gripper_speed` — G2 开合速度，单位 mm/s（范围 `15`–`225`，当前配置为 `100`）
+- `robot.gripper_force` — G2 夹持力（范围 `1`–`100`，当前配置为 `50`）
 - `teleop.port` — GELLO 串口路径（`/dev/serial/by-id/...`）
 - `teleop.joint_ids` / `teleop.joint_signs` — 各型号机械臂的舵机映射与方向
 - `teleop.start_joints` — GELLO 校准参考值（角度），应与 xArm SDK 初始点一致
 - `teleop.gripper_id` — GELLO 夹爪舵机 ID（`8`；`-1` 表示无夹爪）
+- `teleop.gripper_open_deg` / `teleop.gripper_close_deg` — GELLO 舵机的开闭标定角，与 G2 的 0–84 mm 行程相互独立
 - `teleop.realtime_control_fps` — GELLO 到 xArm 的独立实时控制频率，与 `dataset.fps` 分开
 - `dataset.root` / `dataset.repo_id` — 数据集保存位置
 - `dataset.single_task` — 随每一帧保存的任务描述

@@ -59,6 +59,11 @@ class UFRobotConfig(RobotConfig):
             raise ValueError("gripper_command_threshold must be between 0 and 1")
         if not math.isfinite(self.gripper_command_interval_s) or self.gripper_command_interval_s < 0:
             raise ValueError("gripper_command_interval_s must be finite and non-negative")
+        if self.gripper_type == 2:
+            if self.gripper_speed != -1 and not 15 <= self.gripper_speed <= 225:
+                raise ValueError("xArm Gripper G2 gripper_speed must be -1 or between 15 and 225 mm/s")
+            if self.gripper_force != -1 and not 1 <= self.gripper_force <= 100:
+                raise ValueError("xArm Gripper G2 gripper_force must be -1 or between 1 and 100")
         if self.control_space == "joint" and self.joint_command_mode not in (1, 6):
             raise ValueError("joint_command_mode must be 1 or 6 for joint control")
         if self.min_tcp_z_mm is not None and not math.isfinite(self.min_tcp_z_mm):

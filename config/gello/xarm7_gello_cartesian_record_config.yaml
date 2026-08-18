@@ -4,7 +4,12 @@ robot:
   robot_dof: 7
   control_space: "cartesian"
   robot_ip: "192.168.1.245"
-  gripper_type: 1
+  # 2: xArm Gripper G2 (0-84 mm opening range).
+  gripper_type: 2
+  # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
+  gripper_speed: 100
+  # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
+  gripper_force: 50
   max_linear_velocity: 200
   min_tcp_z_mm: -2.0
   gripper_error_log_path: "logs/xarm7_gripper_errors.log"

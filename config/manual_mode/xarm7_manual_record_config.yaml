@@ -6,7 +6,9 @@ robot:
   # IP address of the xArm controller.
   robot_ip: "192.168.1.245"
   # Gripper type: 1 is the xArm gripper.
-  gripper_type: 1
+  gripper_type: 2
+  # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
+  gripper_force: 50
   enable_logs: false
   manual_mode: true
   # Normalized gripper position change per second while holding C/O.

@@ -10,9 +10,9 @@ robot:
   # Up to 60 Hz goal updates; unchanged targets are filtered below.
   gripper_command_interval_s: 0.0166667
   # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
-  gripper_speed: 100
+  gripper_speed: 50
   # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
-  gripper_force: 50
+  gripper_force: 1
   # Use the high-frequency servo interface for lower-latency GELLO tracking.
   joint_command_mode: 1
   max_joint_velocity: 120
@@ -57,7 +57,7 @@ teleop:
 # JPEG encoding and network I/O run in the background; preview frames are
 # dropped instead of delaying the 30 Hz recorder or 60 Hz GELLO control loop.
 web_preview:
-  enabled: true
+  enabled: false
   host: "0.0.0.0"
   port: 8765
   fps: 8
@@ -66,9 +66,9 @@ web_preview:
 
 dataset:
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_joint_safe_datas1"
-  repo_id: "ufactory/xarm7_gello_joint_safe_datas1"
-  single_task: "Pick up the purple grape and drop into the box on the left."
+  root: "datasets/xarm7_gello_pick_potato_chips"
+  repo_id: "ufactory/xarm7_gello_pick_potato_chips"
+  single_task: "Pick up the potato chips and drop."
   # Cameras deliver 30 Hz; arm ServoJ remains independently fixed at 60 Hz.
   fps: 30
   episode_time_s: 60  # max duration for one episode

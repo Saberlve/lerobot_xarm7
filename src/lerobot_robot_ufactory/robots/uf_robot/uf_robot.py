@@ -154,6 +154,9 @@ class UFRobot(Robot, Thread):
         elif self._gripper_type == GripperType.xArmGripperG2:
             speed = 225 if self.config.gripper_speed < 0 else min(max(15, self.config.gripper_speed), 225)
             gripper_speed = int(((speed * 60) / 9.88235 + 140) / 0.4)
+            # Keep the SDK-facing speed in mm/s. GripperParam.speed retains
+            # the original low-level register conversion used by this repo.
+            self._gripper_g2_speed = speed
             gripper_force = 50 if self.config.gripper_force < 0 else min(max(1, self.config.gripper_force), 100)
             self._gripper_param = GripperParam('xArmGripperG2', open_pos=84, close_pos=0, speed=gripper_speed, force=gripper_force)
         elif self._gripper_type == GripperType.BioGripperG2:
@@ -732,10 +735,19 @@ class UFRobot(Robot, Thread):
                         ),
                     )
             elif self._gripper_type == GripperType.xArmGripperG2:
-                self.real_arm.set_gripper_enable(True)
-                self.real_arm.set_gripper_mode(0)
+                self._check_gripper_code("set_gripper_enable", self.real_arm.set_gripper_enable(True))
+                self._check_gripper_code("set_gripper_mode", self.real_arm.set_gripper_mode(0))
                 if move_to_open:
-                    self.real_arm.set_gripper_g2_position(self._gripper_param.open_pos)
+                    self._check_gripper_code(
+                        "set_gripper_g2_position",
+                        self.real_arm.set_gripper_g2_position(
+                            self._gripper_param.open_pos,
+                            speed=self._gripper_g2_speed,
+                            force=self._gripper_param.force,
+                            wait=True,
+                            check_baud=False,
+                        ),
+                    )
             elif self._gripper_type == GripperType.BioGripperG2:
                 _, mode = self.real_arm.get_bio_gripper_control_mode()
                 if mode != 1:
@@ -809,6 +821,9 @@ class UFRobot(Robot, Thread):
                 grippos_norm = self._gripper_param.get_gripper_norm(grippos)
             elif self._gripper_type == GripperType.xArmGripperG2:
                 code, grippos = self.real_arm.get_gripper_g2_position()
+                if code != 0 or not isinstance(grippos, (int, float, np.number)):
+                    self._log_gripper_error("get_gripper_g2_position", code, f"position={grippos}")
+                    grippos = None
                 grippos_norm = self._gripper_param.get_gripper_norm(grippos)
             elif self._gripper_type == GripperType.BioGripperG2:
                 code, grippos = self.real_arm.get_bio_gripper_g2_position()
@@ -942,12 +957,15 @@ class UFRobot(Robot, Thread):
             )
         elif self._gripper_type == GripperType.xArmGripperG2:
             grippos = self._gripper_param.get_grippos(gripper_norm)
-            grippos = int((math.degrees(math.asin((grippos - 16) / 110)) + 8.33) * 18.28)
-            modbus_datas = [0x08, 0x10, 0x0C, 0x00, 0x00, 0x05, 0x0A, 0x00, 0x01]
-            modbus_datas.extend(list(struct.pack('>h', self._gripper_param.speed)))
-            modbus_datas.extend(list(struct.pack('>h', self._gripper_param.force)))
-            modbus_datas.extend(list(struct.pack('>i', grippos)))
-            result = self.real_arm.getset_tgpio_modbus_data(modbus_datas)
+            result = self.real_arm.set_gripper_g2_position(
+                grippos,
+                speed=self._gripper_g2_speed,
+                force=self._gripper_param.force,
+                wait=False,
+                wait_motion=False,
+                check_baud=False,
+                check_err=False,
+            )
         elif self._gripper_type == GripperType.BioGripperG2:
             grippos = self._gripper_param.get_grippos(gripper_norm)
             grippos = int(grippos * 3.7342 - 265.13)
@@ -972,7 +990,7 @@ class UFRobot(Robot, Thread):
             else None
         )
         if code not in (None, 0):
-            detail = f"target={gripper_norm:.6f}, pulse={grippos}"
+            detail = f"target={gripper_norm:.6f}, position={grippos}"
             if command_dt_ms is not None:
                 detail += f", dt_ms={command_dt_ms:.3f}"
             self._log_gripper_error(
@@ -985,7 +1003,7 @@ class UFRobot(Robot, Thread):
             self._log_gripper_command(gripper_norm, grippos, command_dt_ms)
         self._last_gripper_command = gripper_norm
 
-    def _log_gripper_command(self, target: float, pulse: int, dt_ms: float) -> None:
+    def _log_gripper_command(self, target: float, position: int, dt_ms: float) -> None:
         log_path = self.config.gripper_error_log_path
         if not log_path:
             return
@@ -996,7 +1014,7 @@ class UFRobot(Robot, Thread):
             with path.open("a", encoding="utf-8") as stream:
                 stream.write(
                     f"{timestamp} gripper command: target={target:.6f}, "
-                    f"pulse={pulse}, dt_ms={dt_ms:.3f}, code=0\n"
+                    f"position={position}, dt_ms={dt_ms:.3f}, code=0\n"
                 )
         except OSError:
             logging.exception("Failed to write gripper command log to %s", log_path)

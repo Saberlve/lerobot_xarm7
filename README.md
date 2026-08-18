@@ -67,11 +67,14 @@ Predefined configs are provided under `config/`:
 
 - `robot.robot_ip` — xArm controller IP (e.g. `192.168.1.245`)
 - `robot.robot_dof` — `7`
-- `robot.gripper_type` — `1` for the xArm gripper
+- `robot.gripper_type` — `2` for the xArm Gripper G2
+- `robot.gripper_speed` — G2 opening/closing speed in mm/s (`15`–`225`; configured as `100`)
+- `robot.gripper_force` — G2 gripping force (`1`–`100`; configured as `50`)
 - `teleop.port` — GELLO serial port (`/dev/serial/by-id/...`)
 - `teleop.joint_ids` / `teleop.joint_signs` — per-arm servo mapping and direction
 - `teleop.start_joints` — GELLO calibration reference, should match the xArm SDK initial point (degrees)
 - `teleop.gripper_id` — GELLO gripper servo ID (`8`; `-1` disables it)
+- `teleop.gripper_open_deg` / `teleop.gripper_close_deg` — GELLO servo calibration angles; these are independent of the G2's 0–84 mm opening range
 - `teleop.realtime_control_fps` — independent GELLO-to-xArm command loop rate; it is separate from `dataset.fps`
 - `dataset.root` / `dataset.repo_id` — where the dataset is stored
 - `dataset.single_task` — task description saved with each frame
