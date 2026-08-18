@@ -13,10 +13,9 @@ robot:
   gripper_speed: 1500
   # Use the high-frequency servo interface for lower-latency GELLO tracking.
   joint_command_mode: 1
-  realtime_control_fps: 60
   max_joint_velocity: 120
   # TCP z floor in the xArm base coordinate system (mm).
-  min_tcp_z_mm: 70.0
+  min_tcp_z_mm: -2.0
   # CPU-local FK/Jacobian projection keeps ServoJ free of synchronous SDK queries.
   tcp_z_guard_backend: "local_projection"
   tcp_z_soft_margin_mm: 5.0
@@ -43,6 +42,8 @@ robot:
 teleop:
   type: uf::gello_teleop
   id: "gello_teleop"
+  # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.
+  realtime_control_fps: 60
   port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]

@@ -288,6 +288,7 @@ def teleop_loop(cfg: TeleopConfig):
     experiment_start_t = None
     previous_command_t = None
     realtime_controller = None
+    realtime_control_fps = int(teleop.config.realtime_control_fps)
 
     def start_realtime_controller():
         nonlocal realtime_controller
@@ -303,7 +304,7 @@ def teleop_loop(cfg: TeleopConfig):
             teleop,
             teleop_action_processor,
             robot_action_processor,
-            cfg.fps,
+            realtime_control_fps,
             obs,
         )
         realtime_controller.start()
@@ -410,7 +411,9 @@ def teleop_loop(cfg: TeleopConfig):
     print("\n********** Teleop Control Loop Exit **********")
     stop_realtime_controller()
     if latency_samples:
-        output_path = _write_guard_latency_timings(latency_samples, cfg.timing_log_dir, cfg.fps)
+        output_path = _write_guard_latency_timings(
+            latency_samples, cfg.timing_log_dir, realtime_control_fps
+        )
         print(f"Guard latency timing log: {output_path}")
     cleanup_connections()
     atexit.unregister(cleanup_connections)

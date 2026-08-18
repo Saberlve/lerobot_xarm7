@@ -20,7 +20,6 @@
 robot:
   control_space: "joint"
   joint_command_mode: 1
-  realtime_control_fps: 60
 
   min_tcp_z_mm: 70.0
   tcp_z_guard_backend: "local_projection"
@@ -30,6 +29,9 @@ robot:
   gripper_command_interval_s: 0.0166667
   gripper_command_threshold: 0.01
   gripper_speed: 1500
+
+teleop:
+  realtime_control_fps: 60
 
 dataset:
   fps: 30

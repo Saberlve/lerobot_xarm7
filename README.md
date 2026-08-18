@@ -72,6 +72,7 @@ Predefined configs are provided under `config/`:
 - `teleop.joint_ids` / `teleop.joint_signs` — per-arm servo mapping and direction
 - `teleop.start_joints` — GELLO calibration reference, should match the xArm SDK initial point (degrees)
 - `teleop.gripper_id` — GELLO gripper servo ID (`8`; `-1` disables it)
+- `teleop.realtime_control_fps` — independent GELLO-to-xArm command loop rate; it is separate from `dataset.fps`
 - `dataset.root` / `dataset.repo_id` — where the dataset is stored
 - `dataset.single_task` — task description saved with each frame
 - `dataset.fps` / `episode_time_s` / `reset_time_s` — recording timing

@@ -26,7 +26,6 @@ class UFRobotConfig(RobotConfig):
     manual_gripper_speed: float = 0.5  # normalized gripper position per second in manual mode
     teach_sensitivity: int | None = None  # xArm teaching sensitivity, valid range: 1-5
     joint_command_mode: int = 6  # 1: servo-angle-j, 6: online trajectory planning
-    realtime_control_fps: int = 60  # independent of camera/dataset sampling fps
     # start_joints and start_tcp_pose are intentionally disabled.
     # Reset uses the xArm SDK initial_point instead of configuration poses.
     max_joint_velocity: int = 90   # °/s, only effective in joint control mode
@@ -62,8 +61,6 @@ class UFRobotConfig(RobotConfig):
             raise ValueError("gripper_command_interval_s must be finite and non-negative")
         if self.control_space == "joint" and self.joint_command_mode not in (1, 6):
             raise ValueError("joint_command_mode must be 1 or 6 for joint control")
-        if self.realtime_control_fps <= 0:
-            raise ValueError("realtime_control_fps must be positive")
         if self.min_tcp_z_mm is not None and not math.isfinite(self.min_tcp_z_mm):
             raise ValueError("min_tcp_z_mm must be finite when provided")
         if (

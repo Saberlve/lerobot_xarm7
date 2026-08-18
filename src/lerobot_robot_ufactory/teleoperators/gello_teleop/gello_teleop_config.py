@@ -8,6 +8,8 @@ from lerobot.teleoperators import TeleoperatorConfig
 @TeleoperatorConfig.register_subclass("uf::gello_teleop")
 @dataclass
 class GelloTeleopConfig(TeleoperatorConfig):
+    # Frequency of the independent GELLO -> xArm realtime control loop.
+    realtime_control_fps: int = 60
     # Port to connect to the gello dummy arm
     port: str = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAJZYC7-if00-port0"
 
@@ -27,6 +29,8 @@ class GelloTeleopConfig(TeleoperatorConfig):
 
     def __post_init__(self):
         self.id = 'gello_teleop' if self.id is None else self.id
+        if self.realtime_control_fps <= 0:
+            raise ValueError("realtime_control_fps must be positive")
         if len(self.joint_ids) != len(self.joint_signs):
             raise ValueError("joint_ids and joint_signs must have the same length")
         if len(self.joint_ids) != len(self.start_joints):

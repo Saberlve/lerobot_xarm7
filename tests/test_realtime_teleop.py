@@ -2,6 +2,9 @@ import time
 
 import pytest
 
+from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import (
+    GelloTeleopConfig,
+)
 from lerobot_robot_ufactory.utils.realtime_teleop import RealtimeTeleopController
 
 
@@ -25,6 +28,15 @@ class FakeRobot:
 
 def identity_action_processor(value):
     return value[0]
+
+
+def test_gello_realtime_control_fps_defaults_to_60():
+    assert GelloTeleopConfig().realtime_control_fps == 60
+
+
+def test_gello_realtime_control_fps_must_be_positive():
+    with pytest.raises(ValueError, match="realtime_control_fps"):
+        GelloTeleopConfig(realtime_control_fps=0)
 
 
 def test_realtime_controller_sends_without_waiting_for_observation_owner():

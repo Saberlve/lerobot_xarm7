@@ -380,7 +380,7 @@ def record_loop(
             teleop=teleop,
             teleop_action_processor=teleop_action_processor,
             robot_action_processor=robot_action_processor,
-            fps=getattr(robot.config, "realtime_control_fps", fps),
+            fps=int(teleop.config.realtime_control_fps),
             initial_observation=last_robot_cmd,
         )
         realtime_controller.start()

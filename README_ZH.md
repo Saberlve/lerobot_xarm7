@@ -72,6 +72,7 @@ ls /dev/serial/by-id/
 - `teleop.joint_ids` / `teleop.joint_signs` — 各型号机械臂的舵机映射与方向
 - `teleop.start_joints` — GELLO 校准参考值（角度），应与 xArm SDK 初始点一致
 - `teleop.gripper_id` — GELLO 夹爪舵机 ID（`8`；`-1` 表示无夹爪）
+- `teleop.realtime_control_fps` — GELLO 到 xArm 的独立实时控制频率，与 `dataset.fps` 分开
 - `dataset.root` / `dataset.repo_id` — 数据集保存位置
 - `dataset.single_task` — 随每一帧保存的任务描述
 - `dataset.fps` / `episode_time_s` / `reset_time_s` — 录制时序参数
