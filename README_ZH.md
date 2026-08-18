@@ -164,13 +164,13 @@ uv run uf-read-tcp-z \
 
 ```bash
 # 录制新数据集
-uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml
+uv run record --config_path config/gello/xarm7_gello_record_config.yaml
 
 # 在已有数据集上续录
-uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml -r
+uv run record --config_path config/gello/xarm7_gello_record_config.yaml -r
 
 # 可选：后台异步保存 episode
-uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml -a
+uv run record --config_path config/gello/xarm7_gello_record_config.yaml -a
 ```
 
 按键控制：`Space` 开始当前 episode，`→` 保存，`←` 放弃并重录，`Esc` 停止录制。每个 episode 之间机械臂会自动复位到初始点。
@@ -186,7 +186,7 @@ uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.ya
 ./start_manual_record.sh -r   # 强制续录；数据集目录不存在时会报错
 ```
 
-录制脚本（`uf-lerobot-record`）会从配置读取 `dataset.root` 并在录制前检查路径，然后：
+`record` 命令会从配置读取 `dataset.root` 并在录制前检查路径，然后：
 
 - 目录不存在：直接录制新数据集。
 - 目录已存在（有效 LeRobot 数据集）且未加 `-r`：交互询问：
@@ -195,7 +195,7 @@ uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.ya
   - `c` 取消
 - 目录存在但不完整（缺少必要元数据或数据 parquet 文件）：询问覆盖或取消；非交互运行时直接报错。
 
-加 `-r` 可跳过询问直接续录。注意 `./start_manual_record.sh` 保持原有启动脚本行为——检测到有效数据集会自动续录（相当于 `-r`），如果想看到覆盖/续录的询问，请直接用 `uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml` 运行。
+加 `-r` 可跳过询问直接续录。注意 `./start_manual_record.sh` 保持原有启动脚本行为——检测到有效数据集会自动续录（相当于 `-r`），如果想看到覆盖/续录的询问，请直接用 `uv run record --config_path config/manual_mode/xarm7_manual_record_config.yaml` 运行。
 
 录制时机械臂处于示教模式，实际关节状态会同时作为 observation 和 action 写入数据集。按住 `C` 缓慢闭合夹爪，按住 `O` 缓慢张开。按键控制：`Space` 开始，`→` 保存，`←` 放弃并重录，`Esc` 停止。episode 之间手动复位机械臂。
 
@@ -239,15 +239,15 @@ uv run uf-lerobot-eval \
 
 ```bash
 # 默认回放第一条
-uv run uf-lerobot-replay \
+uv run replay \
   --dataset-root /path/to/xarm7_manual_datas \
   --robot-ip 192.168.1.245
 
 # 跳过交互确认（无人值守）
-uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --yes
+uv run replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --yes
 
 # 回放其他 episode
-uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --episode-index 3
+uv run replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --episode-index 3
 ```
 
 回放开始前机械臂会先移动到 xArm SDK 初始点，播放结束后保持最后一帧姿态并断开连接。执行前请确认工作空间无障碍物，且数据中的初始姿态与当前设备一致。

@@ -160,7 +160,7 @@ logs/xarm7_gripper_errors.log
 正式录制：
 
 ```bash
-uv run uf-lerobot-record \
+uv run record \
   --config_path config/gello/xarm7_gello_record_config.yaml
 ```
 

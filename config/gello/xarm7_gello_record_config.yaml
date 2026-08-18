@@ -18,7 +18,7 @@ robot:
   min_tcp_z_mm: -2.0
   # CPU-local FK/Jacobian projection keeps ServoJ free of synchronous SDK queries.
   tcp_z_guard_backend: "local_projection"
-  tcp_z_soft_margin_mm: 5.0
+  tcp_z_soft_margin_mm: 0.5
   local_kinematics_max_error_mm: 2.0
   controller_safety_boundary: true
   # Append gripper initialization/read/write failures here.

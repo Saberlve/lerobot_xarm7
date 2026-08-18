@@ -170,13 +170,13 @@ Boundary remains enabled at the hard floor as a final stop.
 
 ```bash
 # Record a new dataset
-uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml
+uv run record --config_path config/gello/xarm7_gello_record_config.yaml
 
 # Continue recording on an existing dataset
-uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml -r
+uv run record --config_path config/gello/xarm7_gello_record_config.yaml -r
 
 # Optional: save episodes in the background
-uv run uf-lerobot-record --config_path config/gello/xarm7_gello_record_config.yaml -a
+uv run record --config_path config/gello/xarm7_gello_record_config.yaml -a
 ```
 
 Controls: `Space` start the episode, `→` save it, `←` discard and re-record it, `Esc` stop recording. The arm resets to its initial point between episodes.
@@ -192,7 +192,7 @@ Controls: `Space` start the episode, `→` save it, `←` discard and re-record 
 ./start_manual_record.sh -r   # force resume; fails if the dataset directory does not exist
 ```
 
-The record script (`uf-lerobot-record`) reads `dataset.root` from the config and checks the path before recording, then:
+The `record` command reads `dataset.root` from the config and checks the path before recording, then:
 
 - Directory does not exist → records a new dataset.
 - Directory already exists (valid LeRobot dataset) and no `-r` was given → asks interactively:
@@ -201,7 +201,7 @@ The record script (`uf-lerobot-record`) reads `dataset.root` from the config and
   - `c` cancel
 - Directory exists but is incomplete (missing required metadata or data parquet files) → asks to overwrite it or cancel; non-interactive runs error out instead.
 
-Pass `-r` to resume directly without asking. Note that `./start_manual_record.sh` keeps its original launcher behavior — it automatically resumes an existing valid dataset (equivalent to `-r`), so run `uv run uf-lerobot-record --config_path config/manual_mode/xarm7_manual_record_config.yaml` directly if you want to see the overwrite/resume prompt.
+Pass `-r` to resume directly without asking. Note that `./start_manual_record.sh` keeps its original launcher behavior — it automatically resumes an existing valid dataset (equivalent to `-r`), so run `uv run record --config_path config/manual_mode/xarm7_manual_record_config.yaml` directly if you want to see the overwrite/resume prompt.
 
 During recording the arm is in teach mode: the actual joint state is written as both the observation and the action. Hold `C` to slowly close the gripper and `O` to slowly open it. Controls: `Space` start, `→` save, `←` discard & re-record, `Esc` stop. Reset the arm manually between episodes.
 
@@ -244,15 +244,15 @@ uv run uf-lerobot-eval \
 Replay the absolute joint states (`observation.state`) of a manual-drag episode on an xArm7. States are sent as absolute targets at the dataset FPS (default 30), so the motion matches the recording:
 
 ```bash
-uv run uf-lerobot-replay \
+uv run replay \
   --dataset-root /path/to/xarm7_manual_datas \
   --robot-ip 192.168.1.245
 
 # Skip the interactive confirmation (non-interactive use)
-uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --yes
+uv run replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --yes
 
 # Replay another episode
-uv run uf-lerobot-replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --episode-index 3
+uv run replay --dataset-root /path/to/xarm7_manual_datas --robot-ip 192.168.1.245 --episode-index 3
 ```
 
 The robot first moves to the xArm SDK initial point, then replays the episode and stays at the last state. Make sure the workspace is clear and the recorded initial pose matches the current arm setup.

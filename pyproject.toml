@@ -35,8 +35,10 @@ dependencies = [
 [project.scripts]
 uf-robot-teleop = "lerobot_robot_ufactory.scripts.uf_robot_teleop:main"
 uf-lerobot-record = "lerobot_robot_ufactory.scripts.uf_lerobot_record:main"
+record = "lerobot_robot_ufactory.scripts.uf_lerobot_record:main"
 uf-lerobot-eval = "lerobot_robot_ufactory.scripts.uf_lerobot_eval:main"
 uf-lerobot-replay = "lerobot_robot_ufactory.scripts.uf_lerobot_replay:main"
+replay = "lerobot_robot_ufactory.scripts.uf_lerobot_replay:main"
 uf-vive-calibrate = "lerobot_robot_ufactory.scripts.vive_calibrate:main"
 uf-camera-view = "lerobot_robot_ufactory.scripts.uf_camera_view:main"
 uf-realsense-view = "lerobot_robot_ufactory.scripts.uf_realsense_view:main"

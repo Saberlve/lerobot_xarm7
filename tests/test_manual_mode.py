@@ -394,7 +394,7 @@ def test_manual_record_config_has_no_teleop(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["uf-lerobot-record", "--config_path", str(config_path)],
+        ["record", "--config_path", str(config_path)],
     )
 
     config = get_cfg()
