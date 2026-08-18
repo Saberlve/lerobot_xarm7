@@ -51,6 +51,17 @@ teleop:
   gripper_open_deg: 198.28125
   gripper_close_deg: 155.75
 
+# Lossy browser preview of the frames already captured for the dataset.
+# JPEG encoding and network I/O run in the background; preview frames are
+# dropped instead of delaying the 30 Hz recorder or 60 Hz GELLO control loop.
+web_preview:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8765
+  fps: 8
+  width: 480
+  jpeg_quality: 65
+
 dataset:
   # Dataset path relative to the directory where the command is started.
   root: "datasets/xarm7_gello_joint_safe_datas"

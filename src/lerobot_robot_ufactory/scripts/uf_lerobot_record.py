@@ -7,7 +7,7 @@ import argparse
 import logging
 import shutil
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import lerobot_robot_ufactory # patch
 from lerobot.scripts.lerobot_record import *
@@ -16,13 +16,17 @@ from lerobot_robot_ufactory.teleoperators.uf_mock_teleop import UFMockTeleop
 from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
 from lerobot_robot_ufactory.utils.realtime_teleop import RealtimeTeleopController
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
+from lerobot_robot_ufactory.utils.web_preview import RecordingWebPreview, WebPreviewConfig
 
 
 @dataclass
 class UFRecordConfig(LeRobotRecordConfig):
     """RecordConfig variant that permits UFACTORY manual-mode recording."""
 
+    web_preview: WebPreviewConfig = field(default_factory=WebPreviewConfig)
+
     def __post_init__(self):
+        self.web_preview.validate()
         manual_mode = getattr(self.robot, "manual_mode", False)
         if manual_mode:
             if self.teleop is not None or self.policy is not None:
@@ -276,19 +280,24 @@ def _disconnect_recording_resources(robot, teleop, listener):
 
 
 class _RecordingCleanup:
-    def __init__(self, robot, teleop, listener, async_episode_saver):
+    def __init__(self, robot, teleop, listener, async_episode_saver, web_preview=None):
         self.robot = robot
         self.teleop = teleop
         self.listener = listener
         self.async_episode_saver = async_episode_saver
+        self.web_preview = web_preview
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         try:
-            if self.async_episode_saver is not None:
-                self.async_episode_saver.close()
+            try:
+                if self.async_episode_saver is not None:
+                    self.async_episode_saver.close()
+            finally:
+                if self.web_preview is not None:
+                    self.web_preview.stop()
         finally:
             _disconnect_recording_resources(self.robot, self.teleop, self.listener)
         return False
@@ -321,6 +330,7 @@ def record_loop(
     manual_mode: bool = False,
     manual_gripper_keys: dict[str, bool] | None = None,
     manual_gripper_speed: float = 0.5,
+    web_preview: RecordingWebPreview | None = None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -402,7 +412,16 @@ def record_loop(
                     "observation_end_s",
                     "state_to_observation_end_ms",
                     "camera_timings",
+                    "preview_publish_ms",
+                    "preview_clients",
+                    "preview_source_generation",
+                    "preview_encoded_frames",
+                    "preview_last_encode_ms",
+                    "preview_max_encode_ms",
+                    "record_period_ms",
                     "frame_loop_ms",
+                    "frame_budget_ms",
+                    "frame_overrun_ms",
                 ],
             )
             sync_log_writer.writeheader()
@@ -410,8 +429,15 @@ def record_loop(
 
     timestamp = 0
     start_episode_t = time.perf_counter()
+    previous_loop_start_t = None
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
+        record_period_ms = (
+            0.0
+            if previous_loop_start_t is None
+            else (start_loop_t - previous_loop_start_t) * 1000
+        )
+        previous_loop_start_t = start_loop_t
 
         if events["exit_early"]:
             events["exit_early"] = False
@@ -435,6 +461,13 @@ def record_loop(
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
+        preview_publish_ms = 0.0
+        if web_preview is not None:
+            # This only replaces references in a latest-frame slot. All image
+            # processing and network I/O remain on preview background threads.
+            before_preview_publish_t = time.perf_counter()
+            web_preview.publish(obs_processed)
+            preview_publish_ms = (time.perf_counter() - before_preview_publish_t) * 1000
 
         if policy is not None or dataset is not None:
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
@@ -542,6 +575,9 @@ def record_loop(
                 robot, "_last_realtime_observation_end_monotonic_s", observation_monotonic_s
             )
             camera_timings = getattr(robot, "_last_realtime_camera_timings", {})
+            preview_stats = web_preview.timing_stats() if web_preview is not None else {}
+            frame_loop_ms = (time.perf_counter() - start_loop_t) * 1000
+            frame_budget_ms = 1000 / fps
             sync_log_writer.writerow(
                 {
                     "frame": sync_frame_index,
@@ -551,7 +587,18 @@ def record_loop(
                     "observation_end_s": f"{observation_end_s:.9f}",
                     "state_to_observation_end_ms": f"{(observation_end_s - observation_monotonic_s) * 1000:.3f}",
                     "camera_timings": repr(camera_timings),
-                    "frame_loop_ms": f"{(time.perf_counter() - start_loop_t) * 1000:.3f}",
+                    "preview_publish_ms": f"{preview_publish_ms:.6f}",
+                    "preview_clients": preview_stats.get("preview_clients", 0),
+                    "preview_source_generation": preview_stats.get(
+                        "preview_source_generation", 0
+                    ),
+                    "preview_encoded_frames": preview_stats.get("preview_encoded_frames", 0),
+                    "preview_last_encode_ms": f'{preview_stats.get("preview_last_encode_ms", 0.0):.3f}',
+                    "preview_max_encode_ms": f'{preview_stats.get("preview_max_encode_ms", 0.0):.3f}',
+                    "record_period_ms": f"{record_period_ms:.3f}",
+                    "frame_loop_ms": f"{frame_loop_ms:.3f}",
+                    "frame_budget_ms": f"{frame_budget_ms:.3f}",
+                    "frame_overrun_ms": f"{max(0.0, frame_loop_ms - frame_budget_ms):.3f}",
                 }
             )
             sync_frame_index += 1
@@ -759,12 +806,23 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
             },
         )
 
+    web_preview = None
     try:
         robot.connect()
         if teleop is not None:
             teleop.connect()
+        if cfg.web_preview.enabled:
+            web_preview = RecordingWebPreview(cfg.web_preview)
+            web_preview.start()
+            print(f"Camera web preview: {web_preview.url}")
+            if cfg.web_preview.host == "0.0.0.0":
+                print(
+                    f"From another machine: http://<recorder-ip>:{cfg.web_preview.port}/"
+                )
     except BaseException:
         try:
+            if web_preview is not None:
+                web_preview.stop()
             _disconnect_recording_resources(robot, teleop, None)
         except BaseException:
             logging.exception("Failed to clean up after recording device connection failure")
@@ -829,7 +887,9 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     if async_episode_saver is not None:
         print('Async episode saving is enabled.')
 
-    with _RecordingCleanup(robot, teleop, listener, async_episode_saver), VideoEncodingManager(dataset):
+    with _RecordingCleanup(
+        robot, teleop, listener, async_episode_saver, web_preview
+    ), VideoEncodingManager(dataset):
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
             time.sleep(0.01)
@@ -875,6 +935,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                     manual_mode=manual_mode,
                     manual_gripper_keys=manual_gripper_keys,
                     manual_gripper_speed=getattr(cfg.robot, "manual_gripper_speed", 0.5),
+                    web_preview=web_preview,
                 )
             else:
                 continue

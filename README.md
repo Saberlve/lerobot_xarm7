@@ -181,6 +181,17 @@ uv run record --config_path config/gello/xarm7_gello_record_config.yaml -a
 
 Controls: `Space` start the episode, `→` save it, `←` discard and re-record it, `Esc` stop recording. The arm resets to its initial point between episodes.
 
+The xArm7 GELLO example also enables a lightweight browser camera preview at
+`http://127.0.0.1:8765/` (or `http://<recorder-ip>:8765/` from another machine).
+It reuses frames already captured by the recorder: JPEG encoding and HTTP
+streaming run on background threads, the preview is capped at 8 FPS, and stale
+preview frames are dropped rather than delaying dataset collection. Disable it
+or tune it in the top-level `web_preview` section of the YAML configuration.
+When `robot.enable_logs` is enabled for diagnostics, one
+`logs/gello_record_sync_*.csv` file is written per episode. The
+`preview_clients`, `record_period_ms`, `frame_overrun_ms`, `action_age_ms`, and
+`preview_publish_ms` columns can be used to measure preview timing impact.
+
 > During collection the **relative position between the robot arm and the camera must not change**, and the camera setup at inference time must match the one used during collection. If the arm or camera moves, previously collected data becomes invalid.
 
 > If the dataset root already exists and `-r` is not given, the script asks whether to overwrite it, resume, or cancel.
