@@ -41,7 +41,6 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging
 
-from lerobot_robot_ufactory.utils.action_safety import ActionSafetyConfig, ActionSafetyGuard
 from lerobot_robot_ufactory.utils.starvla_ws_client import WebsocketClientPolicy
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 
@@ -61,8 +60,6 @@ class StarVLAEvalConfig:
     n_episodes: int = 50
     # Key of the camera in the robot observation dict (camera name in robot config).
     camera_key: str = "camera"
-    # Enable the action safety guard (thresholds in ActionSafetyConfig).
-    enable_safety: bool = False
 
 
 def _build_state(obs: dict) -> np.ndarray:
@@ -81,11 +78,9 @@ def _build_action_dict(action: np.ndarray) -> dict:
     return action_dict
 
 
-def eval_loop(cfg: StarVLAEvalConfig, safety_guard: ActionSafetyGuard | None = None):
+def eval_loop(cfg: StarVLAEvalConfig):
     init_logging()
     logging.info(pformat(asdict(cfg)))
-    if safety_guard is not None:
-        safety_guard.log_config()
 
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
@@ -159,20 +154,6 @@ def eval_loop(cfg: StarVLAEvalConfig, safety_guard: ActionSafetyGuard | None = N
                     start_loop_t = time.perf_counter()
                     action_dict = _build_action_dict(action)
 
-                    # Safety check: joint-space pose limits do not apply (the
-                    # guard only checks TCP-pose actions and gripper NaN/Inf),
-                    # but it still catches non-finite gripper commands.
-                    if safety_guard is not None:
-                        violation = safety_guard.check(action_dict, {}, [""])
-                        if violation is not None:
-                            logging.error(f"*** SAFETY HALT *** {violation}")
-                            print(
-                                f"\n*** SAFETY HALT *** {violation}\n"
-                                "Action was NOT sent. Press right arrow (->) to reset and resume, ESC to exit."
-                            )
-                            events["reset"] = True
-                            break
-
                     robot.send_action(action_dict)
 
                     dt_s = time.perf_counter() - start_loop_t
@@ -197,10 +178,7 @@ def get_cfg(cfg: StarVLAEvalConfig) -> StarVLAEvalConfig:
 def main():
     register_third_party_plugins()
     cfg = get_cfg()
-    # Action safety guard: tune thresholds in ActionSafetyConfig directly.
-    # Any violation triggers an e-stop; press right arrow to resume.
-    safety_guard = ActionSafetyGuard(ActionSafetyConfig(enabled=cfg.enable_safety))
-    eval_loop(cfg, safety_guard)
+    eval_loop(cfg)
 
 
 if __name__ == "__main__":

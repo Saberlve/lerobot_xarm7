@@ -53,5 +53,3 @@ single_task: "Pick up the black bottle and place it on the blue bag"
 n_episodes: 50
 # Key of the camera in the robot observation dict (camera name above).
 camera_key: "camera"
-# Enable the action safety guard (thresholds in ActionSafetyConfig).
-enable_safety: false
