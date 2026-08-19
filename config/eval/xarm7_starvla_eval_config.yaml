@@ -1,0 +1,57 @@
+# Real-robot eval config for uf-starvla-eval (external starVLA policy server).
+# Robot section is derived from config/gello/xarm7_gello_record_config.yaml
+# (teleop / dataset / web_preview sections removed).
+robot:
+  type: uf::robot
+  id: "uf_robot"
+  robot_dof: 7
+  control_space: "joint"
+  # TODO: confirm this is your xArm controller IP.
+  robot_ip: "192.168.1.245"
+  # 2: xArm Gripper G2 (0-84 mm opening range).
+  gripper_type: 2
+  enable_logs: false
+  # Up to 60 Hz goal updates; unchanged targets are filtered below.
+  gripper_command_interval_s: 0.0166667
+  # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
+  gripper_speed: 100
+  # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
+  gripper_force: 50
+  # Use the high-frequency servo interface for lower-latency action streaming.
+  joint_command_mode: 1
+  max_joint_velocity: 120
+  # TCP z floor in the xArm base coordinate system (mm).
+  min_tcp_z_mm: -2.0
+  # CPU-local FK/Jacobian projection keeps ServoJ free of synchronous SDK queries.
+  tcp_z_guard_backend: "local_projection"
+  tcp_z_soft_margin_mm: 0.5
+  local_kinematics_max_error_mm: 2.0
+  controller_safety_boundary: true
+  # Append gripper initialization/read/write failures here.
+  gripper_error_log_path: "logs/xarm7_gripper_errors.log"
+  cameras:
+    # Single camera view; must match `camera_key` below and the training setup.
+    # TODO: fill in the serial number of YOUR RealSense camera.
+    camera:
+      type: intelrealsense
+      serial_number_or_name: "242622070583"
+      width: 640
+      height: 480
+      fps: 30
+
+# starVLA policy server address (server binds 0.0.0.0; set the server IP here
+# if the server runs on a different machine).
+server_host: "127.0.0.1"
+server_port: 10093
+
+# Control frequency for streaming actions to the robot.
+fps: 30
+# Execute the first N steps of each predicted action chunk (T=50), then re-infer.
+# N=1 means fully closed-loop (re-infer every step).
+steps_per_inference: 25
+single_task: "Pick up the black bottle and place it on the blue bag"
+n_episodes: 50
+# Key of the camera in the robot observation dict (camera name above).
+camera_key: "camera"
+# Enable the action safety guard (thresholds in ActionSafetyConfig).
+enable_safety: false
