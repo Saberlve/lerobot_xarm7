@@ -22,22 +22,22 @@ robot:
   tcp_z_guard_backend: "local_projection"
   tcp_z_soft_margin_mm: 0.5
   local_kinematics_max_error_mm: 2.0
-  controller_safety_boundary: true
+  controller_safety_boundary: false
   # Append gripper initialization/read/write failures here.
   gripper_error_log_path: "logs/xarm7_gripper_errors.log"
-  cameras:
-    camera:
-      type: intelrealsense
-      serial_number_or_name: "242622070583"
-      width: 640
-      height: 480
-      fps: 30
-    camera2:
-      type: intelrealsense
-      serial_number_or_name: "148522072685"
-      width: 640
-      height: 480
-      fps: 30
+  # cameras:
+  #   camera:
+  #     type: intelrealsense
+  #     serial_number_or_name: "242622070583"
+  #     width: 640
+  #     height: 480
+  #     fps: 30
+  #   camera2:
+  #     type: intelrealsense
+  #     serial_number_or_name: "148522072685"
+  #     width: 640
+  #     height: 480
+  #     fps: 30
   # Redundant args, indicating the initial pose of xarm7. Set by 192.168.1.245:18333
   # start_joints: [0, -30, 0, 0, 0, 30, 0]
 # make sure to edit with your correct configurations!

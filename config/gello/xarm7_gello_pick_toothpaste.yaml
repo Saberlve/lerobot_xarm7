@@ -22,7 +22,7 @@ robot:
   tcp_z_guard_backend: "local_projection"
   tcp_z_soft_margin_mm: 0.5
   local_kinematics_max_error_mm: 2.0
-  controller_safety_boundary: true
+  controller_safety_boundary: false
   # Append gripper initialization/read/write failures here.
   gripper_error_log_path: "logs/xarm7_gripper_errors.log"
   cameras:
@@ -50,8 +50,8 @@ teleop:
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
   gripper_id: 8
-  gripper_open_deg: 198.28125
-  gripper_close_deg: 155.75
+  gripper_open_deg: null
+  gripper_close_deg: null
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are
@@ -68,9 +68,10 @@ dataset:
   # Dataset path relative to the directory where the command is started.
   root: "datasets/xarm7_gello_pick_toothpaste"
   repo_id: "ufactory/xarm7_gello_pick_toothpaste"
-  single_task: "Pick up the potato chips and drop."
+  single_task: "Pick up the toothpaste and drop it in the bag."
   # Cameras deliver 30 Hz; arm ServoJ remains independently fixed at 60 Hz.
   fps: 30
-  episode_time_s: 60  # max duration for one episode
+  episode_time_s: 460  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes
+  num_episodes: 50   # maximum total number of episodes in this dataset
   push_to_hub: False

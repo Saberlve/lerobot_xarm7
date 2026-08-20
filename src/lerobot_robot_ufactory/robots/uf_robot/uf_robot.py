@@ -94,6 +94,9 @@ class UFRobot(Robot, Thread):
         self._dof = config.robot_dof 
         if self._dof == None or (not self._dof in (5,6,7)):
             raise ValueError(f"Please specify the correct DOF uf_robot!, got {self._dof}")
+        # LeRobot uses this value in dataset metadata and policy processors.
+        # The vendor name is not specific enough to distinguish xArm variants.
+        self.robot_type = f"xarm{self._dof}"
         
         self._control_space = self.config.control_space
 

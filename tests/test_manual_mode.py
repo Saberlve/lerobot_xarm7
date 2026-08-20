@@ -8,6 +8,7 @@ import yaml
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
+from lerobot_robot_ufactory.robots.uf_robot.uf_robot import UFRobot
 from lerobot_robot_ufactory.scripts import uf_lerobot_record as record_module
 from lerobot_robot_ufactory.scripts.uf_lerobot_record import (
     EpisodeSynchronization,
@@ -32,6 +33,21 @@ def test_dataset_robot_type_preserves_non_xarm_robot_name():
     robot = SimpleNamespace(name="other_robot", config=SimpleNamespace(robot_dof=None))
 
     assert _dataset_robot_type(robot) == "other_robot"
+
+
+@pytest.mark.parametrize("robot_dof", [5, 6, 7])
+def test_uf_robot_type_matches_concrete_xarm_model(robot_dof, tmp_path):
+    robot = UFRobot(
+        UFRobotConfig(
+            id="test_robot_type",
+            calibration_dir=tmp_path,
+            robot_dof=robot_dof,
+            gripper_type=0,
+        )
+    )
+
+    assert robot.robot_type == f"xarm{robot_dof}"
+    assert _dataset_robot_type(robot) == robot.robot_type
 
 
 def test_synchronization_defaults_to_enabled():

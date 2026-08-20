@@ -1005,7 +1005,14 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     with _RecordingCleanup(
         robot, teleop, listener, async_episode_saver, web_preview
     ), VideoEncodingManager(dataset):
-        recorded_episodes = 0
+        # num_episodes is a dataset-wide limit.  Count existing episodes so a
+        # resumed recording cannot exceed it by recording another full batch.
+        recorded_episodes = dataset.num_episodes
+        if recorded_episodes >= cfg.dataset.num_episodes:
+            print(
+                f"Episode limit already reached ({recorded_episodes}/"
+                f"{cfg.dataset.num_episodes}); nothing to record."
+            )
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
             time.sleep(0.01)
             if is_evt:
@@ -1099,6 +1106,9 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
 
                 recorded_episodes += 1
                 is_recorded = False
+                if recorded_episodes >= cfg.dataset.num_episodes:
+                    print(f"Episode limit reached ({recorded_episodes}/{cfg.dataset.num_episodes}).")
+                    break
                 if is_evt:
                     _print_record_controls(is_recorded, manual_mode)
                 else:
