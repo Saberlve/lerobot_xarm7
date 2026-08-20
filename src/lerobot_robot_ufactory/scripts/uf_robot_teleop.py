@@ -102,7 +102,7 @@ def _write_guard_latency_timings(
         ("loop period", period_values),
         ("GELLO read", [sample.gello_read_ms for sample in samples]),
         ("safety guard", [sample.safety_guard_ms for sample in samples]),
-        ("ServoJ", [sample.servo_j_ms for sample in samples]),
+        ("joint command", [sample.servo_j_ms for sample in samples]),
         ("send_action", [sample.send_action_ms for sample in samples]),
         ("loop work", [sample.work_ms for sample in samples]),
     ):
@@ -147,12 +147,9 @@ def _write_guard_latency_timings(
 
 
 def _validate_guard_latency_config(cfg: TeleopConfig) -> None:
-    if getattr(cfg.robot, "control_space", None) != "joint":
-        raise ValueError("Guard latency experiment requires robot.control_space='joint'")
-    if getattr(cfg.robot, "joint_command_mode", None) != 1:
-        raise ValueError("Guard latency experiment requires robot.joint_command_mode=1 (ServoJ)")
-    if getattr(cfg.robot, "min_tcp_z_mm", None) is None:
-        raise ValueError("Guard latency experiment requires min_tcp_z_mm to be enabled")
+    raise ValueError(
+        "guard_latency_experiment is retired: joint-space control uses xArm mode 6"
+    )
 
 
 def teleop_loop(cfg: TeleopConfig):
@@ -166,8 +163,8 @@ def teleop_loop(cfg: TeleopConfig):
                 "Guard latency experiment requires robot.enable_logs=true"
             )
         logging.warning(
-            "Guard latency experiment enabled: measuring GELLO, safety guard, ServoJ, "
-            "and total send latency for %.1f active seconds",
+            "Guard latency experiment is retired for mode-6 joint control "
+            "(requested duration %.1f seconds)",
             cfg.experiment_duration_s,
         )
 

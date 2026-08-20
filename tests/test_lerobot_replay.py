@@ -208,29 +208,38 @@ def test_reset_to_initial_enables_robot_before_motion(monkeypatch):
     assert arm.calls[0] == ("motion_enable", True)
 
 
-def test_ufactory_robot_replay_path_sends_absolute_servo_j_targets():
+def test_ufactory_robot_replay_path_sends_absolute_mode6_targets():
     from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
     from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 
     class FakeArm:
         error_code = 0
-        mode = 1
+        mode = 6
         state = 0
         warn_code = 0
 
         def __init__(self):
             self.calls = []
 
-        def set_servo_angle_j(self, angles, **kwargs):
-            self.calls.append(("set_servo_angle_j", angles, kwargs))
+        def set_mode(self, mode):
+            self.calls.append(("set_mode", mode))
+            self.mode = mode
+            return 0
+
+        def set_state(self, state):
+            self.calls.append(("set_state", state))
+            return 0
+
+        def set_servo_angle(self, **kwargs):
+            self.calls.append(("set_servo_angle", kwargs))
             return 0
 
     robot = uf_robot_module.UFRobot(
         UFRobotConfig(
-            id="replay-servoj-test",
+            id="replay-mode6-test",
             robot_dof=7,
             control_space="joint",
-            joint_command_mode=1,
+            joint_command_mode=6,
             gripper_type=0,
             cameras={},
         )
@@ -243,10 +252,16 @@ def test_ufactory_robot_replay_path_sends_absolute_servo_j_targets():
     robot.send_action(target)
 
     assert arm.calls == [
+        ("set_mode", 0),
+        ("set_state", 0),
         (
-            "set_servo_angle_j",
-            [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
-            {"speed": 0.2, "is_radian": True},
+            "set_servo_angle",
+            {
+                "angle": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
+                "speed": 0.2,
+                "is_radian": True,
+                "wait": True,
+            },
         )
     ]
 

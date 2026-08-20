@@ -14,11 +14,11 @@ robot:
   # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
   gripper_force: 1
   # Use the high-frequency servo interface for lower-latency GELLO tracking.
-  joint_command_mode: 1
+  joint_command_mode: 6
   max_joint_velocity: 120
   # TCP z floor in the xArm base coordinate system (mm).
   min_tcp_z_mm: -2.0
-  # CPU-local FK/Jacobian projection keeps ServoJ free of synchronous SDK queries.
+  # CPU-local FK/Jacobian projection keeps mode-6 commands free of synchronous SDK queries.
   tcp_z_guard_backend: "local_projection"
   tcp_z_soft_margin_mm: 0.5
   local_kinematics_max_error_mm: 2.0
@@ -69,7 +69,7 @@ dataset:
   root: "datasets/xarm7_gello_pick_potato_chips"
   repo_id: "ufactory/xarm7_gello_pick_potato_chips"
   single_task: "Pick up the potato chips and drop."
-  # Cameras deliver 30 Hz; arm ServoJ remains independently fixed at 60 Hz.
+  # Cameras deliver 30 Hz; arm mode-6 joint commands remain independently fixed at 60 Hz.
   fps: 30
   episode_time_s: 60  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes

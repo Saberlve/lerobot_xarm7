@@ -176,7 +176,7 @@ def _build_robot(robot_ip: str) -> UFRobot:
         robot_ip=robot_ip,
         robot_dof=7,
         control_space="joint",
-        joint_command_mode=1,
+        joint_command_mode=6,
         gripper_type=1,
         manual_mode=False,
         cameras={},

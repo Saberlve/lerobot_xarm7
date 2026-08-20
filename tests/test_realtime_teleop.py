@@ -118,5 +118,5 @@ def test_realtime_controller_propagates_send_failures():
         initial_observation={},
     )
 
-    with pytest.raises(RuntimeError, match="Realtime ServoJ control thread failed"):
+    with pytest.raises(RuntimeError, match="Realtime joint control thread failed"):
         controller.start()

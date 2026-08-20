@@ -124,7 +124,7 @@ uv run uf-camera-view -l -T realsense     # 列出每台相机的序列号
 #### Guard 延迟实验
 
 以下命令在启用 `min_tcp_z_mm` 安全检测的情况下运行 60 秒，并记录控制周期、
-GELLO 读取、安全检测、ServoJ 和完整 `send_action` 耗时：
+历史 GELLO 读取、安全检测和完整 `send_action` 耗时诊断：
 
 ```bash
 uv run uf-robot-teleop \

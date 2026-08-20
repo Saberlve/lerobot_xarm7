@@ -25,7 +25,7 @@ class UFRobotConfig(RobotConfig):
     manual_mode: bool = False  # xArm joint teaching mode; records state and optional gripper actions
     manual_gripper_speed: float = 0.5  # normalized gripper position per second in manual mode
     teach_sensitivity: int | None = None  # xArm teaching sensitivity, valid range: 1-5
-    joint_command_mode: int = 6  # 1: servo-angle-j, 6: online trajectory planning
+    joint_command_mode: int = 6  # xArm online joint trajectory planning
     # start_joints and start_tcp_pose are intentionally disabled.
     # Reset uses the xArm SDK initial_point instead of configuration poses.
     max_joint_velocity: int = 90   # °/s, only effective in joint control mode
@@ -64,8 +64,8 @@ class UFRobotConfig(RobotConfig):
                 raise ValueError("xArm Gripper G2 gripper_speed must be -1 or between 15 and 225 mm/s")
             if self.gripper_force != -1 and not 1 <= self.gripper_force <= 100:
                 raise ValueError("xArm Gripper G2 gripper_force must be -1 or between 1 and 100")
-        if self.control_space == "joint" and self.joint_command_mode not in (1, 6):
-            raise ValueError("joint_command_mode must be 1 or 6 for joint control")
+        if self.control_space == "joint" and self.joint_command_mode != 6:
+            raise ValueError("joint_command_mode must be 6 for joint control")
         if self.min_tcp_z_mm is not None and not math.isfinite(self.min_tcp_z_mm):
             raise ValueError("min_tcp_z_mm must be finite when provided")
         if (

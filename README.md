@@ -130,10 +130,10 @@ uv run uf-robot-teleop --config_path config/gello/xarm7_gello_record_config.yaml
 
 `Space` reset & start, `←` reset, `Esc` exit.
 
-#### Guard latency experiment
+#### Historical guard latency experiment
 
 This command runs for 60 seconds with the `min_tcp_z_mm` guard enabled and
-records the loop period, GELLO read, safety guard, ServoJ, and complete
+The historical diagnostic records loop timing, GELLO read, safety guard, and complete
 `send_action` latency:
 
 ```bash

@@ -92,7 +92,7 @@ ufactory_usage/
 .history/
 datasets/
 tmp/
-
+experiment/**
 # Local checkout used for GELLO hardware development. Runtime fixes live in
 # the main package so the repository does not depend on a modified submodule.
 third_party/gello_software/

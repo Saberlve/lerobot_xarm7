@@ -868,7 +868,7 @@ class UFRobot(Robot, Thread):
 
         Joint feedback comes from the asynchronous RT report, while gripper
         feedback uses the latest commanded/cached value. Camera reads remain
-        outside the ServoJ control thread.
+        outside the realtime joint control thread.
         """
         if self._control_space != "joint":
             return self.get_observation()
@@ -951,7 +951,7 @@ class UFRobot(Robot, Thread):
             return
 
         # The gripper goes through the controller RS485 bridge. Driving that
-        # bridge at the 60 Hz ServoJ rate can trigger controller error 19.
+        # bridge at the 60 Hz joint-command rate can trigger controller error 19.
         # Intermediate targets are coalesced and failed attempts are also
         # rate-limited so an error cannot cause a retry storm.
         now = time.perf_counter()
@@ -964,7 +964,7 @@ class UFRobot(Robot, Thread):
             grippos = self._gripper_param.get_grippos(gripper_norm)
             # Use the SDK's dedicated gripper command instead of injecting a
             # generic RS485 packet through set_rs485_data. During continuous
-            # ServoJ motion the default wait_motion check cannot complete, so
+            # Online joint motion may not complete the default wait_motion check, so
             # explicitly bypass it while retaining a non-blocking write.
             result = self.real_arm.set_gripper_position(
                 grippos,
@@ -1126,26 +1126,9 @@ class UFRobot(Robot, Thread):
                 for i in range(self._dof):
                     safe_action[f"{self.prefix}J{i+1}.pos"] = float(safe_cmd[i])
 
-            if safe_cmd is not None and self.config.joint_command_mode == 1:
-                # set_servo_angle_j is an absolute target command. It is the
-                # SDK's high-frequency interface and executes only the latest
-                # target, so it must be used with servo motion mode (1).
-                if self.real_arm.mode != 1:
-                    code = self.real_arm.set_mode(1)
-                    self._check_motion_code("set_mode(1)", code)
-                    code = self.real_arm.set_state(0)
-                    self._check_motion_code("set_state(0)", code)
-                    time.sleep(0.1)
-                servo_j_start_t = time.perf_counter() if logs_enabled else None
-                code = self.real_arm.set_servo_angle_j(
-                    safe_cmd[:self._dof].tolist(), speed=jnt_spd, is_radian=True
-                )
-                if logs_enabled:
-                    self.logs["servo_j_dt_s"] = time.perf_counter() - servo_j_start_t
-                self._check_motion_code("set_servo_angle_j", code)
-            elif safe_cmd is not None:
-                # The legacy mode-6 path uses the absolute move_joint API.
-                # The first blocking command must be sent in position mode.
+            if safe_cmd is not None:
+                # All joint-space control uses xArm mode 6 online trajectory
+                # planning. Targets are absolute and sent without waiting.
                 if wait_ == False and self.real_arm.mode != 6:
                     code = self.real_arm.set_mode(6)
                     self._check_motion_code("set_mode(6)", code)

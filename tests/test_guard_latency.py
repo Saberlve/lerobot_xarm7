@@ -11,13 +11,14 @@ from lerobot_robot_ufactory.scripts.uf_robot_teleop import (
     _validate_guard_latency_config,
     _write_guard_latency_timings,
 )
+from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 
 
 def _config(**robot_overrides):
     robot_values = {
         "cameras": {"camera": object()},
         "control_space": "joint",
-        "joint_command_mode": 1,
+        "joint_command_mode": 6,
         "min_tcp_z_mm": 100.0,
     }
     robot_values.update(robot_overrides)
@@ -29,15 +30,14 @@ def _config(**robot_overrides):
     )
 
 
-def test_guard_latency_requires_guarded_servoj():
-    _validate_guard_latency_config(_config())
-
-    with pytest.raises(ValueError, match="control_space='joint'"):
-        _validate_guard_latency_config(_config(control_space="cartesian"))
-    with pytest.raises(ValueError, match="joint_command_mode=1"):
+def test_guard_latency_is_retired_for_mode6_control():
+    with pytest.raises(ValueError, match="guard_latency_experiment is retired"):
         _validate_guard_latency_config(_config(joint_command_mode=6))
-    with pytest.raises(ValueError, match="min_tcp_z_mm"):
-        _validate_guard_latency_config(_config(min_tcp_z_mm=None))
+
+
+def test_joint_config_rejects_mode1():
+    with pytest.raises(ValueError, match="must be 6"):
+        UFRobotConfig(robot_dof=7, control_space="joint", joint_command_mode=1)
 
 
 def test_guard_latency_config_rejects_invalid_rates():

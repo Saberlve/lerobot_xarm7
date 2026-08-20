@@ -42,7 +42,7 @@ class RealtimeTeleopController:
         self._thread.start()
         if not self._first_action.wait(timeout=2.0):
             self.raise_if_failed()
-            raise RuntimeError("Timed out waiting for the first realtime ServoJ action")
+            raise RuntimeError("Timed out waiting for the first realtime joint action")
         self.raise_if_failed()
 
     def stop(self) -> None:
@@ -93,7 +93,7 @@ class RealtimeTeleopController:
 
     def raise_if_failed(self) -> None:
         if self._exception is not None:
-            raise RuntimeError("Realtime ServoJ control thread failed") from self._exception
+            raise RuntimeError("Realtime joint control thread failed") from self._exception
 
     def _run(self) -> None:
         next_tick = time.perf_counter()

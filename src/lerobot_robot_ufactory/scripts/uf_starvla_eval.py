@@ -139,8 +139,8 @@ def eval_loop(cfg: StarVLAEvalConfig):
 
                 # NOTE: inference is blocking (one flow-matching pass can take
                 # several hundred ms) and no actions are sent while waiting.
-                # This is acceptable here: xArm ServoJ holds the last commanded
-                # position, so the arm simply pauses between action chunks.
+                # Mode 6 holds the last commanded online-trajectory target, so
+                # the arm simply pauses between action chunks.
                 resp = client.predict_action(
                     {"examples": [{"image": [image], "lang": cfg.single_task, "state": state}]}
                 )

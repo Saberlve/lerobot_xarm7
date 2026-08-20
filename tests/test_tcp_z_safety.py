@@ -147,9 +147,9 @@ def test_joint_guard_rejects_discontinuous_ik_solution():
 def test_send_action_sends_and_returns_clamped_joint_target():
     arm = FakeKinematicsArm()
     arm.error_code = 0
-    arm.mode = 1
+    arm.mode = 6
     arm.sent_joint_targets = []
-    arm.set_servo_angle_j = lambda target, **kwargs: arm.sent_joint_targets.append(target) or 0
+    arm.set_servo_angle = lambda **kwargs: arm.sent_joint_targets.append(kwargs["angle"]) or 0
     robot = make_guard_robot(arm)
     robot._is_connected = True
     robot._last_logged_controller_error = 0
@@ -161,7 +161,7 @@ def test_send_action_sends_and_returns_clamped_joint_target():
     robot.config = SimpleNamespace(
         manual_mode=False,
         no_action=False,
-        joint_command_mode=1,
+        joint_command_mode=6,
         gripper_error_log_path=None,
     )
     action = {f"J{i + 1}.pos": 0.1 for i in range(7)}
@@ -171,7 +171,6 @@ def test_send_action_sends_and_returns_clamped_joint_target():
     assert arm.sent_joint_targets == [pytest.approx(arm.inverse_result)]
     assert robot.logs["safety_guard_dt_s"] >= 0
     assert robot.logs["safety_guard_path"] == "fk_ik_clamp"
-    assert robot.logs["servo_j_dt_s"] >= 0
     assert [sent_action[f"J{i + 1}.pos"] for i in range(7)] == pytest.approx(
         arm.inverse_result
     )
