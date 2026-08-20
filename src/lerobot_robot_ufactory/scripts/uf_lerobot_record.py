@@ -40,6 +40,14 @@ class UFRecordConfig(LeRobotRecordConfig):
         super().__post_init__()
 
 
+def _dataset_robot_type(robot) -> str:
+    """Use the concrete xArm model name in the dataset metadata."""
+    robot_dof = getattr(getattr(robot, "config", None), "robot_dof", None)
+    if isinstance(robot_dof, int) and robot_dof in (5, 6, 7):
+        return f"xarm{robot_dof}"
+    return robot.name
+
+
 def _get_dataset_writer(dataset):
     return getattr(dataset, "writer", None)
 
@@ -890,7 +898,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
             cfg.dataset.repo_id,
             cfg.dataset.fps,
             root=cfg.dataset.root,
-            robot_type=robot.name,
+            robot_type=_dataset_robot_type(robot),
             features=dataset_features,
             use_videos=cfg.dataset.video,
             image_writer_processes=cfg.dataset.num_image_writer_processes,

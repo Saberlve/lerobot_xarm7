@@ -12,12 +12,26 @@ from lerobot_robot_ufactory.scripts import uf_lerobot_record as record_module
 from lerobot_robot_ufactory.scripts.uf_lerobot_record import (
     EpisodeSynchronization,
     _manual_action_from_observation,
+    _dataset_robot_type,
     _update_manual_gripper_key_state,
     _update_manual_gripper_target,
     _prepare_dataset_root,
     _prepare_recording_episode,
     get_cfg,
 )
+
+
+@pytest.mark.parametrize(("robot_dof", "expected"), [(5, "xarm5"), (6, "xarm6"), (7, "xarm7")])
+def test_dataset_robot_type_uses_concrete_xarm_model(robot_dof, expected):
+    robot = SimpleNamespace(name="UFACTORY Robot", config=SimpleNamespace(robot_dof=robot_dof))
+
+    assert _dataset_robot_type(robot) == expected
+
+
+def test_dataset_robot_type_preserves_non_xarm_robot_name():
+    robot = SimpleNamespace(name="other_robot", config=SimpleNamespace(robot_dof=None))
+
+    assert _dataset_robot_type(robot) == "other_robot"
 
 
 def test_synchronization_defaults_to_enabled():
