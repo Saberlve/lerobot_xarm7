@@ -7,6 +7,8 @@ import argparse
 import logging
 import shutil
 import threading
+import os
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 import lerobot_robot_ufactory # patch
@@ -24,6 +26,9 @@ class UFRecordConfig(LeRobotRecordConfig):
     """RecordConfig variant that permits UFACTORY manual-mode recording."""
 
     web_preview: WebPreviewConfig = field(default_factory=WebPreviewConfig)
+    # Keep timing sidecars out of the training schema while making diagnostics
+    # available by default for GELLO recording.
+    synchronize: bool = True
 
     def __post_init__(self):
         self.web_preview.validate()
@@ -118,6 +123,85 @@ def _diagnostic_logs_enabled(robot) -> bool:
     return False
 
 
+class EpisodeSynchronization:
+    """Per-episode timing sidecar, intentionally outside LeRobot features."""
+
+    def __init__(self, controller: RealtimeTeleopController, fps: int):
+        self.controller = controller
+        self.fps = fps
+        self.frames: list[dict] = []
+
+    def add_frame(
+        self,
+        frame_index: int,
+        state_sample_s: float,
+        state_rt_receive_s: float | None,
+        action_sent_s: float,
+        camera_timing: dict,
+    ) -> None:
+        anchor_s = state_rt_receive_s if state_rt_receive_s is not None else state_sample_s
+        camera_timestamps = {
+            key: {
+                "frame_index": timing.get("frame_index"),
+                "read_start_ns": round(timing["read_start_s"] * 1_000_000_000),
+                "read_end_ns": round(timing["read_end_s"] * 1_000_000_000),
+            }
+            for key, timing in camera_timing.items()
+        }
+        self.frames.append(
+            {
+                "frame_index": frame_index,
+                "state_sample_ns": round(state_sample_s * 1_000_000_000),
+                "state_rt_receive_ns": (
+                    None
+                    if state_rt_receive_s is None
+                    else round(state_rt_receive_s * 1_000_000_000)
+                ),
+                "action_send_end_ns": round(action_sent_s * 1_000_000_000),
+                "action_state_age_ms": (anchor_s - action_sent_s) * 1000,
+                "camera_timing_json": json.dumps(camera_timestamps, sort_keys=True),
+            }
+        )
+
+    def write(self, dataset_root: Path, episode_index: int) -> None:
+        """Atomically publish sidecars only after the dataset episode is saved."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        output_dir = dataset_root / "timestamps"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        base = f"episode_{episode_index:06d}"
+        action_rows = self.controller.action_timings()
+        files = (
+            (output_dir / f"{base}.parquet", self.frames),
+            (output_dir / f"{base}_actions.parquet", action_rows),
+        )
+        for path, rows in files:
+            # Episodes with no action/frame are not saveable, but preserve a
+            # valid empty table if a future recorder permits one.
+            table = pa.Table.from_pylist(rows)
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            pq.write_table(table, temporary)
+            os.replace(temporary, path)
+
+    def summary(self) -> str:
+        if not self.frames:
+            return "synchronization: no recorded frames"
+        action_ages = [row["action_state_age_ms"] for row in self.frames]
+        camera_ages: list[float] = []
+        for row in self.frames:
+            anchor_ns = row["state_rt_receive_ns"] or row["state_sample_ns"]
+            for timing in json.loads(row["camera_timing_json"]).values():
+                camera_ages.append((timing["read_end_ns"] - anchor_ns) / 1e6)
+        action_ages.sort()
+        p95 = action_ages[min(len(action_ages) - 1, int(len(action_ages) * 0.95))]
+        camera_text = "n/a" if not camera_ages else f"{max(camera_ages):.1f} ms max"
+        return (
+            f"synchronization: {len(self.frames)} frames, "
+            f"action-state p95={p95:.1f} ms, camera-after-state={camera_text}"
+        )
+
+
 def _manual_action_from_observation(observation, action_features, gripper_target=None):
     """Keep only robot action fields when mirroring manual-mode state."""
     action = {key: value for key, value in observation.items() if key in action_features}
@@ -197,7 +281,7 @@ class AsyncEpisodeSaver:
         self._thread = threading.Thread(target=self._run, name="uf-async-episode-saver", daemon=True)
         self._thread.start()
 
-    def submit_current_episode(self):
+    def submit_current_episode(self, synchronization: EpisodeSynchronization | None = None):
         self._raise_if_failed()
         episode_buffer = _get_episode_buffer(self.dataset)
         if _episode_buffer_size(episode_buffer) == 0:
@@ -206,7 +290,7 @@ class AsyncEpisodeSaver:
         episode_index = _episode_buffer_index(episode_buffer)
         next_episode_buffer = _create_next_episode_buffer(self.dataset, episode_buffer)
         _set_episode_buffer(self.dataset, next_episode_buffer)
-        self._queue.put((episode_index, episode_buffer))
+        self._queue.put((episode_index, episode_buffer, synchronization))
         return episode_index
 
     def wait_idle(self):
@@ -229,7 +313,7 @@ class AsyncEpisodeSaver:
             try:
                 if item is self._STOP:
                     return
-                episode_index, episode_buffer = item
+                episode_index, episode_buffer, synchronization = item
                 print(f'[Async] saving episode {episode_index}')
                 try:
                     self.dataset.save_episode(episode_data=episode_buffer)
@@ -240,6 +324,9 @@ class AsyncEpisodeSaver:
                         ) from exc
                     raise
                 self._delete_saved_image_dirs(episode_index)
+                if synchronization is not None:
+                    synchronization.write(Path(self.dataset.root), episode_index)
+                    print(f"[Async] {synchronization.summary()}")
                 print(f'[Async] save episode {episode_index} finish')
             except BaseException as exc:
                 self._exception = exc
@@ -331,6 +418,7 @@ def record_loop(
     manual_gripper_keys: dict[str, bool] | None = None,
     manual_gripper_speed: float = 0.5,
     web_preview: RecordingWebPreview | None = None,
+    synchronize: bool = True,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -375,6 +463,7 @@ def record_loop(
     manual_gripper_action_key = _manual_gripper_action_key(robot.action_features)
 
     realtime_controller = None
+    episode_synchronization = None
     diagnostic_logs_enabled = _diagnostic_logs_enabled(robot)
     sync_log_file = None
     sync_log_writer = None
@@ -392,8 +481,11 @@ def record_loop(
             robot_action_processor=robot_action_processor,
             fps=int(teleop.config.realtime_control_fps),
             initial_observation=last_robot_cmd,
+            record_timing=synchronize,
         )
         realtime_controller.start()
+        if synchronize:
+            episode_synchronization = EpisodeSynchronization(realtime_controller, fps)
         if diagnostic_logs_enabled:
             sync_log_dir = Path("logs")
             sync_log_dir.mkdir(parents=True, exist_ok=True)
@@ -449,13 +541,18 @@ def record_loop(
             observation_monotonic_s = getattr(robot, "_last_realtime_observation_monotonic_s", None)
             if observation_monotonic_s is None:
                 observation_monotonic_s = time.perf_counter()
+            sync_timing = getattr(robot, "_last_realtime_sync_timing", {})
+            state_rt_receive_s = sync_timing.get("state_rt_receive_s")
+            state_anchor_s = state_rt_receive_s or observation_monotonic_s
             realtime_controller.update_observation(obs)
             if diagnostic_logs_enabled:
                 matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
-                    observation_monotonic_s
+                    state_anchor_s
                 )
             else:
-                matched_action = realtime_controller.action_at(observation_monotonic_s)
+                matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
+                    state_anchor_s
+                )
         else:
             obs = robot.get_observation()
 
@@ -570,6 +667,15 @@ def record_loop(
                 frame = frame_callback(frame)
             dataset.add_frame(frame)
 
+        if episode_synchronization is not None and realtime_controller is not None:
+            episode_synchronization.add_frame(
+                frame_index=sync_frame_index,
+                state_sample_s=observation_monotonic_s,
+                state_rt_receive_s=state_rt_receive_s,
+                action_sent_s=matched_action_sent_s,
+                camera_timing=sync_timing.get("camera", {}),
+            )
+
         if sync_log_writer is not None:
             observation_end_s = getattr(
                 robot, "_last_realtime_observation_end_monotonic_s", observation_monotonic_s
@@ -583,7 +689,7 @@ def record_loop(
                     "frame": sync_frame_index,
                     "state_sample_s": f"{observation_monotonic_s:.9f}",
                     "action_sent_s": f"{matched_action_sent_s:.9f}",
-                    "action_age_ms": f"{(observation_monotonic_s - matched_action_sent_s) * 1000:.3f}",
+                    "action_age_ms": f"{(state_anchor_s - matched_action_sent_s) * 1000:.3f}",
                     "observation_end_s": f"{observation_end_s:.9f}",
                     "state_to_observation_end_ms": f"{(observation_end_s - observation_monotonic_s) * 1000:.3f}",
                     "camera_timings": repr(camera_timings),
@@ -617,6 +723,7 @@ def record_loop(
         realtime_controller.stop()
     if sync_log_file is not None:
         sync_log_file.close()
+    return episode_synchronization
 
 
 def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode):
@@ -916,7 +1023,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                 if is_uf_teleop or manual_mode:
                     _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode)
                 log_say(f"Recording episode {_current_episode_index(dataset)}", cfg.play_sounds)
-                record_loop(
+                episode_synchronization = record_loop(
                     robot=robot,
                     events=events,
                     fps=cfg.dataset.fps,
@@ -936,6 +1043,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                     manual_gripper_keys=manual_gripper_keys,
                     manual_gripper_speed=getattr(cfg.robot, "manual_gripper_speed", 0.5),
                     web_preview=web_preview,
+                    synchronize=cfg.synchronize,
                 )
             else:
                 continue
@@ -970,9 +1078,14 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                     teleop.set_teleop_enabled(False)
                 if async_episode_saver is None:
                     dataset.save_episode()
+                    if episode_synchronization is not None:
+                        episode_synchronization.write(Path(dataset.root), episode_index)
+                        log_say(episode_synchronization.summary(), cfg.play_sounds)
                     log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
                 else:
-                    queued_episode_index = async_episode_saver.submit_current_episode()
+                    queued_episode_index = async_episode_saver.submit_current_episode(
+                        episode_synchronization
+                    )
                     if queued_episode_index is not None:
                         log_say(f"[Queued] Save episode {queued_episode_index}", cfg.play_sounds)
 

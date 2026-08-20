@@ -82,6 +82,28 @@ def test_action_at_never_selects_a_future_command():
     assert sent_at == history[0][0]
 
 
+def test_realtime_controller_records_action_timing_when_enabled():
+    controller = RealtimeTeleopController(
+        FakeRobot(),
+        FakeTeleop(),
+        identity_action_processor,
+        identity_action_processor,
+        fps=100,
+        initial_observation={"J1.pos": 0.0},
+        record_timing=True,
+    )
+    controller.start()
+    time.sleep(0.025)
+    controller.stop()
+
+    timings = controller.action_timings()
+    assert timings
+    for index, timing in enumerate(timings):
+        assert timing["action_index"] == index
+        assert timing["gello_read_start_ns"] <= timing["gello_read_end_ns"]
+        assert timing["gello_read_end_ns"] <= timing["command_send_end_ns"]
+
+
 def test_realtime_controller_propagates_send_failures():
     class FailingRobot:
         def send_action(self, action):

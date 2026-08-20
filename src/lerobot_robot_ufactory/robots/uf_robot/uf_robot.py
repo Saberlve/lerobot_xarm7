@@ -138,6 +138,9 @@ class UFRobot(Robot, Thread):
         self.report_stop_event = Event()
         self._rt_report_normal = False
         self._update_lock = Lock()
+        self._last_rt_report_monotonic_s = None
+        self._last_realtime_sync_timing = {}
+        self._realtime_camera_frame_index = {key: 0 for key in self.cameras}
         # Cartesian observations and the joint-mode TCP z guard use the
         # asynchronous RT report.
         self._use_rt_report = (
@@ -874,6 +877,8 @@ class UFRobot(Robot, Thread):
             velocities = self.rt_actual_joint_speed.copy()
             # Timestamp the state snapshot before the slower camera reads.
             self._last_realtime_observation_monotonic_s = time.perf_counter()
+            state_rt_receive_s = self._last_rt_report_monotonic_s
+            camera_timing = {}
         obs_dict = {
             f"{self.prefix}J{index + 1}.pos": positions[index]
             for index in range(self._dof)
@@ -892,9 +897,9 @@ class UFRobot(Robot, Thread):
             obs_dict[f"{self.prefix}gripper.pos"] = float(gripper)
 
         for camera_key, camera in self.cameras.items():
-            before_camera_t = time.perf_counter() if logs_enabled else None
+            before_camera_t = time.perf_counter()
             frame = camera.async_read()
-            after_camera_t = time.perf_counter() if logs_enabled else None
+            after_camera_t = time.perf_counter()
             shape = frame.shape
             if (
                 self.camera_height > 0
@@ -908,6 +913,12 @@ class UFRobot(Robot, Thread):
                 height = self.camera_height if self.camera_height != 0 else shape[0]
                 frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
             obs_dict[f"{self.prefix}{camera_key}"] = frame
+            camera_timing[camera_key] = {
+                "frame_index": self._realtime_camera_frame_index[camera_key],
+                "read_start_s": before_camera_t,
+                "read_end_s": after_camera_t,
+            }
+            self._realtime_camera_frame_index[camera_key] += 1
             if logs_enabled:
                 self.logs[f"async_read_camera_{camera_key}_dt_s"] = (
                     after_camera_t - before_camera_t
@@ -918,8 +929,12 @@ class UFRobot(Robot, Thread):
                     before_camera_t,
                     after_camera_t,
                 )
-        if logs_enabled:
-            self._last_realtime_observation_end_monotonic_s = time.perf_counter()
+        self._last_realtime_observation_end_monotonic_s = time.perf_counter()
+        self._last_realtime_sync_timing = {
+            "state_sample_s": self._last_realtime_observation_monotonic_s,
+            "state_rt_receive_s": state_rt_receive_s,
+            "camera": camera_timing,
+        }
         return obs_dict
 
     def _send_gripper_action(self, gripper_norm: float) -> None:
@@ -1228,6 +1243,9 @@ class UFRobot(Robot, Thread):
                 self.rt_cmd_tcp_vel = convert.bytes_to_fp32s(data[448:472], 6)
                 self.rt_actual_tcp_pose = convert.bytes_to_fp32s(data[472:496], 6)
                 self.rt_actual_tcp_speed = convert.bytes_to_fp32s(data[496:520], 6)
+                # This is the host arrival/decode time, deliberately kept in
+                # the same monotonic clock domain as the recorder.
+                self._last_rt_report_monotonic_s = time.perf_counter()
             self._rt_report_normal = True
 
         self._rt_report_normal = False

@@ -64,6 +64,8 @@ web_preview:
   width: 480
   jpeg_quality: 65
 
+synchronize: true
+
 dataset:
   # Dataset path relative to the directory where the command is started.
   root: "datasets/xarm7_gello_joint_safe_datas1"

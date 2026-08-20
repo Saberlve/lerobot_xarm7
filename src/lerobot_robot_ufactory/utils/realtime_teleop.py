@@ -18,6 +18,7 @@ class RealtimeTeleopController:
         robot_action_processor,
         fps: int,
         initial_observation: dict,
+        record_timing: bool = False,
     ) -> None:
         self.robot = robot
         self.teleop = teleop
@@ -27,6 +28,9 @@ class RealtimeTeleopController:
         self._observation = initial_observation
         self._latest_action = None
         self._action_history = deque(maxlen=max(16, fps * 2))
+        # Keep episode timing separately from the bounded lookup history.
+        self._record_timing = record_timing
+        self._action_timings = []
         self._exception = None
         self._heartbeat = time.perf_counter()
         self._lock = threading.Lock()
@@ -82,6 +86,11 @@ class RealtimeTeleopController:
                     break
             return dict(selected), selected_time
 
+    def action_timings(self) -> list[dict[str, int]]:
+        """Return a stable copy of the full command timeline for an episode."""
+        with self._lock:
+            return [dict(item) for item in self._action_timings]
+
     def raise_if_failed(self) -> None:
         if self._exception is not None:
             raise RuntimeError("Realtime ServoJ control thread failed") from self._exception
@@ -95,15 +104,29 @@ class RealtimeTeleopController:
                     heartbeat = self._heartbeat
                 if time.perf_counter() - heartbeat > 1.0:
                     raise RuntimeError("Recording/teleop owner heartbeat timed out")
+                read_start_ns = time.perf_counter_ns()
                 action = self.teleop.get_action()
+                read_end_ns = time.perf_counter_ns()
                 processed = self.teleop_action_processor((action, observation))
                 command = self.robot_action_processor((processed, observation))
+                send_start_ns = time.perf_counter_ns()
                 sent = self.robot.send_action(command)
+                send_end_ns = time.perf_counter_ns()
                 effective = sent if isinstance(sent, dict) else command
-                sent_at_s = time.perf_counter()
+                sent_at_s = send_end_ns / 1_000_000_000
                 with self._lock:
                     self._latest_action = dict(effective)
                     self._action_history.append((sent_at_s, dict(effective)))
+                    if self._record_timing:
+                        self._action_timings.append(
+                            {
+                                "action_index": len(self._action_timings),
+                                "gello_read_start_ns": read_start_ns,
+                                "gello_read_end_ns": read_end_ns,
+                                "command_send_start_ns": send_start_ns,
+                                "command_send_end_ns": send_end_ns,
+                            }
+                        )
                 self._first_action.set()
 
                 next_tick += self.period_s

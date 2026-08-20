@@ -180,6 +180,11 @@ uv run record --config_path config/gello/xarm7_gello_record_config.yaml -a
 
 > 采集过程中**机械臂与相机（D435 / D435i）的相对位置必须保持不变**，推理时的相机位置必须与采集时一致。若机械臂或相机发生变化，此前采集的数据将失效。
 
+默认 `synchronize: true`。每个已保存的 GELLO episode 会在数据集根目录的
+`timestamps/` 下额外写入 state、GELLO action 和相机读取到达时间的 Parquet
+sidecar，并在控制台输出同步统计；它不改变 LeRobot 训练数据的 schema。若只需
+普通录制，可在 YAML 顶层设置 `synchronize: false` 关闭这些文件和统计。
+
 > 如果数据集目录已存在且未加 `-r`，脚本会询问是覆盖、续录还是取消。
 
 ### 3. 手动拖拽数据采集

@@ -190,6 +190,10 @@ It reuses frames already captured by the recorder: JPEG encoding and HTTP
 streaming run on background threads, the preview is capped at 8 FPS, and stale
 preview frames are dropped rather than delaying dataset collection. Disable it
 or tune it in the top-level `web_preview` section of the YAML configuration.
+`synchronize` defaults to `true`: each saved GELLO episode also writes Parquet
+sidecars under `timestamps/` for state, GELLO-action, and camera-read arrival
+timing, and prints a synchronization summary. These files do not change the
+LeRobot training schema. Set top-level `synchronize: false` to disable them.
 When `robot.enable_logs` is enabled for diagnostics, one
 `logs/gello_record_sync_*.csv` file is written per episode. The
 `preview_clients`, `record_period_ms`, `frame_overrun_ms`, `action_age_ms`, and

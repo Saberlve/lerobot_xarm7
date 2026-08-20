@@ -10,6 +10,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 from lerobot_robot_ufactory.scripts import uf_lerobot_record as record_module
 from lerobot_robot_ufactory.scripts.uf_lerobot_record import (
+    EpisodeSynchronization,
     _manual_action_from_observation,
     _update_manual_gripper_key_state,
     _update_manual_gripper_target,
@@ -17,6 +18,44 @@ from lerobot_robot_ufactory.scripts.uf_lerobot_record import (
     _prepare_recording_episode,
     get_cfg,
 )
+
+
+def test_synchronization_defaults_to_enabled():
+    assert record_module.UFRecordConfig.__dataclass_fields__["synchronize"].default is True
+
+
+def test_episode_synchronization_writes_training_schema_sidecars(tmp_path):
+    class FakeController:
+        def action_timings(self):
+            return [
+                {
+                    "action_index": 0,
+                    "gello_read_start_ns": 10,
+                    "gello_read_end_ns": 20,
+                    "command_send_start_ns": 21,
+                    "command_send_end_ns": 30,
+                }
+            ]
+
+    synchronization = EpisodeSynchronization(FakeController(), fps=30)
+    synchronization.add_frame(
+        frame_index=0,
+        state_sample_s=1.001,
+        state_rt_receive_s=1.0,
+        action_sent_s=0.999,
+        camera_timing={"camera": {"frame_index": 0, "read_start_s": 1.0, "read_end_s": 1.002}},
+    )
+    synchronization.write(tmp_path, episode_index=3)
+
+    import pyarrow.parquet as pq
+
+    frame_rows = pq.read_table(tmp_path / "timestamps" / "episode_000003.parquet").to_pylist()
+    action_rows = pq.read_table(
+        tmp_path / "timestamps" / "episode_000003_actions.parquet"
+    ).to_pylist()
+    assert frame_rows[0]["frame_index"] == 0
+    assert frame_rows[0]["action_state_age_ms"] == pytest.approx(1.0)
+    assert action_rows[0]["action_index"] == 0
 
 
 class FakeXArm:
