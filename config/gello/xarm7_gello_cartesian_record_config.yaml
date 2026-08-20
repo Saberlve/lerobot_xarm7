@@ -34,6 +34,7 @@ teleop:
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
   gripper_id: 8
+  gripper_control_mode: gello
   gripper_open_deg: 198.28125
   gripper_close_deg: 155.75
 

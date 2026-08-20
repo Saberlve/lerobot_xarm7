@@ -39,6 +39,12 @@ def test_gello_realtime_control_fps_must_be_positive():
         GelloTeleopConfig(realtime_control_fps=0)
 
 
+def test_gello_gripper_control_mode_is_validated():
+    assert GelloTeleopConfig(gripper_control_mode="keyboard").gripper_control_mode == "keyboard"
+    with pytest.raises(ValueError, match="gripper_control_mode"):
+        GelloTeleopConfig(gripper_control_mode="invalid")
+
+
 def test_realtime_controller_sends_without_waiting_for_observation_owner():
     robot = FakeRobot()
     controller = RealtimeTeleopController(

@@ -206,6 +206,9 @@ def teleop_loop(cfg: TeleopConfig):
     robot_connected = True
     teleop.connect()
     teleop_connected = True
+    if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
+        speed, stroke = robot.get_gripper_motion_parameters()
+        teleop.set_gripper_motion_parameters(speed, stroke)
 
     sleep_time_s = 1 / cfg.fps
 
@@ -238,8 +241,15 @@ def teleop_loop(cfg: TeleopConfig):
             keyboard.Key.space: 0,  # start/pause
             keyboard.Key.enter: 0,  # help
         }
+        gripper_keys = {"close": False, "open": False}
 
         def on_press(key):
+            char = getattr(key, "char", None)
+            if char in ("c", "C"):
+                gripper_keys["close"] = True
+            elif char in ("o", "O"):
+                gripper_keys["open"] = True
+            teleop.set_gripper_keyboard_state(**gripper_keys)
             if key_dict.get(key, 1) == 0:
                 try:
                     if key == keyboard.Key.esc:
@@ -251,6 +261,12 @@ def teleop_loop(cfg: TeleopConfig):
                 key_dict[key] = True
 
         def on_release(key):
+            char = getattr(key, "char", None)
+            if char in ("c", "C"):
+                gripper_keys["close"] = False
+            elif char in ("o", "O"):
+                gripper_keys["open"] = False
+            teleop.set_gripper_keyboard_state(**gripper_keys)
             try:
                 if key == keyboard.Key.enter:
                     if is_paused:
@@ -268,7 +284,10 @@ def teleop_loop(cfg: TeleopConfig):
         listener, events = init_keyboard_listener(events=events, on_press=on_press, on_release=on_release)
         print("\n********** Teleop Control Loop Start **********")
         if is_uf_teleop:
-            print('⌨   [ESC] Exit  [Space] Reset / Start  [←] Reset')
+            controls = '[ESC] Exit  [Space] Reset / Start  [←] Reset'
+            if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
+                controls += '  [C] Close  [O] Open'
+            print(f'⌨   {controls}')
         else:
             print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
     else:

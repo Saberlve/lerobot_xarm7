@@ -25,6 +25,7 @@ class GelloTeleopConfig(TeleoperatorConfig):
     gripper_id: int = 8  # -1: no gripper
     gripper_open_deg: Optional[float] = None
     gripper_close_deg: Optional[float] = None
+    gripper_control_mode: str = "gello"
     torque_joint_ids: Tuple[int, ...] = None  # deprecated
 
     def __post_init__(self):
@@ -39,3 +40,5 @@ class GelloTeleopConfig(TeleoperatorConfig):
             raise ValueError("joint_ids and joint_offsets must have the same length")
         if (self.gripper_open_deg is None) != (self.gripper_close_deg is None):
             raise ValueError("gripper_open_deg and gripper_close_deg must be set together")
+        if self.gripper_control_mode not in ("gello", "keyboard"):
+            raise ValueError("gripper_control_mode must be 'gello' or 'keyboard'")

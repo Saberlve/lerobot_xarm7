@@ -926,6 +926,9 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
         robot.connect()
         if teleop is not None:
             teleop.connect()
+            if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
+                speed, stroke = robot.get_gripper_motion_parameters()
+                teleop.set_gripper_motion_parameters(speed, stroke)
         if cfg.web_preview.enabled:
             web_preview = RecordingWebPreview(cfg.web_preview)
             web_preview.start()
@@ -961,6 +964,8 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
 
         def on_press(key):
             _update_manual_gripper_key_state(key, True, manual_gripper_keys)
+            if getattr(teleop, "config", None) is not None and getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
+                teleop.set_gripper_keyboard_state(**manual_gripper_keys)
             try:
                 if key == keyboard.Key.right:
                     print("Right arrow key pressed. Exiting loop...")
@@ -980,6 +985,8 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
 
         def on_release(key):
             _update_manual_gripper_key_state(key, False, manual_gripper_keys)
+            if getattr(teleop, "config", None) is not None and getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
+                teleop.set_gripper_keyboard_state(**manual_gripper_keys)
             try:
                 if key == keyboard.Key.enter:
                     _print_record_controls(is_recorded, manual_mode)

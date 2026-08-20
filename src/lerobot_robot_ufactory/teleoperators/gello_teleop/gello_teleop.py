@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 import logging
+import threading
+import time
 import numpy as np
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from ..base_teleop import UFBaseTeleop
@@ -24,6 +26,11 @@ class GelloTeleop(UFBaseTeleop):
         self._teleop_enabled = False
         self._needs_alignment = True
         self._is_calibrated = True # CHECK!!
+        self._keyboard_gripper_state = {"close": False, "open": False}
+        self._keyboard_gripper_target = None
+        self._keyboard_gripper_speed = 1.0
+        self._keyboard_gripper_last_update = None
+        self._keyboard_gripper_lock = threading.Lock()
 
         joint_offsets = [0.0] * len(self.config.joint_ids)
         self._align_gripper_to_current = self.config.gripper_open_deg is None
@@ -150,6 +157,10 @@ class GelloTeleop(UFBaseTeleop):
             )
 
         gello_robot._last_pos = None
+        if self.config.gripper_control_mode == "keyboard":
+            with self._keyboard_gripper_lock:
+                self._keyboard_gripper_target = float(obs.get("gripper.pos", 0.0))
+                self._keyboard_gripper_last_update = time.monotonic()
         self._needs_alignment = False
         logger.info("Current GELLO pose aligned to current robot observation")
 
@@ -166,6 +177,36 @@ class GelloTeleop(UFBaseTeleop):
         self._teleop_enabled = enabled
         logger.info("Gello teleoperation %s", "enabled" if enabled else "disabled")
 
+    def set_gripper_keyboard_state(self, *, close: bool, open: bool) -> None:
+        if self.config.gripper_control_mode != "keyboard":
+            return
+        with self._keyboard_gripper_lock:
+            self._keyboard_gripper_state["close"] = bool(close)
+            self._keyboard_gripper_state["open"] = bool(open)
+
+    def set_gripper_motion_parameters(self, speed_mm_s: float, stroke_mm: float) -> None:
+        if stroke_mm <= 0:
+            raise ValueError("gripper stroke must be positive")
+        self._keyboard_gripper_speed = max(float(speed_mm_s), 0.0) / float(stroke_mm)
+
+    def _keyboard_gripper_action(self, fallback: float) -> float:
+        now = time.monotonic()
+        with self._keyboard_gripper_lock:
+            if self._keyboard_gripper_target is None:
+                self._keyboard_gripper_target = min(max(float(fallback), 0.0), 1.0)
+            last = self._keyboard_gripper_last_update
+            self._keyboard_gripper_last_update = now
+            if last is not None:
+                close = self._keyboard_gripper_state["close"]
+                open_ = self._keyboard_gripper_state["open"]
+                if close != open_:
+                    direction = 1.0 if close else -1.0
+                    self._keyboard_gripper_target = min(
+                        max(self._keyboard_gripper_target + direction * self._keyboard_gripper_speed * (now - last), 0.0),
+                        1.0,
+                    )
+            return self._keyboard_gripper_target
+
     def get_action(self) -> dict[str, np.ndarray]:
         if not self._teleop_enabled:
             raise RuntimeError("Gello teleop is disabled")
@@ -175,7 +216,10 @@ class GelloTeleop(UFBaseTeleop):
         action = {}
         for i in range(self.dof):
             action.update({f"J{i+1}.pos": action_array[i]})
-        action.update({"gripper.pos": action_array[self.dof]})
+        gripper_pos = action_array[self.dof]
+        if self.config.gripper_control_mode == "keyboard":
+            gripper_pos = self._keyboard_gripper_action(gripper_pos)
+        action.update({"gripper.pos": gripper_pos})
         return action
 
     def send_feedback(self, feedback: dict[str, float]) -> None:

@@ -1021,6 +1021,19 @@ class UFRobot(Robot, Thread):
             self._log_gripper_command(gripper_norm, grippos, command_dt_ms)
         self._last_gripper_command = gripper_norm
 
+    def get_gripper_motion_parameters(self) -> tuple[float, float]:
+        """Return effective gripper speed and open/close stroke in mm."""
+        if self._gripper_type <= GripperType.NoGripper:
+            return 0.0, 1.0
+        if self._gripper_type == GripperType.xArmGripperG2:
+            speed = float(self._gripper_g2_speed)
+        else:
+            speed = float(self.config.gripper_speed)
+            if speed < 0:
+                speed = float(self._gripper_param.speed)
+        stroke = abs(float(self._gripper_param.open_pos - self._gripper_param.close_pos))
+        return speed, max(stroke, 1.0)
+
     def _log_gripper_command(self, target: float, position: int, dt_ms: float) -> None:
         log_path = self.config.gripper_error_log_path
         if not log_path:
