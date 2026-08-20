@@ -30,8 +30,8 @@ def identity_action_processor(value):
     return value[0]
 
 
-def test_gello_realtime_control_fps_defaults_to_60():
-    assert GelloTeleopConfig().realtime_control_fps == 60
+def test_gello_realtime_control_fps_defaults_to_30():
+    assert GelloTeleopConfig().realtime_control_fps == 30
 
 
 def test_gello_realtime_control_fps_must_be_positive():

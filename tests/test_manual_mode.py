@@ -434,7 +434,8 @@ def test_gello_configs_select_xarm_gripper_g2():
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert config["robot"]["gripper_type"] == 2, config_path
         assert 15 <= config["robot"]["gripper_speed"] <= 225, config_path
-        assert 1 <= config["robot"]["gripper_force"] <= 100, config_path
+        gripper_force = config["robot"].get("gripper_force", -1)
+        assert gripper_force == -1 or 1 <= gripper_force <= 100, config_path
 
 
 def test_manual_mode_config_rejects_cartesian_control(tmp_path):

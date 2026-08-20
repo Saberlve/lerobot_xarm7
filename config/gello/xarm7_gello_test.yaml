@@ -7,12 +7,8 @@ robot:
   # 2: xArm Gripper G2 (0-84 mm opening range).
   gripper_type: 2
   enable_logs: false
-  # Up to 60 Hz goal updates; unchanged targets are filtered below.
-  gripper_command_interval_s: 0.0166667
   # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
   gripper_speed: 50
-  # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
-  gripper_force: 1
   # Use the high-frequency servo interface for lower-latency GELLO tracking.
   joint_command_mode: 6
   max_joint_velocity: 120
@@ -45,7 +41,7 @@ teleop:
   type: uf::gello_teleop
   id: "gello_teleop"
   # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.
-  realtime_control_fps: 60
+  realtime_control_fps: 30
   port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
@@ -55,7 +51,7 @@ teleop:
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are
-# dropped instead of delaying the 30 Hz recorder or 60 Hz GELLO control loop.
+# dropped instead of delaying the 30 Hz recorder or GELLO control loop.
 web_preview:
   enabled: false
   host: "0.0.0.0"
@@ -69,7 +65,7 @@ dataset:
   root: "datasets/xarm7_gello_test"
   repo_id: "ufactory/xarm7_gello_test"
   single_task: "Test episode for GELLO control."
-  # Cameras deliver 30 Hz; arm mode-6 joint commands remain independently fixed at 60 Hz.
+  # Cameras and the independent GELLO control loop run at 30 Hz.
   fps: 30
   episode_time_s: 360  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes

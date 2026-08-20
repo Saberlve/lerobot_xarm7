@@ -9,7 +9,7 @@ from lerobot.teleoperators import TeleoperatorConfig
 @dataclass
 class GelloTeleopConfig(TeleoperatorConfig):
     # Frequency of the independent GELLO -> xArm realtime control loop.
-    realtime_control_fps: int = 60
+    realtime_control_fps: int = 30
     # Port to connect to the gello dummy arm
     port: str = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAJZYC7-if00-port0"
 

@@ -6,13 +6,13 @@
 
 ## 最终方案
 
-- GELLO 始终发送七个关节角，机械臂使用 `set_servo_angle_j`，控制频率 60 Hz。这样 J7 不会因为改发 EEF 位姿而丢失。
-- 60 Hz 控制放在独立实时线程里。相机读取、图片编码和数据写盘再慢，也不能拖慢关节命令。
+- GELLO 始终发送七个关节角，机械臂使用 `set_servo_angle_j`，控制频率 30 Hz。这样 J7 不会因为改发 EEF 位姿而丢失。
+- 30 Hz 控制放在独立实时线程里。相机读取、图片编码和数据写盘再慢，也不能拖慢关节命令。
 - TCP 高度保护使用 CPU 本地运动学计算，不在控制循环里向 xArm 控制器同步请求 FK/IK。
 - 控制器 Safety Boundary 仍然开启，作为本地保护之外的最后一道硬保护。
-- 相机和数据集按真实的 30 Hz 记录，机械臂控制仍保持独立的 60 Hz。
+- 相机、数据集和 GELLO 控制均按 30 Hz 运行。
 - 每条 action 带发送时刻；每次 RT joint state 采样也带时刻。写入数据集时，为 state 选择当时已经发送的最近 action，绝不拿“未来的 action”配较早的 state。
-- xArm Gripper G2 使用 SDK 专用接口和物理单位；目标最多按 60 Hz 检查，但只有变化超过阈值才真正发送。初始速度采用 SDK 默认的 100 mm/s。
+- xArm Gripper G2 使用 SDK 专用接口和物理单位；目标最多按 30 Hz 检查，但只有变化超过阈值才真正发送。初始速度采用 SDK 默认的 100 mm/s。
 
 当前使用的配置是：
 
@@ -26,14 +26,12 @@ robot:
   tcp_z_soft_margin_mm: 5.0
   controller_safety_boundary: true
 
-  gripper_command_interval_s: 0.0166667
   gripper_command_threshold: 0.01
   gripper_type: 2
   gripper_speed: 100
-  gripper_force: 50
 
 teleop:
-  realtime_control_fps: 60
+  realtime_control_fps: 30
 
 dataset:
   fps: 30
@@ -104,7 +102,7 @@ logs/gello_record_sync_<时间>.csv
 
 重点看这些列：
 
-- `action_age_ms`：state 采样时，这条 action 已经发送多久。它应该非负，通常小于一个 60 Hz 周期。
+- `action_age_ms`：state 采样时，这条 action 已经发送多久。它应该非负，通常小于一个 30 Hz 周期。
 - `state_to_observation_end_ms`：state 采样后，两路相机读取和整理用了多久。
 - `camera_timings`：每路相机调用的起止时间。
 - `frame_loop_ms`：这一帧写入前的主循环工作时间。
@@ -114,11 +112,11 @@ logs/gello_record_sync_<时间>.csv
 相机硬件配置是 30 Hz，所以 dataset 也必须写成 30 Hz。之前 dataset 标成 60 Hz、实际只能得到约 30 帧，会让数据时间轴看起来快一倍。现在控制频率和录制频率已经分开：
 
 ```text
-机械臂控制：60 Hz
+机械臂控制：30 Hz
 图像/state/action 采样：30 Hz
 ```
 
-30 Hz 数据集每帧记录的是该采样时刻有效的 60 Hz 控制命令，这是正常的降采样，不是不同步。
+30 Hz 数据集每帧记录的是该采样时刻有效的 30 Hz 控制命令。
 
 ## 四、xArm Gripper G2 配置与 Error 19 排查
 
@@ -138,12 +136,10 @@ controller_error=19
 ```yaml
 gripper_type: 2
 gripper_speed: 100
-gripper_force: 50
-gripper_command_interval_s: 0.0166667
 gripper_command_threshold: 0.01
 ```
 
-这里的 60 Hz 是“最多检查和发送 60 次”。当夹爪目标变化不足 `0.01` 时会去重，不会发送没有意义的重复 RS485 命令。
+这里的 30 Hz 是“最多检查和发送 30 次”。当夹爪目标变化不足 `0.01` 时会去重，不会发送没有意义的重复 RS485 命令。未配置的夹持力和发送间隔使用程序默认值。
 
 每次成功或失败的夹爪命令都会写入：
 

@@ -11,8 +11,6 @@ robot:
   # 2: xArm Gripper G2 (0-84 mm opening range).
   gripper_type: 2
   enable_logs: false
-  # Up to 60 Hz goal updates; unchanged targets are filtered below.
-  gripper_command_interval_s: 0.0166667
   # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
   gripper_speed: 100
   # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
