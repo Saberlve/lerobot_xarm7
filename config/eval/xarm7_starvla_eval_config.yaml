@@ -11,8 +11,9 @@ robot:
   # 2: xArm Gripper G2 (0-84 mm opening range).
   gripper_type: 2
   enable_logs: false
-  # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
-  gripper_speed: 100
+  # xArm Gripper G2 speed, 15-225 mm/s. Match the data-collection config
+  # (xarm7_gello_pick_toothpaste.yaml uses 50) so grasp timing matches training.
+  gripper_speed: 50
   # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
   gripper_force: 50
   # Use the high-frequency servo interface for lower-latency action streaming.
@@ -28,11 +29,18 @@ robot:
   # Append gripper initialization/read/write failures here.
   gripper_error_log_path: "logs/xarm7_gripper_errors.log"
   cameras:
-    # Single camera view; must match `camera_key` below and the training setup.
-    # TODO: fill in the serial number of YOUR RealSense camera.
+    # Same cameras as config/gello/xarm7_gello_pick_toothpaste.yaml.
+    # observation.images.camera  = wrist_camera           (trained as left_wrist_0_rgb)
+    # observation.images.camera2 = external_upper_camera  (trained as base_0_rgb)
     camera:
       type: intelrealsense
       serial_number_or_name: "242622070583"
+      width: 640
+      height: 480
+      fps: 30
+    camera2:
+      type: intelrealsense
+      serial_number_or_name: "148522072685"
       width: 640
       height: 480
       fps: 30
@@ -44,10 +52,13 @@ server_port: 10093
 
 # Control frequency for streaming actions to the robot.
 fps: 30
-# Execute the first N steps of each predicted action chunk (T=50), then re-infer.
+# Execute the first N steps of each predicted action chunk (chunk length comes
+# from the checkpoint's action_horizon), then re-infer.
 # N=1 means fully closed-loop (re-infer every step).
-steps_per_inference: 25
-single_task: "Pick up the black bottle and place it on the blue bag"
+steps_per_inference: 20
+single_task: "Pick up the white bar and drop it in the bag."
 n_episodes: 50
-# Key of the camera in the robot observation dict (camera name above).
-camera_key: "camera"
+# Camera observation keys sent to the policy, IN ORDER. Must match the training
+# video_keys order ["video.external_upper_camera", "video.wrist_camera"], i.e.
+# external (base_0_rgb) first, wrist (left_wrist_0_rgb) second.
+camera_keys: ["camera2", "camera"]

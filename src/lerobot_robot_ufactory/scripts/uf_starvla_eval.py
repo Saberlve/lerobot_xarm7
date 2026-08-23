@@ -9,7 +9,7 @@ Usage:
     uf-starvla-eval --config_path config/eval/xarm7_starvla_eval_config.yaml
 
 The policy runs on the server; this script only streams observations
-(joint state + one camera image + task text) over WebSocket and executes the
+(joint state + camera image(s) + task text) over WebSocket and executes the
 returned action chunk on the xArm.
 
 Keyboard controls (same as uf_lerobot_eval):
@@ -19,7 +19,7 @@ Keyboard controls (same as uf_lerobot_eval):
 
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pprint import pformat
 
 import numpy as np
@@ -54,12 +54,13 @@ class StarVLAEvalConfig:
     # Control frequency for streaming actions to the robot.
     fps: int = 30
     # Execute the first N steps of each predicted action chunk, then re-infer.
-    # N=1 means fully closed-loop (re-infer every step). Server chunks are T=50.
+    # N=1 means fully closed-loop (re-infer every step). Chunk length comes
+    # from the checkpoint (action_horizon=40 for the xarm7 pi05 runs).
     steps_per_inference: int = 25
-    single_task: str = "Pick up the black bottle and place it on the blue bag"
+    single_task: str = "Pick up the white bar and drop it in the bag."
     n_episodes: int = 50
-    # Key of the camera in the robot observation dict (camera name in robot config).
-    camera_key: str = "camera"
+    # Keys of the cameras in the robot observation dict.
+    camera_keys: list[str] = field(default_factory=lambda: ["camera"])
 
 
 def _build_state(obs: dict) -> np.ndarray:
@@ -135,14 +136,14 @@ def eval_loop(cfg: StarVLAEvalConfig):
                 # Get robot observation
                 obs = robot.get_observation()
                 state = _build_state(obs)
-                image = obs[cfg.camera_key]  # uint8 HWC RGB
+                images = [obs[key] for key in cfg.camera_keys]  # uint8 HWC RGB, in training order
 
                 # NOTE: inference is blocking (one flow-matching pass can take
                 # several hundred ms) and no actions are sent while waiting.
                 # Mode 6 holds the last commanded online-trajectory target, so
                 # the arm simply pauses between action chunks.
                 resp = client.predict_action(
-                    {"examples": [{"image": [image], "lang": cfg.single_task, "state": state}]}
+                    {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
                 )
                 actions = np.asarray(resp["data"]["actions"][0])  # (T, 8), denormalized
 
