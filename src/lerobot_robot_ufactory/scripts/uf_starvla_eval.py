@@ -15,6 +15,13 @@ returned action chunk on the xArm.
 Keyboard controls (same as uf_lerobot_eval):
     Right/Left arrow : reset current episode (robot returns to initial pose)
     Esc              : exit eval loop and disconnect
+
+RTC (real-time chunking): set `rtc_mode: prefix_pin` (PI0/PI05) or another
+framework-supported mode in the config to overlap inference with execution —
+the next chunk is generated in the background while the robot executes the
+tail of the current one, and the server pins the new chunk's first
+`inference_delay` steps to the old chunk's tail, removing the pause at chunk
+boundaries. `rtc_mode: null` (or "none") keeps the default blocking loop.
 """
 
 import json
@@ -42,7 +49,7 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging
 
-from lerobot_robot_ufactory.utils.starvla_ws_client import WebsocketClientPolicy
+from lerobot_robot_ufactory.utils.starvla_ws_client import RTCPolicyClientWrapper, WebsocketClientPolicy
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 
 
@@ -58,6 +65,14 @@ class StarVLAEvalConfig:
     # N=1 means fully closed-loop (re-infer every step). Chunk length comes
     # from the checkpoint (action_horizon=40 for the xarm7 pi05 runs).
     steps_per_inference: int = 25
+    # --- RTC (real-time chunking) ---
+    # RTC mode: None / "none" disables (default blocking chunk loop). Any other
+    # value enables RTC and is forwarded to the framework as `mode`:
+    # "prefix_pin" for PI0/PI05 (their only mode)
+    rtc_mode: str | None = None
+    # Steps the robot keeps executing from the old chunk while the next
+    # inference runs
+    inference_delay: int = 8
     single_task: str = "Pick up the white bar and drop it in the bag."
     n_episodes: int = 50
     # Keys of the cameras in the robot observation dict.
@@ -210,7 +225,34 @@ def eval_loop(cfg: StarVLAEvalConfig):
     client = WebsocketClientPolicy(cfg.server_host, cfg.server_port)
     # Echoed so the operator can manually verify action_chunk_size, image
     # size/count etc. against the training setup before running episodes.
-    logging.info(f"starVLA server metadata: {pformat(client.get_server_metadata())}")
+    server_meta = client.get_server_metadata()
+    logging.info(f"starVLA server metadata: {pformat(server_meta)}")
+
+    rtc = None
+    rtc_mode = (cfg.rtc_mode or "").strip().lower()
+    if rtc_mode and rtc_mode != "none":
+        if not 0 < cfg.inference_delay < cfg.steps_per_inference:
+            raise ValueError(
+                f"inference_delay ({cfg.inference_delay}) must be in "
+                f"(0, steps_per_inference={cfg.steps_per_inference}) for RTC."
+            )
+        if not server_meta.get("rtc_supported", False):
+            logging.warning(
+                "rtc_mode=%r but the server reports rtc_supported=False — "
+                "chunks will NOT be prefix-conditioned; the loop still runs "
+                "(background prefetch + splice), but seams may jerk.",
+                cfg.rtc_mode,
+            )
+        rtc = RTCPolicyClientWrapper(
+            client,
+            inference_delay=cfg.inference_delay,
+            execution_horizon=cfg.steps_per_inference,
+            mode=cfg.rtc_mode,
+        )
+        logging.info(
+            f"RTC enabled: mode={cfg.rtc_mode} inference_delay={cfg.inference_delay} "
+            f"execution_horizon={cfg.steps_per_inference} (fps={cfg.fps})"
+        )
 
     events = {"reset": False, "exit": False}
     listener = None
@@ -259,6 +301,9 @@ def eval_loop(cfg: StarVLAEvalConfig):
             current_actions = None
             current_step = 0
             chunk_index = -1
+            last_action = None
+            if rtc is not None:
+                rtc.reset()  # drop server-side prev chunk + local chunk state
 
             while True:
                 if events["reset"] or events["exit"]:
@@ -266,7 +311,29 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     print("\n********** starVLA Policy Eval Episode (Reset) **********")
                     break
 
-                if current_actions is None or current_step >= min(
+                if rtc is not None:
+                    # RTC: build a fresh observation every tick; the wrapper
+                    # fires the (background) inference at the right offset and
+                    # returns the aligned action for this tick.
+                    obs = robot.get_observation()
+                    state = _build_state(obs, gripper_cmd, state_q01, state_q99)
+                    images = [obs[key] for key in cfg.camera_keys]
+                    query = {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
+                    prev_chunk_index = rtc.chunk_index
+                    action = rtc.get_action(query)
+                    current_step = rtc.current_step_in_chunk + 1
+                    if rtc.chunk_index != prev_chunk_index:
+                        chunk_index = rtc.chunk_index
+                        if seam_writer is not None and last_action is not None:
+                            seam_writer.writerow(
+                                [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index, f"{rtc.last_inference_ms:.1f}"]
+                                + [f"{v:.6f}" for v in (action - last_action)]
+                                + [f"{v:.6f}" for v in last_action]
+                                + [f"{v:.6f}" for v in action]
+                            )
+                    last_action = action
+                    start_loop_t = time.perf_counter()
+                elif current_actions is None or current_step >= min(
                     cfg.steps_per_inference, len(current_actions)
                 ):
                     # Get robot observation
@@ -299,9 +366,10 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     current_step = 0
                     chunk_index += 1
 
-                start_loop_t = time.perf_counter()
-                action = current_actions[current_step]
-                current_step += 1
+                if rtc is None:
+                    start_loop_t = time.perf_counter()
+                    action = current_actions[current_step]
+                    current_step += 1
 
                 robot.send_action(_build_action_dict(action))
 

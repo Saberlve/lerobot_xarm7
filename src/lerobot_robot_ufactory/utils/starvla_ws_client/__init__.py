@@ -5,6 +5,7 @@ real-robot eval script can talk to a starVLA policy server without adding a
 dependency on the starVLA package itself.
 """
 
+from .rtc_policy_client_wrapper import RTCPolicyClientWrapper
 from .websocket_policy_client import WebsocketClientPolicy
 
-__all__ = ["WebsocketClientPolicy"]
+__all__ = ["RTCPolicyClientWrapper", "WebsocketClientPolicy"]

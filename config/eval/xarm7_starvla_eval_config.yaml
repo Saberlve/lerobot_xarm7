@@ -56,6 +56,9 @@ fps: 30
 # from the checkpoint's action_horizon), then re-infer.
 # N=1 means fully closed-loop (re-infer every step).
 steps_per_inference: 20
+#  null/none or prefix_pin
+rtc_mode: null
+inference_delay: 8
 single_task: "Pick up the white bar and drop it in the bag."
 n_episodes: 50
 # Camera observation keys sent to the policy, IN ORDER. Must match the training
