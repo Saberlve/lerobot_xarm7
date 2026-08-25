@@ -26,6 +26,12 @@ class GelloTeleopConfig(TeleoperatorConfig):
     gripper_open_deg: Optional[float] = None
     gripper_close_deg: Optional[float] = None
     gripper_control_mode: str = "gello"
+    # Keyboard gripper: distance closed/opened per quick tap of C/O (mm).
+    # Must be > 0; Recommended >= 2 mm.
+    gripper_keyboard_step_mm: float = 5.0
+    # Keyboard gripper: how long C/O must be held (seconds) before the
+    # gripper switches from fixed steps to continuous motion at gripper_speed.
+    gripper_keyboard_hold_delay_s: float = 0.5
     torque_joint_ids: Tuple[int, ...] = None  # deprecated
 
     def __post_init__(self):
@@ -42,3 +48,7 @@ class GelloTeleopConfig(TeleoperatorConfig):
             raise ValueError("gripper_open_deg and gripper_close_deg must be set together")
         if self.gripper_control_mode not in ("gello", "keyboard"):
             raise ValueError("gripper_control_mode must be 'gello' or 'keyboard'")
+        if self.gripper_keyboard_step_mm <= 0:
+            raise ValueError("gripper_keyboard_step_mm must be positive")
+        if self.gripper_keyboard_hold_delay_s < 0:
+            raise ValueError("gripper_keyboard_hold_delay_s must be non-negative")

@@ -29,8 +29,11 @@ class GelloTeleop(UFBaseTeleop):
         self._keyboard_gripper_state = {"close": False, "open": False}
         self._keyboard_gripper_target = None
         self._keyboard_gripper_speed = 1.0
+        self._keyboard_gripper_stroke_mm = None
         self._keyboard_gripper_last_update = None
         self._keyboard_gripper_lock = threading.Lock()
+        self._keyboard_press_time = {"close": None, "open": None}
+        self._keyboard_step_pending = {"close": False, "open": False}
 
         joint_offsets = [0.0] * len(self.config.joint_ids)
         self._align_gripper_to_current = self.config.gripper_open_deg is None
@@ -161,6 +164,8 @@ class GelloTeleop(UFBaseTeleop):
             with self._keyboard_gripper_lock:
                 self._keyboard_gripper_target = float(obs.get("gripper.pos", 0.0))
                 self._keyboard_gripper_last_update = time.monotonic()
+                self._keyboard_press_time = {"close": None, "open": None}
+                self._keyboard_step_pending = {"close": False, "open": False}
         self._needs_alignment = False
         logger.info("Current GELLO pose aligned to current robot observation")
 
@@ -180,14 +185,26 @@ class GelloTeleop(UFBaseTeleop):
     def set_gripper_keyboard_state(self, *, close: bool, open: bool) -> None:
         if self.config.gripper_control_mode != "keyboard":
             return
+        now = time.monotonic()
         with self._keyboard_gripper_lock:
-            self._keyboard_gripper_state["close"] = bool(close)
-            self._keyboard_gripper_state["open"] = bool(open)
+            for name, pressed in (("close", close), ("open", open)):
+                pressed = bool(pressed)
+                was_pressed = self._keyboard_gripper_state[name]
+                if pressed and not was_pressed:
+                    # Press edge: queue one fixed step and start the hold timer.
+                    self._keyboard_press_time[name] = now
+                    self._keyboard_step_pending[name] = True
+                elif not pressed and was_pressed:
+                    # Release edge: stop the hold timer, but keep any queued
+                    # step so a tap shorter than one control cycle still counts.
+                    self._keyboard_press_time[name] = None
+                self._keyboard_gripper_state[name] = pressed
 
     def set_gripper_motion_parameters(self, speed_mm_s: float, stroke_mm: float) -> None:
         if stroke_mm <= 0:
             raise ValueError("gripper stroke must be positive")
         self._keyboard_gripper_speed = max(float(speed_mm_s), 0.0) / float(stroke_mm)
+        self._keyboard_gripper_stroke_mm = float(stroke_mm)
 
     def _keyboard_gripper_action(self, fallback: float) -> float:
         now = time.monotonic()
@@ -196,15 +213,33 @@ class GelloTeleop(UFBaseTeleop):
                 self._keyboard_gripper_target = min(max(float(fallback), 0.0), 1.0)
             last = self._keyboard_gripper_last_update
             self._keyboard_gripper_last_update = now
+            # Apply queued tap steps even if the key was already released.
+            stroke = self._keyboard_gripper_stroke_mm
+            for name, direction in (("close", 1.0), ("open", -1.0)):
+                if self._keyboard_step_pending[name]:
+                    self._keyboard_step_pending[name] = False
+                    if stroke:
+                        step = self.config.gripper_keyboard_step_mm / stroke
+                        self._keyboard_gripper_target = min(
+                            max(self._keyboard_gripper_target + direction * step, 0.0),
+                            1.0,
+                        )
             if last is not None:
                 close = self._keyboard_gripper_state["close"]
                 open_ = self._keyboard_gripper_state["open"]
                 if close != open_:
+                    name = "close" if close else "open"
                     direction = 1.0 if close else -1.0
-                    self._keyboard_gripper_target = min(
-                        max(self._keyboard_gripper_target + direction * self._keyboard_gripper_speed * (now - last), 0.0),
-                        1.0,
-                    )
+                    press_time = self._keyboard_press_time[name]
+                    if (
+                        press_time is not None
+                        and now - press_time >= self.config.gripper_keyboard_hold_delay_s
+                    ):
+                        # Held past the delay: continuous motion at gripper speed.
+                        self._keyboard_gripper_target = min(
+                            max(self._keyboard_gripper_target + direction * self._keyboard_gripper_speed * (now - last), 0.0),
+                            1.0,
+                        )
             return self._keyboard_gripper_target
 
     def get_action(self) -> dict[str, np.ndarray]:

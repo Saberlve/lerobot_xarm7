@@ -58,13 +58,13 @@ fps: 30
 steps_per_inference: 20
 #  null/none or prefix_pin
 rtc_mode: null
-inference_delay: 8
+inference_delay: 5
 
 # Temporal ensembling (TE): mutually exclusive with rtc_mode. 
-temporal_ensemble: false
+temporal_ensemble: true
 # Re-infer every N executed steps; with a 40-step chunk, N=10 keeps ~4 chunks
 # overlapping in the ensemble. Must be < the checkpoint's action chunk size.
-steps_per_inference_te: 10
+steps_per_inference_te: 1
 # Exponential weighting coefficient (lerobot/ACT default 0.01): positive
 # favors older chunks, 0 = uniform average, negative favors newer chunks.
 temporal_ensemble_coeff: 0.01
@@ -82,7 +82,7 @@ camera_keys: ["camera2", "camera"]
 # Diagnostic CSV logs (30 Hz state/action steps + per-chunk seam diffs),
 # written to logs/starvla_eval_<timestamp>_{steps,seams}.csv. Set to false to
 # skip creating them entirely.
-enable_logs: true
+enable_logs: false
 # Directory for the diagnostic logs (only used when enable_logs is true).
 log_dir: "logs"
 

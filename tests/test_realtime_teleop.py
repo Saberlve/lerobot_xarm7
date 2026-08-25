@@ -45,6 +45,89 @@ def test_gello_gripper_control_mode_is_validated():
         GelloTeleopConfig(gripper_control_mode="invalid")
 
 
+def test_gello_keyboard_gripper_config_is_validated():
+    with pytest.raises(ValueError, match="gripper_keyboard_step_mm"):
+        GelloTeleopConfig(gripper_keyboard_step_mm=0.0)
+    with pytest.raises(ValueError, match="gripper_keyboard_step_mm"):
+        GelloTeleopConfig(gripper_keyboard_step_mm=-1.0)
+    with pytest.raises(ValueError, match="gripper_keyboard_hold_delay_s"):
+        GelloTeleopConfig(gripper_keyboard_hold_delay_s=-0.1)
+
+
+def _make_keyboard_gripper_teleop(monkeypatch, step_mm=10.0, hold_delay_s=0.5):
+    from types import SimpleNamespace
+
+    import lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop as gello_module
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(
+        gello_module, "time", SimpleNamespace(monotonic=lambda: clock["now"])
+    )
+    teleop = gello_module.GelloTeleop(
+        GelloTeleopConfig(
+            gripper_control_mode="keyboard",
+            gripper_keyboard_step_mm=step_mm,
+            gripper_keyboard_hold_delay_s=hold_delay_s,
+        )
+    )
+    # speed 50 mm/s over a 100 mm stroke -> 0.5 normalized units per second.
+    teleop.set_gripper_motion_parameters(speed_mm_s=50.0, stroke_mm=100.0)
+    return teleop, clock
+
+
+def test_keyboard_gripper_tap_applies_one_step(monkeypatch):
+    teleop, clock = _make_keyboard_gripper_teleop(monkeypatch)
+
+    teleop.set_gripper_keyboard_state(close=True, open=False)
+    clock["now"] += 0.1
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.6)
+
+    # Held but still within the hold delay: no further motion.
+    clock["now"] += 0.2
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.6)
+
+
+def test_keyboard_gripper_hold_continues_after_delay(monkeypatch):
+    teleop, clock = _make_keyboard_gripper_teleop(monkeypatch)
+
+    teleop.set_gripper_keyboard_state(close=True, open=False)
+    clock["now"] += 0.1
+    teleop._keyboard_gripper_action(0.5)  # -> 0.6 (step only)
+
+    # 0.6 s after the press (> 0.5 s delay): continuous at 0.5/s, dt=0.5 s.
+    clock["now"] += 0.5
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.85)
+
+    # Release stops the motion.
+    teleop.set_gripper_keyboard_state(close=False, open=False)
+    clock["now"] += 0.5
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.85)
+
+
+def test_keyboard_gripper_quick_tap_within_one_cycle_still_steps(monkeypatch):
+    teleop, clock = _make_keyboard_gripper_teleop(monkeypatch)
+
+    teleop._keyboard_gripper_action(0.5)  # initialize target
+    # Press and release both before the next control cycle.
+    teleop.set_gripper_keyboard_state(close=True, open=False)
+    teleop.set_gripper_keyboard_state(close=False, open=False)
+    clock["now"] += 0.05
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.6)
+
+
+def test_keyboard_gripper_open_direction_and_clamp(monkeypatch):
+    teleop, clock = _make_keyboard_gripper_teleop(monkeypatch)
+
+    teleop.set_gripper_keyboard_state(close=False, open=True)
+    clock["now"] += 0.1
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.4)
+
+    # Holding close for a long time clamps at 1.0.
+    teleop.set_gripper_keyboard_state(close=True, open=False)
+    clock["now"] += 5.0
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(1.0)
+
+
 def test_realtime_controller_sends_without_waiting_for_observation_owner():
     robot = FakeRobot()
     controller = RealtimeTeleopController(
