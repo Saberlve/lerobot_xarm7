@@ -62,3 +62,17 @@ n_episodes: 50
 # video_keys order ["video.external_upper_camera", "video.wrist_camera"], i.e.
 # external (base_0_rgb) first, wrist (left_wrist_0_rgb) second.
 camera_keys: ["camera2", "camera"]
+
+# Diagnostic CSV logs (30 Hz state/action steps + per-chunk seam diffs),
+# written to logs/starvla_eval_<timestamp>_{steps,seams}.csv. Set to false to
+# skip creating them entirely.
+enable_logs: true
+# Directory for the diagnostic logs (only used when enable_logs is true).
+log_dir: "logs"
+
+# REQUIRED: training-time dataset_statistics.json (state q01/q99). The policy
+# expects q99-normalized state; the server does NOT normalize it. Point this at
+# the stats file belonging to the checkpoint the server is running.
+dataset_statistics_path: "/usr/share/EmbodiedAI/VLArmory/results/Checkpoints/xarm7_pi05_lora_merged/dataset_statistics.json"
+# Top-level key in dataset_statistics.json ("" = auto-pick when single key).
+state_stats_key: ""

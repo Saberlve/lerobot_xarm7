@@ -17,6 +17,7 @@ Keyboard controls (same as uf_lerobot_eval):
     Esc              : exit eval loop and disconnect
 """
 
+import json
 import logging
 import time
 from dataclasses import asdict, dataclass, field
@@ -61,11 +62,72 @@ class StarVLAEvalConfig:
     n_episodes: int = 50
     # Keys of the cameras in the robot observation dict.
     camera_keys: list[str] = field(default_factory=lambda: ["camera"])
+    # Master switch for the diagnostic CSV logs (steps + seams). When false,
+    # no log files are created regardless of log_dir.
+    enable_logs: bool = True
+    # Directory for 30 Hz state/action diagnostic logs and per-seam diffs
+    # (only used when enable_logs is true).
+    log_dir: str = "logs"
+    # Path to the training-time dataset_statistics.json. REQUIRED: the policy
+    # was trained on q99-normalized state (see the checkpoint's DataConfig),
+    # and the server does NOT normalize state -- the client must.
+    dataset_statistics_path: str = ""
+    # Top-level key in dataset_statistics.json ("" = auto-pick when single).
+    state_stats_key: str = ""
 
 
-def _build_state(obs: dict) -> np.ndarray:
-    """8-dim proprio state: 7 joint positions (rad) + gripper (0=open, 1=close)."""
-    return np.array([obs[f"J{i}.pos"] for i in range(1, 8)] + [obs["gripper.pos"]], dtype=np.float32)
+def _build_state(
+    obs: dict,
+    gripper_cmd: float | None,
+    state_q01: np.ndarray | None = None,
+    state_q99: np.ndarray | None = None,
+) -> np.ndarray:
+    """8-dim proprio state: 7 joint positions (rad) + gripper (0=open, 1=close).
+
+    GELLO recordings store the last *commanded* gripper value in the state
+    (see get_realtime_observation), not the measured position. Feeding the
+    measured position here would expose the policy to slow gripper ramps it
+    never saw in training, so the commanded value is preferred.
+
+    The policy was trained on q99-normalized state (training DataConfig:
+    ``state.joint_positions: "q99"``) and the server does NOT normalize state,
+    so the raw values are normalized here exactly like the training transform:
+    ``2 * (x - q01) / (q99 - q01) - 1``, clamped to [-2.2, 2.2].
+    """
+    gripper = obs["gripper.pos"] if gripper_cmd is None else gripper_cmd
+    raw = np.array([obs[f"J{i}.pos"] for i in range(1, 8)] + [gripper], dtype=np.float32)
+    if state_q01 is None:
+        return raw
+    mask = state_q01 != state_q99
+    normalized = raw.copy()
+    normalized[mask] = 2 * (raw[mask] - state_q01[mask]) / (state_q99[mask] - state_q01[mask]) - 1
+    return np.clip(normalized, -2.2, 2.2)
+
+
+def _load_state_norm_stats(path: str, key: str) -> tuple[np.ndarray, np.ndarray] | None:
+    """Load state q01/q99 arrays from the training-time dataset_statistics.json."""
+    if not path:
+        logging.warning(
+            "dataset_statistics_path not set -- sending RAW state to the policy. "
+            "The model was trained on q99-normalized state; this is almost "
+            "certainly wrong."
+        )
+        return None
+    with open(path) as f:
+        stats = json.load(f)
+    if not key:
+        if len(stats) != 1:
+            raise ValueError(
+                f"Multiple keys in {path}: {list(stats.keys())}. Set state_stats_key."
+            )
+        key = next(iter(stats))
+    state_stats = stats[key]["state"]
+    q01 = np.asarray(state_stats["q01"], dtype=np.float32)
+    q99 = np.asarray(state_stats["q99"], dtype=np.float32)
+    if q01.shape != (8,) or q99.shape != (8,):
+        raise ValueError(f"Expected 8-dim state stats, got {q01.shape} / {q99.shape}")
+    logging.info(f"State q99 normalization loaded from {path} (key={key})")
+    return q01, q99
 
 
 def _build_action_dict(action: np.ndarray) -> dict:
@@ -79,9 +141,68 @@ def _build_action_dict(action: np.ndarray) -> dict:
     return action_dict
 
 
+def _rt_joint_state(robot) -> list[float] | None:
+    """Latest joint positions from the 250 Hz RT report cache (non-blocking).
+
+    This is the same feedback source GELLO recordings use for the state, so
+    logging it at 30 Hz does not perturb the control loop. Returns None while
+    the report thread has not delivered the first packet.
+    """
+    if not getattr(robot, "_rt_report_normal", False):
+        return None
+    with robot._update_lock:
+        return list(robot.rt_actual_joint_pos)
+
+
+def _open_diagnostic_logs(log_dir: str):
+    """Open per-tick and per-seam diagnostic CSVs.
+
+    steps CSV: one row per 30 Hz control tick (RT state + sent action).
+    seams CSV: one row per re-inference (new_chunk[0] - last_executed_action).
+    """
+    if not log_dir:
+        return None, None, lambda: None
+    import csv
+    from pathlib import Path
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    step_file = (log_path / f"starvla_eval_{stamp}_steps.csv").open("w", newline="", buffering=1)
+    seam_file = (log_path / f"starvla_eval_{stamp}_seams.csv").open("w", newline="", buffering=1)
+    step_writer = csv.writer(step_file)
+    seam_writer = csv.writer(seam_file)
+    step_writer.writerow(
+        ["t_s", "episode", "chunk", "step_in_chunk"]
+        + [f"s{i}" for i in range(1, 8)]
+        + ["sg"]
+        + [f"a{i}" for i in range(1, 8)]
+        + ["ag"]
+    )
+    seam_writer.writerow(
+        ["t_s", "episode", "chunk", "inference_ms"]
+        + [f"d{i}" for i in range(1, 8)]
+        + ["dg"]
+        + [f"last{i}" for i in range(1, 8)]
+        + ["last_g"]
+        + [f"new{i}" for i in range(1, 8)]
+        + ["new_g"]
+    )
+    print(f"Diagnostic logs: {step_file.name}, {seam_file.name}")
+
+    def _close():
+        step_file.close()
+        seam_file.close()
+
+    return step_writer, seam_writer, _close
+
+
 def eval_loop(cfg: StarVLAEvalConfig):
     init_logging()
     logging.info(pformat(asdict(cfg)))
+
+    norm_stats = _load_state_norm_stats(cfg.dataset_statistics_path, cfg.state_stats_key)
+    state_q01, state_q99 = norm_stats if norm_stats is not None else (None, None)
 
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
@@ -117,6 +238,11 @@ def eval_loop(cfg: StarVLAEvalConfig):
 
     print("\n********** starVLA Policy Eval Episode Loop Start **********")
 
+    step_writer, seam_writer, close_logs = _open_diagnostic_logs(
+        cfg.log_dir if cfg.enable_logs else ""
+    )
+    run_start_t = time.perf_counter()
+
     try:
         episode = 0
         while episode < cfg.n_episodes and not events["exit"]:
@@ -126,6 +252,13 @@ def eval_loop(cfg: StarVLAEvalConfig):
                 reset = robot.configure
             reset()
             events["reset"] = False
+            # Gripper state fed to the policy: last command actually sent by
+            # send_action (mirrors the training state). None until the first
+            # command, in which case the measured position is used once.
+            gripper_cmd = None
+            current_actions = None
+            current_step = 0
+            chunk_index = -1
 
             while True:
                 if events["reset"] or events["exit"]:
@@ -133,37 +266,76 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     print("\n********** starVLA Policy Eval Episode (Reset) **********")
                     break
 
-                # Get robot observation
-                obs = robot.get_observation()
-                state = _build_state(obs)
-                images = [obs[key] for key in cfg.camera_keys]  # uint8 HWC RGB, in training order
+                if current_actions is None or current_step >= min(
+                    cfg.steps_per_inference, len(current_actions)
+                ):
+                    # Get robot observation
+                    obs = robot.get_observation()
+                    state = _build_state(obs, gripper_cmd, state_q01, state_q99)
+                    images = [obs[key] for key in cfg.camera_keys]  # uint8 HWC RGB, in training order
 
-                # NOTE: inference is blocking (one flow-matching pass can take
-                # several hundred ms) and no actions are sent while waiting.
-                # Mode 6 holds the last commanded online-trajectory target, so
-                # the arm simply pauses between action chunks.
-                resp = client.predict_action(
-                    {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
-                )
-                actions = np.asarray(resp["data"]["actions"][0])  # (T, 8), denormalized
+                    # NOTE: inference is blocking (one flow-matching pass can take
+                    # several hundred ms) and no actions are sent while waiting.
+                    # Mode 6 holds the last commanded online-trajectory target, so
+                    # the arm simply pauses between action chunks.
+                    infer_start_t = time.perf_counter()
+                    resp = client.predict_action(
+                        {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
+                    )
+                    inference_ms = (time.perf_counter() - infer_start_t) * 1000
+                    new_actions = np.asarray(resp["data"]["actions"][0])  # (T, 8), denormalized
 
-                # Execute the first N steps of the chunk, then re-infer.
-                for action in actions[: cfg.steps_per_inference]:
-                    if events["reset"] or events["exit"]:
-                        break
+                    # Seam diagnostic: how far the new chunk's first action
+                    # jumps from the last action actually executed.
+                    if seam_writer is not None and current_actions is not None and current_step > 0:
+                        last_executed = current_actions[current_step - 1]
+                        seam_writer.writerow(
+                            [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index + 1, f"{inference_ms:.1f}"]
+                            + [f"{v:.6f}" for v in (new_actions[0] - last_executed)]
+                            + [f"{v:.6f}" for v in last_executed]
+                            + [f"{v:.6f}" for v in new_actions[0]]
+                        )
+                    current_actions = new_actions
+                    current_step = 0
+                    chunk_index += 1
 
-                    start_loop_t = time.perf_counter()
-                    action_dict = _build_action_dict(action)
+                start_loop_t = time.perf_counter()
+                action = current_actions[current_step]
+                current_step += 1
 
-                    robot.send_action(action_dict)
+                robot.send_action(_build_action_dict(action))
 
-                    dt_s = time.perf_counter() - start_loop_t
-                    precise_sleep(sleep_time_s - dt_s)
+                # After send_action, _last_gripper_command holds the
+                # command that passed the robot-side threshold/rate
+                # coalescing -- exactly what GELLO recordings store as the
+                # gripper state. Fall back to the raw model output only
+                # before the first command is ever sent.
+                sent_gripper = getattr(robot, "_last_gripper_command", None)
+                if sent_gripper is not None:
+                    gripper_cmd = sent_gripper
+                elif gripper_cmd is None:
+                    gripper_cmd = float(action[7])
+
+                # 30 Hz state/action row. State comes from the RT report
+                # cache (same source as GELLO recordings), so this does not
+                # add any blocking controller reads to the control loop.
+                if step_writer is not None:
+                    joints = _rt_joint_state(robot) or [float("nan")] * 7
+                    step_writer.writerow(
+                        [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index, current_step - 1]
+                        + [f"{v:.6f}" for v in joints]
+                        + ["" if gripper_cmd is None else f"{gripper_cmd:.4f}"]
+                        + [f"{v:.6f}" for v in action]
+                    )
+
+                dt_s = time.perf_counter() - start_loop_t
+                precise_sleep(sleep_time_s - dt_s)
 
             episode += 1
 
     finally:
         print("\n********** starVLA Policy Eval Loop Exit **********")
+        close_logs()
         client.close()
         if robot.is_connected:
             robot.disconnect()
