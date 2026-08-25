@@ -6,6 +6,12 @@ dependency on the starVLA package itself.
 """
 
 from .rtc_policy_client_wrapper import RTCPolicyClientWrapper
+from .temporal_ensemble import TemporalEnsembleClientWrapper, TemporalEnsembler
 from .websocket_policy_client import WebsocketClientPolicy
 
-__all__ = ["RTCPolicyClientWrapper", "WebsocketClientPolicy"]
+__all__ = [
+    "RTCPolicyClientWrapper",
+    "TemporalEnsembleClientWrapper",
+    "TemporalEnsembler",
+    "WebsocketClientPolicy",
+]

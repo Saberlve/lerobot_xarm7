@@ -22,6 +22,12 @@ the next chunk is generated in the background while the robot executes the
 tail of the current one, and the server pins the new chunk's first
 `inference_delay` steps to the old chunk's tail, removing the pause at chunk
 boundaries. `rtc_mode: null` (or "none") keeps the default blocking loop.
+
+Temporal ensembling (TE): set `temporal_ensemble: true` to re-infer in the
+background every `steps_per_inference_te` steps and execute, at every control tick,
+the exponentially-weighted average of all action chunks covering the current
+step (ACT Algorithm 2, same weighting as lerobot's ACTTemporalEnsembler).
+Mutually exclusive with `rtc_mode`; `steps_per_inference` is ignored.
 """
 
 import json
@@ -49,7 +55,11 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging
 
-from lerobot_robot_ufactory.utils.starvla_ws_client import RTCPolicyClientWrapper, WebsocketClientPolicy
+from lerobot_robot_ufactory.utils.starvla_ws_client import (
+    RTCPolicyClientWrapper,
+    TemporalEnsembleClientWrapper,
+    WebsocketClientPolicy,
+)
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 
 
@@ -73,6 +83,24 @@ class StarVLAEvalConfig:
     # Steps the robot keeps executing from the old chunk while the next
     # inference runs
     inference_delay: int = 8
+    # --- Temporal ensembling (TE) ---
+    # Mutually exclusive with rtc_mode. When enabled, a background thread
+    # re-infers every `steps_per_inference_te` steps and every control tick executes
+    # the exponentially-weighted average of all chunks covering the current
+    # step (ACT Algorithm 2; mirrors lerobot's ACTTemporalEnsembler).
+    # `steps_per_inference` is ignored in this mode.
+    temporal_ensemble: bool = False
+    # Issue a new inference every N executed steps; with a 40-step chunk,
+    # N=10 keeps ~4 chunks overlapping in the ensemble.
+    steps_per_inference_te: int = 10
+    # Exponential weighting coefficient (lerobot/ACT naming + default):
+    # positive favors older chunks, 0 = uniform average, negative favors
+    # newer chunks.
+    temporal_ensemble_coeff: float = 0.01
+    # True: average the gripper dim like every other dim (lerobot behavior).
+    # False: always take the newest chunk's gripper value (avoids
+    # intermediate openings from averaging a 0/1-style command).
+    te_ensemble_gripper: bool = True
     single_task: str = "Pick up the white bar and drop it in the bag."
     n_episodes: int = 50
     # Keys of the cameras in the robot observation dict.
@@ -254,6 +282,39 @@ def eval_loop(cfg: StarVLAEvalConfig):
             f"execution_horizon={cfg.steps_per_inference} (fps={cfg.fps})"
         )
 
+    te = None
+    if cfg.temporal_ensemble:
+        if rtc is not None:
+            raise ValueError(
+                "temporal_ensemble and rtc_mode are mutually exclusive: TE does "
+                "its own cross-chunk averaging, so RTC prefix pinning is "
+                "redundant. Set rtc_mode to null/none."
+            )
+        action_horizon = server_meta.get("action_chunk_size")
+        if not isinstance(action_horizon, int) or action_horizon < 1:
+            raise ValueError(
+                f"temporal_ensemble needs a positive integer action_chunk_size "
+                f"in the server metadata, got {action_horizon!r}."
+            )
+        if cfg.steps_per_inference_te >= action_horizon:
+            raise ValueError(
+                f"steps_per_inference_te ({cfg.steps_per_inference_te}) must be smaller than "
+                f"the action chunk size ({action_horizon}) so chunks overlap."
+            )
+        te = TemporalEnsembleClientWrapper(
+            client,
+            query_period=cfg.steps_per_inference_te,
+            action_horizon=action_horizon,
+            coeff=cfg.temporal_ensemble_coeff,
+            ensemble_gripper=cfg.te_ensemble_gripper,
+        )
+        logging.info(
+            f"Temporal ensembling enabled: steps_per_inference_te={cfg.steps_per_inference_te} "
+            f"coeff={cfg.temporal_ensemble_coeff} horizon={action_horizon} "
+            f"ensemble_gripper={cfg.te_ensemble_gripper} (fps={cfg.fps}; "
+            f"steps_per_inference is ignored)"
+        )
+
     events = {"reset": False, "exit": False}
     listener = None
 
@@ -304,6 +365,8 @@ def eval_loop(cfg: StarVLAEvalConfig):
             last_action = None
             if rtc is not None:
                 rtc.reset()  # drop server-side prev chunk + local chunk state
+            if te is not None:
+                te.reset()  # drop ensemble buffer + server-side policy state
 
             while True:
                 if events["reset"] or events["exit"]:
@@ -327,6 +390,30 @@ def eval_loop(cfg: StarVLAEvalConfig):
                         if seam_writer is not None and last_action is not None:
                             seam_writer.writerow(
                                 [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index, f"{rtc.last_inference_ms:.1f}"]
+                                + [f"{v:.6f}" for v in (action - last_action)]
+                                + [f"{v:.6f}" for v in last_action]
+                                + [f"{v:.6f}" for v in action]
+                            )
+                    last_action = action
+                    start_loop_t = time.perf_counter()
+                elif te is not None:
+                    # TE: fresh observation every tick; the wrapper re-infers
+                    # in the background every steps_per_inference_te steps and returns
+                    # the temporally-ensembled action for this tick.
+                    obs = robot.get_observation()
+                    state = _build_state(obs, gripper_cmd, state_q01, state_q99)
+                    images = [obs[key] for key in cfg.camera_keys]
+                    query = {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
+                    prev_chunk_index = te.chunk_index
+                    action = te.get_action(query)
+                    current_step += 1
+                    # Seam diagnostic: one row per newly merged chunk, with the
+                    # jump between consecutive ensembled actions.
+                    if te.chunk_index != prev_chunk_index:
+                        chunk_index = te.chunk_index
+                        if seam_writer is not None and last_action is not None:
+                            seam_writer.writerow(
+                                [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index, f"{te.last_inference_ms:.1f}"]
                                 + [f"{v:.6f}" for v in (action - last_action)]
                                 + [f"{v:.6f}" for v in last_action]
                                 + [f"{v:.6f}" for v in action]
@@ -366,7 +453,7 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     current_step = 0
                     chunk_index += 1
 
-                if rtc is None:
+                if rtc is None and te is None:
                     start_loop_t = time.perf_counter()
                     action = current_actions[current_step]
                     current_step += 1
