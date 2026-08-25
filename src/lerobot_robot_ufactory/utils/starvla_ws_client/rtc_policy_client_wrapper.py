@@ -140,12 +140,21 @@ class RTCPolicyClientWrapper:
         n = len(self._chunk)
         return min(self._exec_horizon, n) if self._exec_horizon else n
 
-    def _infer(self, query_info: Dict) -> Dict:
-        """One inference round-trip (blocking)."""
+    def _infer(self, query_info: Dict, prev_chunk_offset: int = 0) -> Dict:
+        """One inference round-trip (blocking).
+
+        ``prev_chunk_offset`` tells the server how many steps of the chunk it
+        tracks had already been executed when this request's observation was
+        captured, so the prefix is pinned to the old chunk's *tail* (the
+        not-yet-executed steps) instead of its head.
+        """
         start = time.perf_counter()
         if self._rtc_enabled:
             resp = self._client.predict_action_realtime(
-                query_info, inference_delay=self._delay, **self._rtc_kwargs
+                query_info,
+                inference_delay=self._delay,
+                prev_chunk_offset=prev_chunk_offset,
+                **self._rtc_kwargs,
             )
         else:
             resp = self._client.predict_action(query_info)
@@ -165,9 +174,9 @@ class RTCPolicyClientWrapper:
         self._step = int(splice_offset)
         self.chunk_index += 1
 
-    def _fresh_infer(self, query_info: Dict) -> None:
+    def _fresh_infer(self, query_info: Dict, prev_chunk_offset: int = 0) -> None:
         """Blocking inference used when there is nothing left to execute."""
-        self._apply_result(self._infer(query_info), splice_offset=0)
+        self._apply_result(self._infer(query_info, prev_chunk_offset), splice_offset=0)
         if self._step >= self._exec_len():
             raise RuntimeError("RTC client received an empty action chunk.")
 
@@ -181,7 +190,7 @@ class RTCPolicyClientWrapper:
 
         def worker():
             try:
-                box["result"] = self._infer(query_info)
+                box["result"] = self._infer(query_info, prev_chunk_offset=self._step)
             except Exception as e:  # surfaced on the main thread at collect time
                 box["error"] = e
 
@@ -217,4 +226,6 @@ class RTCPolicyClientWrapper:
             return
         # Prefetch was too slow to cover the gap (or was never started):
         # fall back to a blocking inference from the current observation.
-        self._fresh_infer(query_info)
+        # The robot stalls during this round-trip, so the new chunk still
+        # starts at old-chunk index `self._step`.
+        self._fresh_infer(query_info, prev_chunk_offset=self._step)

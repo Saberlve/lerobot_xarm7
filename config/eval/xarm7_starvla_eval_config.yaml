@@ -57,8 +57,8 @@ fps: 30
 # N=1 means fully closed-loop (re-infer every step).
 steps_per_inference: 20
 #  null/none or prefix_pin
-rtc_mode: null
-inference_delay: 5
+rtc_mode: none
+inference_delay: 4
 
 # Temporal ensembling (TE): mutually exclusive with rtc_mode. 
 temporal_ensemble: true
