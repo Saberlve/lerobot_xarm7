@@ -8,7 +8,7 @@ robot:
   gripper_type: 2
   enable_logs: false
   # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
-  gripper_speed: 50
+  gripper_speed: 200
   # Use the high-frequency servo interface for lower-latency GELLO tracking.
   joint_command_mode: 6
   max_joint_velocity: 120
@@ -49,7 +49,7 @@ teleop:
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
   gripper_id: 8
   # Gripper input: "gello" or keyboard C/O hold control.
-  gripper_control_mode: keyboard
+  gripper_control_mode: gello
   # Gripper move per keyboard C/O tap, in mm of the G2 stroke.
   gripper_keyboard_step_mm: 2.0
   # Hold C/O for this long (seconds) before continuous open/close starts.
@@ -70,8 +70,8 @@ web_preview:
 
 dataset:
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_test"
-  repo_id: "ufactory/xarm7_gello_test"
+  root: "datasets/xarm7_gello_pick_ball"
+  repo_id: "ufactory/xarm7_gello_pick_ball"
   single_task: "Test episode for GELLO control."
   # Cameras and the independent GELLO control loop run at 30 Hz.
   fps: 30
