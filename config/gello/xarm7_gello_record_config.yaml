@@ -55,6 +55,10 @@ teleop:
   gripper_control_mode: gello
   gripper_open_deg: 198.28125
   gripper_close_deg: 155.75
+  # Phase 2: ID8 current output is opt-in and still requires an explicit API call.
+  gripper_current_control_enabled: false
+  # Keep null while disabled. Hardware tests must set a conservative value (<=100 mA).
+  gripper_current_limit_ma: null
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are

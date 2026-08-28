@@ -48,6 +48,7 @@ uf-realsense-view = "lerobot_robot_ufactory.scripts.uf_realsense_view:main"
 uf-camera-test = "lerobot_robot_ufactory.scripts.uf_camera_test:main"
 uf-read-tcp-z = "lerobot_robot_ufactory.scripts.uf_read_tcp_z:main"
 uf-read-g2-current = "lerobot_robot_ufactory.scripts.uf_read_g2_current:main"
+uf-test-gello-gripper-current = "lerobot_robot_ufactory.scripts.uf_test_gello_gripper_current:main"
 
 [project.optional-dependencies]
 # GELLO 遥操作

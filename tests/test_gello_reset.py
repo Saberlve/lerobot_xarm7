@@ -31,9 +31,13 @@ class FakeGelloRobot:
         self.gripper_open_close = (0.0, 1.0)
         self._last_pos = object()
         self.torque_calls = []
+        self.current_disable_calls = 0
 
     def set_torque_mode(self, enabled):
         self.torque_calls.append(enabled)
+
+    def disable_gripper_current_mode(self):
+        self.current_disable_calls += 1
 
 
 def make_teleop(robot, align_gripper_to_current=True):
@@ -57,6 +61,7 @@ def test_gello_alignment_maps_current_pose_without_moving():
     )
 
     assert robot.torque_calls == [False]
+    assert robot.current_disable_calls == 1
     assert robot._driver.commands == []
     assert np.allclose(robot._joint_offsets[:2], [0.4, -0.6])
     assert np.allclose(robot.gripper_open_close, [1.0, 2.0])
@@ -130,6 +135,7 @@ def test_gello_enable_after_pause_realigns_current_pose_before_output():
     assert np.allclose(robot._joint_offsets[:2], [0.9, 0.7])
     assert np.allclose(robot.gripper_open_close, [1.55, 2.55])
     assert robot._driver.commands == []
+    assert robot.current_disable_calls == 3
 
 
 def test_gello_disconnect_closes_driver():
@@ -141,6 +147,7 @@ def test_gello_disconnect_closes_driver():
 
     assert closed == [True]
     assert robot.torque_calls == [False]
+    assert robot.current_disable_calls == 1
     assert teleop._is_connected is False
 
 

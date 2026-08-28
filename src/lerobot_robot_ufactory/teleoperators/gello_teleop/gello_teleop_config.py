@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
+
 from lerobot.teleoperators import TeleoperatorConfig
 
 
@@ -26,6 +28,12 @@ class GelloTeleopConfig(TeleoperatorConfig):
     gripper_open_deg: Optional[float] = None
     gripper_close_deg: Optional[float] = None
     gripper_control_mode: str = "gello"
+    # Phase 2 authorization switch. This does not enable current mode during
+    # connect; callers must still explicitly call enable_gripper_current_mode().
+    gripper_current_control_enabled: bool = False
+    # Required when current control is authorized. The adapter also enforces an
+    # independent hard ceiling of 100 mA and checks ID8's hardware Current Limit.
+    gripper_current_limit_ma: Optional[float] = None
     # Keyboard gripper: distance closed/opened per quick tap of C/O (mm).
     # Must be > 0; Recommended >= 2 mm.
     gripper_keyboard_step_mm: float = 5.0
@@ -48,6 +56,27 @@ class GelloTeleopConfig(TeleoperatorConfig):
             raise ValueError("gripper_open_deg and gripper_close_deg must be set together")
         if self.gripper_control_mode not in ("gello", "keyboard"):
             raise ValueError("gripper_control_mode must be 'gello' or 'keyboard'")
+        if self.gripper_current_limit_ma is not None:
+            if (
+                isinstance(self.gripper_current_limit_ma, bool)
+                or not isinstance(self.gripper_current_limit_ma, (int, float))
+                or not math.isfinite(self.gripper_current_limit_ma)
+                or self.gripper_current_limit_ma <= 0
+                or self.gripper_current_limit_ma > 100.0
+            ):
+                raise ValueError(
+                    "gripper_current_limit_ma must be finite, positive, and no greater than 100 mA"
+                )
+        if self.gripper_current_control_enabled:
+            if self.gripper_id != 8:
+                raise ValueError("gripper current control is restricted to gripper_id 8")
+            if 8 in self.joint_ids:
+                raise ValueError("Dynamixel ID8 must not be included in joint_ids")
+            if self.gripper_current_limit_ma is None:
+                raise ValueError(
+                    "gripper_current_limit_ma must be explicitly configured "
+                    "before enabling current control"
+                )
         if self.gripper_keyboard_step_mm <= 0:
             raise ValueError("gripper_keyboard_step_mm must be positive")
         if self.gripper_keyboard_hold_delay_s < 0:

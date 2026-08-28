@@ -45,6 +45,23 @@ def test_gello_gripper_control_mode_is_validated():
         GelloTeleopConfig(gripper_control_mode="invalid")
 
 
+def test_gello_current_control_is_default_off_and_requires_a_safe_explicit_limit():
+    config = GelloTeleopConfig()
+    assert config.gripper_current_control_enabled is False
+    assert config.gripper_current_limit_ma is None
+
+    with pytest.raises(ValueError, match="explicitly configured"):
+        GelloTeleopConfig(gripper_current_control_enabled=True)
+    with pytest.raises(ValueError, match="no greater than 100"):
+        GelloTeleopConfig(gripper_current_limit_ma=101.0)
+    with pytest.raises(ValueError, match="gripper_id 8"):
+        GelloTeleopConfig(
+            gripper_id=7,
+            gripper_current_control_enabled=True,
+            gripper_current_limit_ma=20.0,
+        )
+
+
 def test_gello_keyboard_gripper_config_is_validated():
     with pytest.raises(ValueError, match="gripper_keyboard_step_mm"):
         GelloTeleopConfig(gripper_keyboard_step_mm=0.0)

@@ -5,7 +5,7 @@ import time
 import numpy as np
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from ..base_teleop import UFBaseTeleop
-from .gello_adapter import PatchedDynamixelRobotConfig
+from .gello_adapter import GripperDynamixelInfo, PatchedDynamixelRobotConfig
 from .gello_teleop_config import GelloTeleopConfig
 
 
@@ -125,12 +125,61 @@ class GelloTeleop(UFBaseTeleop):
         # TODO: Go to sync position slowly? Can not 
         pass
 
+    def probe_gripper_dynamixel(self) -> GripperDynamixelInfo:
+        if not self._is_connected:
+            raise DeviceNotConnectedError("Gello teleop is not connected")
+        return self.gello_agent._robot.probe_gripper_dynamixel()
+
+    def enable_gripper_current_mode(self) -> GripperDynamixelInfo:
+        """Enable manually commanded Current Control Mode on GELLO ID8 only."""
+        if not self._is_connected:
+            raise DeviceNotConnectedError("Gello teleop is not connected")
+        if not self.config.gripper_current_control_enabled:
+            raise RuntimeError("gripper current control is disabled by configuration")
+        current_limit_ma = self.config.gripper_current_limit_ma
+        if current_limit_ma is None:
+            raise RuntimeError("gripper_current_limit_ma is not configured")
+        return self.gello_agent._robot.enable_gripper_current_mode(current_limit_ma)
+
+    def write_gripper_current_ma(self, current_ma: float) -> float:
+        """Write a signed, safety-clamped manual current command to ID8."""
+        if not self._is_connected:
+            raise DeviceNotConnectedError("Gello teleop is not connected")
+        if not self.config.gripper_current_control_enabled:
+            raise RuntimeError("gripper current control is disabled by configuration")
+        return self.gello_agent._robot.write_gripper_current_ma(current_ma)
+
+    def zero_gripper_current(self) -> None:
+        if not self._is_connected:
+            raise DeviceNotConnectedError("Gello teleop is not connected")
+        self.gello_agent._robot.zero_gripper_current()
+
+    def disable_gripper_current_mode(self) -> None:
+        if not self._is_connected:
+            raise DeviceNotConnectedError("Gello teleop is not connected")
+        self.gello_agent._robot.disable_gripper_current_mode()
+
+    def _safely_disable_gripper_current_mode(self, context: str) -> None:
+        if not hasattr(self, "gello_agent"):
+            return
+        gello_robot = self.gello_agent._robot
+        if not hasattr(gello_robot, "disable_gripper_current_mode"):
+            return
+        try:
+            gello_robot.disable_gripper_current_mode()
+        except Exception:
+            # The driver has already attempted Goal Current=0 and torque disable.
+            logger.exception(
+                "Failed to cleanly disable GELLO ID8 current mode during %s", context
+            )
+
     def reset_to_robot_observation(self, obs):
         """Map the current passive GELLO pose to the robot's current pose."""
         if not self._is_connected:
             raise DeviceNotConnectedError("Gello teleop is not connected")
 
         self._teleop_enabled = False
+        self._safely_disable_gripper_current_mode("reset")
         gello_robot = self.gello_agent._robot
         driver = gello_robot._driver
         gello_robot.set_torque_mode(False)
@@ -177,6 +226,7 @@ class GelloTeleop(UFBaseTeleop):
                 raise ValueError("Robot observation is required to enable GELLO teleoperation")
             self.reset_to_robot_observation(obs)
         if not enabled and self._is_connected and hasattr(self, "gello_agent"):
+            self._safely_disable_gripper_current_mode("pause")
             self.gello_agent._robot.set_torque_mode(False)
             self._needs_alignment = True
         self._teleop_enabled = enabled
@@ -265,6 +315,7 @@ class GelloTeleop(UFBaseTeleop):
             return
         gello_robot = self.gello_agent._robot
         try:
+            self._safely_disable_gripper_current_mode("disconnect")
             gello_robot.set_torque_mode(False)
         finally:
             gello_robot._driver.close()
