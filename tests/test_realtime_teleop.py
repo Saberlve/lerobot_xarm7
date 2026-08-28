@@ -76,26 +76,55 @@ def test_gello_force_feedback_is_default_off_and_requires_explicit_mapping():
         gripper_current_control_enabled=True,
         gripper_current_limit_ma=20.0,
         gripper_force_feedback_enabled=True,
+        gripper_feedback_bias_ma=0.0,
+        gripper_feedback_deadzone_ma=10.0,
+        gripper_feedback_input_limit_ma=1000.0,
+        gripper_feedback_ema_beta=0.5,
         gripper_feedback_gain=0.01,
         gripper_feedback_output_sign=-1,
+        gripper_feedback_output_limit_ma=10.0,
+        gripper_feedback_slew_rate_ma_s=50.0,
+        gripper_feedback_timeout_s=0.2,
     )
     assert enabled.gripper_force_feedback_enabled is True
 
     with pytest.raises(ValueError, match="current_control_enabled"):
         GelloTeleopConfig(
             gripper_force_feedback_enabled=True,
-            gripper_feedback_gain=0.01,
-            gripper_feedback_output_sign=1,
         )
-    with pytest.raises(ValueError, match="explicitly configured"):
+    with pytest.raises(ValueError, match="requires explicit configuration"):
         GelloTeleopConfig(
             gripper_current_control_enabled=True,
             gripper_current_limit_ma=20.0,
             gripper_force_feedback_enabled=True,
-            gripper_feedback_output_sign=1,
         )
     with pytest.raises(ValueError, match="either -1 or 1"):
         GelloTeleopConfig(gripper_feedback_output_sign=True)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("gripper_feedback_deadzone_ma", -1.0, "non-negative"),
+        ("gripper_feedback_input_limit_ma", 0.0, "positive"),
+        ("gripper_feedback_ema_beta", 1.0, r"\[0, 1\)"),
+        ("gripper_feedback_gain", -0.1, "non-negative"),
+        ("gripper_feedback_output_limit_ma", 0.0, "positive"),
+        ("gripper_feedback_slew_rate_ma_s", 0.0, "positive"),
+        ("gripper_feedback_timeout_s", 0.0, "positive"),
+    ],
+)
+def test_gello_force_feedback_conditioning_config_is_validated(field, value, message):
+    with pytest.raises(ValueError, match=message):
+        GelloTeleopConfig(**{field: value})
+
+
+def test_feedback_output_limit_cannot_exceed_phase2_limit():
+    with pytest.raises(ValueError, match="cannot exceed"):
+        GelloTeleopConfig(
+            gripper_current_limit_ma=20.0,
+            gripper_feedback_output_limit_ma=21.0,
+        )
 
 
 def test_gello_keyboard_gripper_config_is_validated():
@@ -271,6 +300,8 @@ def _current_sample(
     stale=False,
     reason="fresh",
     error=None,
+    age_s=0.01,
+    gripper_state=2,
 ):
     return SimpleNamespace(
         current_ma=current_ma,
@@ -278,6 +309,8 @@ def _current_sample(
         stale=stale,
         reason=reason,
         error=error,
+        age_s=age_s,
+        gripper_state=gripper_state,
     )
 
 
@@ -323,9 +356,16 @@ class FeedbackTeleop(FakeTeleop):
         super().__init__()
         self.config = SimpleNamespace(
             gripper_force_feedback_enabled=enabled,
+            gripper_feedback_bias_ma=0.0,
+            gripper_feedback_deadzone_ma=0.0,
+            gripper_feedback_input_limit_ma=1000.0,
+            gripper_feedback_ema_beta=0.0,
             gripper_feedback_gain=0.1,
             gripper_feedback_output_sign=-1,
             gripper_current_limit_ma=20.0,
+            gripper_feedback_output_limit_ma=20.0,
+            gripper_feedback_slew_rate_ma_s=10000.0,
+            gripper_feedback_timeout_s=0.25,
         )
         self.fail_feedback = fail_feedback
         self.fail_start = fail_start

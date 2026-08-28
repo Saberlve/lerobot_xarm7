@@ -34,11 +34,19 @@ class GelloTeleopConfig(TeleoperatorConfig):
     # Required when current control is authorized. The adapter also enforces an
     # independent hard ceiling of 100 mA and checks ID8's hardware Current Limit.
     gripper_current_limit_ma: Optional[float] = None
-    # Phase 3: bridge the cached xArm G2 current to GELLO ID8. The existing
-    # Phase 2 current limit is reused as the mapped output limit.
+    # Phase 4 conditioned feedback. Every signal/safety parameter remains None
+    # while disabled and must be explicitly configured before enabling.
     gripper_force_feedback_enabled: bool = False
+    gripper_feedback_bias_ma: Optional[float] = None
+    gripper_feedback_deadzone_ma: Optional[float] = None
+    gripper_feedback_input_limit_ma: Optional[float] = None
+    gripper_feedback_ema_beta: Optional[float] = None
     gripper_feedback_gain: Optional[float] = None
     gripper_feedback_output_sign: Optional[int] = None
+    # Operational haptic clamp. It must not exceed the Phase 2 ID8 limit above.
+    gripper_feedback_output_limit_ma: Optional[float] = None
+    gripper_feedback_slew_rate_ma_s: Optional[float] = None
+    gripper_feedback_timeout_s: Optional[float] = None
     # Keyboard gripper: distance closed/opened per quick tap of C/O (mm).
     # Must be > 0; Recommended >= 2 mm.
     gripper_keyboard_step_mm: float = 5.0
@@ -82,6 +90,43 @@ class GelloTeleopConfig(TeleoperatorConfig):
                     "gripper_current_limit_ma must be explicitly configured "
                     "before enabling current control"
                 )
+        if self.gripper_feedback_bias_ma is not None:
+            if (
+                isinstance(self.gripper_feedback_bias_ma, bool)
+                or not isinstance(self.gripper_feedback_bias_ma, (int, float))
+                or not math.isfinite(self.gripper_feedback_bias_ma)
+            ):
+                raise ValueError("gripper_feedback_bias_ma must be finite")
+        if self.gripper_feedback_deadzone_ma is not None:
+            if (
+                isinstance(self.gripper_feedback_deadzone_ma, bool)
+                or not isinstance(self.gripper_feedback_deadzone_ma, (int, float))
+                or not math.isfinite(self.gripper_feedback_deadzone_ma)
+                or self.gripper_feedback_deadzone_ma < 0
+            ):
+                raise ValueError(
+                    "gripper_feedback_deadzone_ma must be finite and non-negative"
+                )
+        if self.gripper_feedback_input_limit_ma is not None:
+            if (
+                isinstance(self.gripper_feedback_input_limit_ma, bool)
+                or not isinstance(self.gripper_feedback_input_limit_ma, (int, float))
+                or not math.isfinite(self.gripper_feedback_input_limit_ma)
+                or self.gripper_feedback_input_limit_ma <= 0
+            ):
+                raise ValueError(
+                    "gripper_feedback_input_limit_ma must be finite and positive"
+                )
+        if self.gripper_feedback_ema_beta is not None:
+            if (
+                isinstance(self.gripper_feedback_ema_beta, bool)
+                or not isinstance(self.gripper_feedback_ema_beta, (int, float))
+                or not math.isfinite(self.gripper_feedback_ema_beta)
+                or not 0 <= self.gripper_feedback_ema_beta < 1
+            ):
+                raise ValueError(
+                    "gripper_feedback_ema_beta must be finite and in [0, 1)"
+                )
         if self.gripper_feedback_gain is not None:
             if (
                 isinstance(self.gripper_feedback_gain, bool)
@@ -98,20 +143,69 @@ class GelloTeleopConfig(TeleoperatorConfig):
             )
         ):
             raise ValueError("gripper_feedback_output_sign must be either -1 or 1")
+        if self.gripper_feedback_output_limit_ma is not None:
+            if (
+                isinstance(self.gripper_feedback_output_limit_ma, bool)
+                or not isinstance(self.gripper_feedback_output_limit_ma, (int, float))
+                or not math.isfinite(self.gripper_feedback_output_limit_ma)
+                or self.gripper_feedback_output_limit_ma <= 0
+            ):
+                raise ValueError(
+                    "gripper_feedback_output_limit_ma must be finite and positive"
+                )
+            if (
+                self.gripper_current_limit_ma is not None
+                and self.gripper_feedback_output_limit_ma
+                > self.gripper_current_limit_ma
+            ):
+                raise ValueError(
+                    "gripper_feedback_output_limit_ma cannot exceed "
+                    "gripper_current_limit_ma"
+                )
+        if self.gripper_feedback_slew_rate_ma_s is not None:
+            if (
+                isinstance(self.gripper_feedback_slew_rate_ma_s, bool)
+                or not isinstance(self.gripper_feedback_slew_rate_ma_s, (int, float))
+                or not math.isfinite(self.gripper_feedback_slew_rate_ma_s)
+                or self.gripper_feedback_slew_rate_ma_s <= 0
+            ):
+                raise ValueError(
+                    "gripper_feedback_slew_rate_ma_s must be finite and positive"
+                )
+        if self.gripper_feedback_timeout_s is not None:
+            if (
+                isinstance(self.gripper_feedback_timeout_s, bool)
+                or not isinstance(self.gripper_feedback_timeout_s, (int, float))
+                or not math.isfinite(self.gripper_feedback_timeout_s)
+                or self.gripper_feedback_timeout_s <= 0
+            ):
+                raise ValueError(
+                    "gripper_feedback_timeout_s must be finite and positive"
+                )
         if self.gripper_force_feedback_enabled:
             if not self.gripper_current_control_enabled:
                 raise ValueError(
                     "gripper_current_control_enabled must be true when force feedback "
                     "is enabled"
                 )
-            if self.gripper_feedback_gain is None:
+            required_feedback_fields = (
+                "gripper_feedback_bias_ma",
+                "gripper_feedback_deadzone_ma",
+                "gripper_feedback_input_limit_ma",
+                "gripper_feedback_ema_beta",
+                "gripper_feedback_gain",
+                "gripper_feedback_output_sign",
+                "gripper_feedback_output_limit_ma",
+                "gripper_feedback_slew_rate_ma_s",
+                "gripper_feedback_timeout_s",
+            )
+            missing = [
+                name for name in required_feedback_fields if getattr(self, name) is None
+            ]
+            if missing:
                 raise ValueError(
-                    "gripper_feedback_gain must be explicitly configured when force "
-                    "feedback is enabled"
-                )
-            if self.gripper_feedback_output_sign is None:
-                raise ValueError(
-                    "gripper_feedback_output_sign must be explicitly configured when force feedback is enabled"
+                    "force feedback requires explicit configuration for: "
+                    + ", ".join(missing)
                 )
         if self.gripper_keyboard_step_mm <= 0:
             raise ValueError("gripper_keyboard_step_mm must be positive")

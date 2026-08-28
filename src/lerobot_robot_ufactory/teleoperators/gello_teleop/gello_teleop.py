@@ -12,7 +12,6 @@ from .gello_teleop_config import GelloTeleopConfig
 
 logger = logging.getLogger(__name__)
 GRIPPER_CURRENT_FEEDBACK_KEY = "gripper.current_ma"
-FEEDBACK_COMMAND_WATCHDOG_S = 0.1
 
 class GelloTeleop(UFBaseTeleop):
     """
@@ -178,6 +177,8 @@ class GelloTeleop(UFBaseTeleop):
             return None
         if not self._is_connected:
             raise DeviceNotConnectedError("Gello teleop is not connected")
+        if self.config.gripper_feedback_timeout_s is None:
+            raise RuntimeError("gripper_feedback_timeout_s is not configured")
         with self._feedback_lock:
             if self._feedback_output_active:
                 return None
@@ -211,7 +212,7 @@ class GelloTeleop(UFBaseTeleop):
     def _feedback_output_loop(self) -> None:
         last_written_ma = 0.0
         while True:
-            self._feedback_event.wait(timeout=FEEDBACK_COMMAND_WATCHDOG_S)
+            self._feedback_event.wait(timeout=self.config.gripper_feedback_timeout_s)
             with self._feedback_lock:
                 command_ready = self._feedback_event.is_set()
                 self._feedback_event.clear()
@@ -445,10 +446,12 @@ class GelloTeleop(UFBaseTeleop):
         if not math.isfinite(current_ma):
             current_ma = 0.0
 
-        limit_ma = self.config.gripper_current_limit_ma
-        if limit_ma is None:
+        phase2_limit_ma = self.config.gripper_current_limit_ma
+        feedback_limit_ma = self.config.gripper_feedback_output_limit_ma
+        if phase2_limit_ma is None or feedback_limit_ma is None:
             current_ma = 0.0
         else:
+            limit_ma = min(phase2_limit_ma, feedback_limit_ma)
             current_ma = max(-limit_ma, min(limit_ma, current_ma))
         with self._feedback_lock:
             if not self._feedback_output_active:

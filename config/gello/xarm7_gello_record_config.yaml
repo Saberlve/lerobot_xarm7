@@ -59,11 +59,19 @@ teleop:
   gripper_current_control_enabled: false
   # Keep null while disabled. Hardware tests must set a conservative value (<=100 mA).
   gripper_current_limit_ma: null
-  # Phase 3 force feedback remains fully opt-in. The Phase 2 current limit above
-  # is reused as the mapped feedback output limit.
+  # Phase 4 conditioned feedback remains fully opt-in. Every value below must
+  # be measured/chosen explicitly before setting enabled=true.
   gripper_force_feedback_enabled: false
+  gripper_feedback_bias_ma: null
+  gripper_feedback_deadzone_ma: null
+  gripper_feedback_input_limit_ma: null
+  gripper_feedback_ema_beta: null
   gripper_feedback_gain: null
   gripper_feedback_output_sign: null
+  # Must be <= gripper_current_limit_ma (the Phase 2 safety ceiling).
+  gripper_feedback_output_limit_ma: null
+  gripper_feedback_slew_rate_ma_s: null
+  gripper_feedback_timeout_s: null
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are

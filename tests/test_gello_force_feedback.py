@@ -36,13 +36,20 @@ class FakeGripperCurrentRobot:
         self.calls.append(("disable",))
 
 
-def make_feedback_teleop(*, enabled=True):
+def make_feedback_teleop(*, enabled=True, timeout_s=0.1):
     config = GelloTeleopConfig(
         gripper_current_control_enabled=enabled,
         gripper_current_limit_ma=20.0 if enabled else None,
         gripper_force_feedback_enabled=enabled,
+        gripper_feedback_bias_ma=0.0 if enabled else None,
+        gripper_feedback_deadzone_ma=0.0 if enabled else None,
+        gripper_feedback_input_limit_ma=1000.0 if enabled else None,
+        gripper_feedback_ema_beta=0.0 if enabled else None,
         gripper_feedback_gain=0.01 if enabled else None,
         gripper_feedback_output_sign=1 if enabled else None,
+        gripper_feedback_output_limit_ma=20.0 if enabled else None,
+        gripper_feedback_slew_rate_ma_s=100.0 if enabled else None,
+        gripper_feedback_timeout_s=timeout_s if enabled else None,
     )
     teleop = GelloTeleop(config)
     robot = FakeGripperCurrentRobot()
@@ -100,11 +107,8 @@ def test_feedback_write_failure_zeros_and_disables_id8():
     assert robot.calls[-2:] == [("zero",), ("disable",)]
 
 
-def test_feedback_command_watchdog_does_not_hold_last_nonzero(monkeypatch):
-    import lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop as gello_module
-
-    monkeypatch.setattr(gello_module, "FEEDBACK_COMMAND_WATCHDOG_S", 0.02)
-    teleop, robot = make_feedback_teleop()
+def test_feedback_command_watchdog_does_not_hold_last_nonzero():
+    teleop, robot = make_feedback_teleop(timeout_s=0.02)
     teleop.start_feedback()
     teleop.send_feedback({GRIPPER_CURRENT_FEEDBACK_KEY: 10.0})
     assert robot.write_seen.wait(timeout=1.0)
