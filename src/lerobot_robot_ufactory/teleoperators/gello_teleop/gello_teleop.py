@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import logging
+import math
 import threading
 import time
 import numpy as np
@@ -10,6 +11,8 @@ from .gello_teleop_config import GelloTeleopConfig
 
 
 logger = logging.getLogger(__name__)
+GRIPPER_CURRENT_FEEDBACK_KEY = "gripper.current_ma"
+FEEDBACK_COMMAND_WATCHDOG_S = 0.1
 
 class GelloTeleop(UFBaseTeleop):
     """
@@ -34,6 +37,15 @@ class GelloTeleop(UFBaseTeleop):
         self._keyboard_gripper_lock = threading.Lock()
         self._keyboard_press_time = {"close": None, "open": None}
         self._keyboard_step_pending = {"close": False, "open": False}
+        # The realtime controller only publishes the latest current target to
+        # this in-memory slot. Dynamixel I/O stays on the worker thread.
+        self._feedback_lock = threading.Lock()
+        self._feedback_event = threading.Event()
+        self._feedback_stop = threading.Event()
+        self._feedback_thread = None
+        self._feedback_pending_ma = 0.0
+        self._feedback_output_active = False
+        self._feedback_output_error = None
 
         joint_offsets = [0.0] * len(self.config.joint_ids)
         self._align_gripper_to_current = self.config.gripper_open_deg is None
@@ -157,7 +169,113 @@ class GelloTeleop(UFBaseTeleop):
     def disable_gripper_current_mode(self) -> None:
         if not self._is_connected:
             raise DeviceNotConnectedError("Gello teleop is not connected")
+        self._stop_feedback_worker()
         self.gello_agent._robot.disable_gripper_current_mode()
+
+    def start_feedback(self) -> GripperDynamixelInfo | None:
+        """Enable ID8 current mode and start the non-blocking output worker."""
+        if not self.config.gripper_force_feedback_enabled:
+            return None
+        if not self._is_connected:
+            raise DeviceNotConnectedError("Gello teleop is not connected")
+        with self._feedback_lock:
+            if self._feedback_output_active:
+                return None
+
+        info = self.enable_gripper_current_mode()
+        worker = threading.Thread(
+            target=self._feedback_output_loop,
+            name="gello-id8-current-feedback",
+            daemon=True,
+        )
+        try:
+            with self._feedback_lock:
+                self._feedback_pending_ma = 0.0
+                self._feedback_output_error = None
+                self._feedback_stop.clear()
+                self._feedback_event.clear()
+                self._feedback_thread = worker
+                self._feedback_output_active = True
+            worker.start()
+        except BaseException:
+            with self._feedback_lock:
+                self._feedback_output_active = False
+                self._feedback_thread = None
+            try:
+                self.gello_agent._robot.zero_gripper_current()
+            finally:
+                self.gello_agent._robot.disable_gripper_current_mode()
+            raise
+        return info
+
+    def _feedback_output_loop(self) -> None:
+        last_written_ma = 0.0
+        while True:
+            self._feedback_event.wait(timeout=FEEDBACK_COMMAND_WATCHDOG_S)
+            with self._feedback_lock:
+                command_ready = self._feedback_event.is_set()
+                self._feedback_event.clear()
+                if self._feedback_stop.is_set() or not self._feedback_output_active:
+                    return
+                current_ma = self._feedback_pending_ma if command_ready else 0.0
+            if not command_ready and last_written_ma == 0.0:
+                continue
+            try:
+                last_written_ma = self.gello_agent._robot.write_gripper_current_ma(
+                    current_ma
+                )
+            except Exception as exc:
+                with self._feedback_lock:
+                    self._feedback_output_active = False
+                    self._feedback_output_error = exc
+                logger.exception(
+                    "GELLO ID8 feedback write failed; zeroing and disabling current mode"
+                )
+                try:
+                    self.gello_agent._robot.zero_gripper_current()
+                except Exception:
+                    logger.exception("Failed to write zero after GELLO feedback failure")
+                try:
+                    self.gello_agent._robot.disable_gripper_current_mode()
+                except Exception:
+                    logger.exception("Failed to disable ID8 after GELLO feedback failure")
+                return
+
+    def _stop_feedback_worker(self) -> None:
+        with self._feedback_lock:
+            self._feedback_output_active = False
+            self._feedback_pending_ma = 0.0
+            self._feedback_stop.set()
+            self._feedback_event.set()
+            worker = self._feedback_thread
+            self._feedback_thread = None
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=2.0)
+            if worker.is_alive():
+                logger.error("GELLO ID8 feedback worker did not stop within 2 seconds")
+
+    def stop_feedback(self) -> None:
+        """Stop accepting targets, then zero and disable ID8 current mode."""
+        self._stop_feedback_worker()
+        if not hasattr(self, "gello_agent"):
+            return
+        failures = []
+        try:
+            self.gello_agent._robot.zero_gripper_current()
+        except Exception as exc:
+            failures.append(f"zero current failed: {exc}")
+        try:
+            self.gello_agent._robot.disable_gripper_current_mode()
+        except Exception as exc:
+            failures.append(f"disable current mode failed: {exc}")
+        if failures:
+            raise RuntimeError("; ".join(failures))
+
+    def get_feedback_output_status(self) -> tuple[bool, str | None]:
+        """Return the worker state without performing Dynamixel I/O."""
+        with self._feedback_lock:
+            error = self._feedback_output_error
+            return self._feedback_output_active, None if error is None else str(error)
 
     def _safely_disable_gripper_current_mode(self, context: str) -> None:
         if not hasattr(self, "gello_agent"):
@@ -166,12 +284,18 @@ class GelloTeleop(UFBaseTeleop):
         if not hasattr(gello_robot, "disable_gripper_current_mode"):
             return
         try:
-            gello_robot.disable_gripper_current_mode()
+            self.stop_feedback()
         except Exception:
             # The driver has already attempted Goal Current=0 and torque disable.
             logger.exception(
                 "Failed to cleanly disable GELLO ID8 current mode during %s", context
             )
+            try:
+                gello_robot.disable_gripper_current_mode()
+            except Exception:
+                logger.exception(
+                    "Fallback GELLO ID8 disable also failed during %s", context
+                )
 
     def reset_to_robot_observation(self, obs):
         """Map the current passive GELLO pose to the robot's current pose."""
@@ -308,7 +432,29 @@ class GelloTeleop(UFBaseTeleop):
         return action
 
     def send_feedback(self, feedback: dict[str, float]) -> None:
-        raise NotImplementedError
+        """Publish the current frame's ID8 target without performing serial I/O."""
+        if not self.config.gripper_force_feedback_enabled:
+            return
+        current_ma = feedback.get(GRIPPER_CURRENT_FEEDBACK_KEY, 0.0)
+        if isinstance(current_ma, bool):
+            current_ma = 0.0
+        try:
+            current_ma = float(current_ma)
+        except (TypeError, ValueError):
+            current_ma = 0.0
+        if not math.isfinite(current_ma):
+            current_ma = 0.0
+
+        limit_ma = self.config.gripper_current_limit_ma
+        if limit_ma is None:
+            current_ma = 0.0
+        else:
+            current_ma = max(-limit_ma, min(limit_ma, current_ma))
+        with self._feedback_lock:
+            if not self._feedback_output_active:
+                return
+            self._feedback_pending_ma = current_ma
+            self._feedback_event.set()
 
     def _close_gello_driver(self) -> None:
         if not hasattr(self, "gello_agent"):

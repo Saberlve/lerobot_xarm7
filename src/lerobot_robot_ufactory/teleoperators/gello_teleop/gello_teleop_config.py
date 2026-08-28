@@ -34,6 +34,11 @@ class GelloTeleopConfig(TeleoperatorConfig):
     # Required when current control is authorized. The adapter also enforces an
     # independent hard ceiling of 100 mA and checks ID8's hardware Current Limit.
     gripper_current_limit_ma: Optional[float] = None
+    # Phase 3: bridge the cached xArm G2 current to GELLO ID8. The existing
+    # Phase 2 current limit is reused as the mapped output limit.
+    gripper_force_feedback_enabled: bool = False
+    gripper_feedback_gain: Optional[float] = None
+    gripper_feedback_output_sign: Optional[int] = None
     # Keyboard gripper: distance closed/opened per quick tap of C/O (mm).
     # Must be > 0; Recommended >= 2 mm.
     gripper_keyboard_step_mm: float = 5.0
@@ -76,6 +81,37 @@ class GelloTeleopConfig(TeleoperatorConfig):
                 raise ValueError(
                     "gripper_current_limit_ma must be explicitly configured "
                     "before enabling current control"
+                )
+        if self.gripper_feedback_gain is not None:
+            if (
+                isinstance(self.gripper_feedback_gain, bool)
+                or not isinstance(self.gripper_feedback_gain, (int, float))
+                or not math.isfinite(self.gripper_feedback_gain)
+                or self.gripper_feedback_gain < 0
+            ):
+                raise ValueError("gripper_feedback_gain must be finite and non-negative")
+        if (
+            self.gripper_feedback_output_sign is not None
+            and (
+                isinstance(self.gripper_feedback_output_sign, bool)
+                or self.gripper_feedback_output_sign not in (-1, 1)
+            )
+        ):
+            raise ValueError("gripper_feedback_output_sign must be either -1 or 1")
+        if self.gripper_force_feedback_enabled:
+            if not self.gripper_current_control_enabled:
+                raise ValueError(
+                    "gripper_current_control_enabled must be true when force feedback "
+                    "is enabled"
+                )
+            if self.gripper_feedback_gain is None:
+                raise ValueError(
+                    "gripper_feedback_gain must be explicitly configured when force "
+                    "feedback is enabled"
+                )
+            if self.gripper_feedback_output_sign is None:
+                raise ValueError(
+                    "gripper_feedback_output_sign must be explicitly configured when force feedback is enabled"
                 )
         if self.gripper_keyboard_step_mm <= 0:
             raise ValueError("gripper_keyboard_step_mm must be positive")
