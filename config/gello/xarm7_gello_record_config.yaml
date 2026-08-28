@@ -11,6 +11,10 @@ robot:
   gripper_speed: 100
   # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
   gripper_force: 50
+  # Phase 1: cache G2 actual Q-axis current from TCP 30000; no GELLO output yet.
+  gripper_current_monitor: false
+  gripper_current_monitor_frequency_hz: 250
+  gripper_current_stale_timeout_s: 0.25
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
   joint_command_mode: 6
   max_joint_velocity: 120

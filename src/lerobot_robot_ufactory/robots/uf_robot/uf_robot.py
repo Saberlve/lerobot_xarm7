@@ -40,6 +40,15 @@ XARM7_JOINT_LOWER_RAD = np.asarray(
 XARM7_JOINT_UPPER_RAD = np.asarray(
     [2 * math.pi, 2.0944, 2 * math.pi, 3.927, 2 * math.pi, math.pi, 2 * math.pi]
 )
+TCP_30000_MIN_REPORT_SIZE = 520
+# UFACTORY's TCP 30000 external-device block uses one-based bytes 737-744.
+# The official Python example decodes the same complete frame at zero-based
+# offset 736 as two U8 values followed by three big-endian INT16 values.
+G2_EXTERNAL_REPORT_OFFSET = 736
+G2_EXTERNAL_REPORT_FORMAT = ">BBhhh"
+G2_EXTERNAL_REPORT_SIZE = struct.calcsize(G2_EXTERNAL_REPORT_FORMAT)
+G2_EXTERNAL_REPORT_END = G2_EXTERNAL_REPORT_OFFSET + G2_EXTERNAL_REPORT_SIZE
+G2_MONITOR_STARTUP_DELAY_S = 1.0
 
 CARTESIAN_OBS_KEYS = [
     "pose.x", "pose.y", "pose.z", "pose.rx", "pose.ry", "pose.rz",
@@ -58,6 +67,47 @@ class GripperType(IntEnum):
     BioGripperG2 = 3
     PikaGripper = 10
     RobotiqGripper = 11
+
+
+@dataclass(frozen=True)
+class G2ExternalDeviceReport:
+    gripper_state: int
+    position_mm: int
+    speed_mm_s: int
+    current_ma: int
+
+
+@dataclass(frozen=True)
+class G2CurrentSample:
+    """Non-blocking snapshot of the cached Gripper G2 actual current."""
+
+    current_ma: int | None
+    sample_monotonic_s: float | None
+    gripper_state: int | None
+    age_s: float | None
+    available: bool
+    stale: bool
+    reason: str | None
+    error: str | None
+
+
+def _decode_g2_external_device_report(data: bytes) -> G2ExternalDeviceReport | None:
+    """Decode the official TCP 30000 external-device block for Gripper G2."""
+    if len(data) < G2_EXTERNAL_REPORT_END:
+        return None
+    gripper_type, state, position, speed, current = struct.unpack_from(
+        G2_EXTERNAL_REPORT_FORMAT,
+        data,
+        G2_EXTERNAL_REPORT_OFFSET,
+    )
+    if gripper_type != GripperType.xArmGripperG2:
+        return None
+    return G2ExternalDeviceReport(
+        gripper_state=state,
+        position_mm=position,
+        speed_mm_s=speed,
+        current_ma=current,
+    )
 
 
 @dataclass
@@ -144,10 +194,19 @@ class UFRobot(Robot, Thread):
         self._last_rt_report_monotonic_s = None
         self._last_realtime_sync_timing = {}
         self._realtime_camera_frame_index = {key: 0 for key in self.cameras}
+        self._gripper_current_monitor_requested = bool(config.gripper_current_monitor)
+        self._gripper_current_monitor_active = False
+        self._gripper_current_monitor_error = None
+        self._gripper_current_ma = None
+        self._gripper_current_sample_monotonic_s = None
+        self._gripper_current_state = None
         # Cartesian observations and the joint-mode TCP z guard use the
         # asynchronous RT report.
-        self._use_rt_report = (
+        self._rt_report_required_for_control = (
             self._control_space == "cartesian" or self._min_tcp_z_mm is not None
+        )
+        self._use_rt_report = (
+            self._rt_report_required_for_control or self._gripper_current_monitor_requested
         )
         self._cart_obs_has_vel = any('velo.' in key for key in CARTESIAN_OBS_KEYS)
         self._jnt_obs_has_vel = self.config.observe_joint_vel
@@ -684,6 +743,7 @@ class UFRobot(Robot, Thread):
 
         if self._gripper_type > GripperType.NoGripper:
             self._configure_gripper(move_to_open=not self.config.manual_mode)
+        self._configure_g2_current_monitor()
 
         if self.config.manual_mode:
             if self.config.teach_sensitivity is not None:
@@ -703,6 +763,9 @@ class UFRobot(Robot, Thread):
                 raise RuntimeError(
                     f"Failed to set manual mode for UF robot! Controller Error code: {err_warn[0]} !"
                 )
+            if self._gripper_current_monitor_active:
+                self._start_rt_report_thread_if_needed()
+                time.sleep(0.2)
             return
 
         if self._control_space == "joint":
@@ -720,9 +783,62 @@ class UFRobot(Robot, Thread):
         if err_warn[0] != 0:
             raise RuntimeError(f"Failed to set correct state to UF robot! Controller Error code: {err_warn[0]} !")
 
-        if self._use_rt_report and not self._rt_report_normal:
-            self.start()
+        self._start_rt_report_thread_if_needed()
         time.sleep(0.2)
+
+    def _configure_g2_current_monitor(self) -> None:
+        """Enable optional G2 reporting before the TCP 30000 reader starts."""
+        if not self._gripper_current_monitor_requested:
+            return
+        with self._update_lock:
+            if self._gripper_current_monitor_active:
+                return
+
+        try:
+            code = self.real_arm.set_external_device_monitor_params(
+                int(GripperType.xArmGripperG2),
+                self.config.gripper_current_monitor_frequency_hz,
+            )
+        except Exception as exc:
+            self._mark_g2_current_monitor_unavailable(
+                f"set_external_device_monitor_params raised {exc!r}"
+            )
+            return
+
+        if code != 0:
+            self._mark_g2_current_monitor_unavailable(
+                f"set_external_device_monitor_params failed, code={code}"
+            )
+            return
+
+        with self._update_lock:
+            self._gripper_current_monitor_active = True
+            self._gripper_current_monitor_error = None
+        self._use_rt_report = True
+
+        # UFACTORY's official TCP 30000 example waits for the controller
+        # setting to take effect before opening the report socket.
+        time.sleep(G2_MONITOR_STARTUP_DELAY_S)
+
+    def _mark_g2_current_monitor_unavailable(self, error: str) -> None:
+        with self._update_lock:
+            self._gripper_current_monitor_active = False
+            self._gripper_current_monitor_error = error
+        if not self._rt_report_required_for_control:
+            self._use_rt_report = False
+        logger.warning("Gripper G2 current monitor unavailable: %s", error)
+
+    def _start_rt_report_thread_if_needed(self) -> None:
+        if not self._use_rt_report or self._rt_report_normal or self.is_alive():
+            return
+        if self.ident is not None:
+            error = "TCP 30000 report thread has already exited and cannot be restarted"
+            if self._gripper_current_monitor_requested:
+                self._mark_g2_current_monitor_unavailable(error)
+            else:
+                logger.warning(error)
+            return
+        self.start()
 
     def _configure_gripper(self, move_to_open: bool) -> None:
         """Initialize the configured gripper without moving it in manual mode."""
@@ -1034,6 +1150,103 @@ class UFRobot(Robot, Thread):
         stroke = abs(float(self._gripper_param.open_pos - self._gripper_param.close_pos))
         return speed, max(stroke, 1.0)
 
+    def get_gripper_current_sample(
+        self,
+        *,
+        max_age_s: float | None = None,
+    ) -> G2CurrentSample:
+        """Return the latest cached G2 current without robot or RS485 I/O."""
+        stale_timeout_s = (
+            self.config.gripper_current_stale_timeout_s
+            if max_age_s is None
+            else max_age_s
+        )
+        if not math.isfinite(stale_timeout_s) or stale_timeout_s <= 0:
+            raise ValueError("max_age_s must be finite and positive")
+
+        if not self._gripper_current_monitor_requested:
+            return G2CurrentSample(
+                current_ma=None,
+                sample_monotonic_s=None,
+                gripper_state=None,
+                age_s=None,
+                available=False,
+                stale=False,
+                reason="monitor_disabled",
+                error=None,
+            )
+
+        if not self._update_lock.acquire(blocking=False):
+            return G2CurrentSample(
+                current_ma=None,
+                sample_monotonic_s=None,
+                gripper_state=None,
+                age_s=None,
+                available=False,
+                stale=False,
+                reason="cache_busy",
+                error=None,
+            )
+        try:
+            active = self._gripper_current_monitor_active
+            error = self._gripper_current_monitor_error
+            current_ma = self._gripper_current_ma
+            sample_monotonic_s = self._gripper_current_sample_monotonic_s
+            gripper_state = self._gripper_current_state
+        finally:
+            self._update_lock.release()
+
+        now = time.perf_counter()
+        age_s = (
+            None
+            if sample_monotonic_s is None
+            else max(0.0, now - sample_monotonic_s)
+        )
+        stale = age_s is not None and age_s > stale_timeout_s
+        if error is not None or not active:
+            return G2CurrentSample(
+                current_ma=current_ma,
+                sample_monotonic_s=sample_monotonic_s,
+                gripper_state=gripper_state,
+                age_s=age_s,
+                available=False,
+                stale=stale,
+                reason="monitor_error" if error is not None else "monitor_inactive",
+                error=error,
+            )
+        if sample_monotonic_s is None:
+            return G2CurrentSample(
+                current_ma=None,
+                sample_monotonic_s=None,
+                gripper_state=None,
+                age_s=None,
+                available=False,
+                stale=False,
+                reason="no_sample",
+                error=None,
+            )
+        if stale:
+            return G2CurrentSample(
+                current_ma=current_ma,
+                sample_monotonic_s=sample_monotonic_s,
+                gripper_state=gripper_state,
+                age_s=age_s,
+                available=False,
+                stale=True,
+                reason="stale",
+                error=None,
+            )
+        return G2CurrentSample(
+            current_ma=current_ma,
+            sample_monotonic_s=sample_monotonic_s,
+            gripper_state=gripper_state,
+            age_s=age_s,
+            available=True,
+            stale=False,
+            reason=None,
+            error=None,
+        )
+
     def _log_gripper_command(self, target: float, position: int, dt_ms: float) -> None:
         log_path = self.config.gripper_error_log_path
         if not log_path:
@@ -1214,38 +1427,106 @@ class UFRobot(Robot, Thread):
 
     def run(self):
         import socket
-        
-        robot_port = 30000 # DO NOT CHANGE
-        # create socket connection
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setblocking(True)
-        sock.settimeout(1)
-        sock.connect((self.config.robot_ip, robot_port))
 
-        buffer = sock.recv(4)
-        print(buffer)
-        while len(buffer) < 4:
-            buffer += sock.recv(4 - len(buffer))
-        size = convert.bytes_to_u32(buffer[:4])
-        print(f"UFACTORY Robot ({self.config.robot_ip}) RT Report Thread starts!! =======")
-        while not self.report_stop_event.is_set():
-            buffer += sock.recv(size - len(buffer))
-            if len(buffer) < size:
-                continue
-            data = buffer[:size]
-            buffer = buffer[size:]
-            with self._update_lock:
-                self.rt_actual_joint_pos = convert.bytes_to_fp32s(data[116:144], 7)
-                self.rt_actual_joint_speed = convert.bytes_to_fp32s(data[144:172], 7)
-                self.rt_cmd_tcp_pose = convert.bytes_to_fp32s(data[424:448], 6)
-                self.rt_cmd_tcp_vel = convert.bytes_to_fp32s(data[448:472], 6)
-                self.rt_actual_tcp_pose = convert.bytes_to_fp32s(data[472:496], 6)
-                self.rt_actual_tcp_speed = convert.bytes_to_fp32s(data[496:520], 6)
-                # This is the host arrival/decode time, deliberately kept in
-                # the same monotonic clock domain as the recorder.
-                self._last_rt_report_monotonic_s = time.perf_counter()
-            self._rt_report_normal = True
+        robot_port = 30000  # DO NOT CHANGE
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setblocking(True)
+            sock.settimeout(1)
+            sock.connect((self.config.robot_ip, robot_port))
 
-        self._rt_report_normal = False
-        print(f"UFACTORY Robot ({self.config.robot_ip}) RT Report Thread Exit!! =======")
+            buffer = b""
+            while len(buffer) < 4 and not self.report_stop_event.is_set():
+                try:
+                    chunk = sock.recv(4 - len(buffer))
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    raise ConnectionError("TCP 30000 closed while reading report header")
+                buffer += chunk
+            if self.report_stop_event.is_set():
+                return
+
+            size = convert.bytes_to_u32(buffer[:4])
+            if size < TCP_30000_MIN_REPORT_SIZE:
+                raise ValueError(
+                    f"TCP 30000 report size {size} is smaller than "
+                    f"{TCP_30000_MIN_REPORT_SIZE}"
+                )
+            logger.info(
+                "UFACTORY Robot (%s) TCP 30000 report thread started, packet_size=%d",
+                self.config.robot_ip,
+                size,
+            )
+
+            while not self.report_stop_event.is_set():
+                while len(buffer) < size and not self.report_stop_event.is_set():
+                    try:
+                        chunk = sock.recv(size - len(buffer))
+                    except socket.timeout:
+                        continue
+                    if not chunk:
+                        raise ConnectionError("TCP 30000 connection closed by controller")
+                    buffer += chunk
+                if self.report_stop_event.is_set():
+                    break
+
+                data = buffer[:size]
+                buffer = buffer[size:]
+                sample_monotonic_s = time.perf_counter()
+                external_report = None
+                monitor_error = None
+                if self._gripper_current_monitor_requested:
+                    external_report = _decode_g2_external_device_report(data)
+                    if len(data) < G2_EXTERNAL_REPORT_END:
+                        monitor_error = (
+                            f"TCP 30000 packet has no external-device block: size={len(data)}, "
+                            f"required={G2_EXTERNAL_REPORT_END}"
+                        )
+                    elif external_report is None:
+                        monitor_error = (
+                            "unexpected external-device type in TCP 30000 report: "
+                            f"type={data[G2_EXTERNAL_REPORT_OFFSET]}"
+                        )
+
+                with self._update_lock:
+                    self.rt_actual_joint_pos = convert.bytes_to_fp32s(data[116:144], 7)
+                    self.rt_actual_joint_speed = convert.bytes_to_fp32s(data[144:172], 7)
+                    self.rt_cmd_tcp_pose = convert.bytes_to_fp32s(data[424:448], 6)
+                    self.rt_cmd_tcp_vel = convert.bytes_to_fp32s(data[448:472], 6)
+                    self.rt_actual_tcp_pose = convert.bytes_to_fp32s(data[472:496], 6)
+                    self.rt_actual_tcp_speed = convert.bytes_to_fp32s(data[496:520], 6)
+                    # Host arrival/decode time, in the recorder's monotonic clock domain.
+                    self._last_rt_report_monotonic_s = sample_monotonic_s
+                    if external_report is not None:
+                        self._gripper_current_ma = external_report.current_ma
+                        self._gripper_current_sample_monotonic_s = sample_monotonic_s
+                        self._gripper_current_state = external_report.gripper_state
+                        self._gripper_current_monitor_error = None
+                    elif monitor_error is not None:
+                        self._gripper_current_monitor_error = monitor_error
+                self._rt_report_normal = True
+        except Exception as exc:
+            if not self.report_stop_event.is_set():
+                logger.warning(
+                    "UFACTORY Robot (%s) TCP 30000 report thread failed: %r",
+                    self.config.robot_ip,
+                    exc,
+                )
+                if self._gripper_current_monitor_requested:
+                    self._mark_g2_current_monitor_unavailable(
+                        f"TCP 30000 report reader failed: {exc!r}"
+                    )
+        finally:
+            self._rt_report_normal = False
+            if self._gripper_current_monitor_requested:
+                with self._update_lock:
+                    self._gripper_current_monitor_active = False
+            if sock is not None:
+                sock.close()
+            logger.info(
+                "UFACTORY Robot (%s) TCP 30000 report thread exited",
+                self.config.robot_ip,
+            )

@@ -20,6 +20,11 @@ class UFRobotConfig(RobotConfig):
     gripper_command_threshold: float = 0.01  # normalized change required before sending a new command
     gripper_command_interval_s: float = 0.1  # minimum interval between tool RS485 goals
     gripper_error_log_path: str | None = "logs/xarm_gripper_errors.log"
+    # Opt-in asynchronous Gripper G2 actual-current reporting via TCP 30000.
+    # This remains outside the LeRobot observation/dataset schema.
+    gripper_current_monitor: bool = False
+    gripper_current_monitor_frequency_hz: int = 250
+    gripper_current_stale_timeout_s: float = 0.25
     enable_logs: bool = False  # optional per-cycle timing and diagnostic logs
     observe_joint_vel: bool = False # only effective in joint control mode
     manual_mode: bool = False  # xArm joint teaching mode; records state and optional gripper actions
@@ -64,6 +69,19 @@ class UFRobotConfig(RobotConfig):
                 raise ValueError("xArm Gripper G2 gripper_speed must be -1 or between 15 and 225 mm/s")
             if self.gripper_force != -1 and not 1 <= self.gripper_force <= 100:
                 raise ValueError("xArm Gripper G2 gripper_force must be -1 or between 1 and 100")
+        if self.gripper_current_monitor and self.gripper_type != 2:
+            raise ValueError("gripper_current_monitor requires gripper_type=2 (xArm Gripper G2)")
+        if (
+            not isinstance(self.gripper_current_monitor_frequency_hz, int)
+            or isinstance(self.gripper_current_monitor_frequency_hz, bool)
+            or self.gripper_current_monitor_frequency_hz <= 0
+        ):
+            raise ValueError("gripper_current_monitor_frequency_hz must be a positive integer")
+        if (
+            not math.isfinite(self.gripper_current_stale_timeout_s)
+            or self.gripper_current_stale_timeout_s <= 0
+        ):
+            raise ValueError("gripper_current_stale_timeout_s must be finite and positive")
         if self.control_space == "joint" and self.joint_command_mode != 6:
             raise ValueError("joint_command_mode must be 6 for joint control")
         if self.min_tcp_z_mm is not None and not math.isfinite(self.min_tcp_z_mm):
