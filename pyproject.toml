@@ -29,7 +29,7 @@ dependencies = [
     "pyyaml",
     "lerobot[intelrealsense]==0.4.3",
     "xarm-python-sdk",
-    "opencv-python",
+    "opencv-python==4.11.0.86",
     "websockets",
     "msgpack",
 ]
@@ -68,6 +68,14 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.10",
     "pre-commit>=3.7",
+]
+
+[tool.uv]
+# LeRobot depends on the headless OpenCV wheel, while this project needs GUI
+# APIs such as imshow/namedWindow. Installing both wheels corrupts the shared
+# cv2 package, so keep only the GUI-enabled wheel declared above.
+exclude-dependencies = [
+    { package = { name = "lerobot", version = "0.4.3" }, dependencies = ["opencv-python-headless"] },
 ]
 
 [tool.setuptools]

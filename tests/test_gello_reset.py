@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 import pytest
 
@@ -31,10 +33,14 @@ class FakeGelloRobot:
         self.gripper_open_close = (0.0, 1.0)
         self._last_pos = object()
         self.torque_calls = []
+        self.current_zero_calls = 0
         self.current_disable_calls = 0
 
     def set_torque_mode(self, enabled):
         self.torque_calls.append(enabled)
+
+    def zero_gripper_current(self):
+        self.current_zero_calls += 1
 
     def disable_gripper_current_mode(self):
         self.current_disable_calls += 1
@@ -43,10 +49,18 @@ class FakeGelloRobot:
 def make_teleop(robot, align_gripper_to_current=True):
     teleop = gello_module.GelloTeleop.__new__(gello_module.GelloTeleop)
     teleop.id = "test_gello"
+    teleop.config = gello_module.GelloTeleopConfig()
     teleop._is_connected = True
     teleop._teleop_enabled = False
     teleop._needs_alignment = True
     teleop._align_gripper_to_current = align_gripper_to_current
+    teleop._feedback_lock = threading.Lock()
+    teleop._feedback_event = threading.Event()
+    teleop._feedback_stop = threading.Event()
+    teleop._feedback_thread = None
+    teleop._feedback_pending_ma = 0.0
+    teleop._feedback_output_active = False
+    teleop._feedback_output_error = None
     teleop.dof = 2
     teleop.gello_agent = type("FakeAgent", (), {"_robot": robot})()
     return teleop
