@@ -112,6 +112,18 @@ def test_current_control_rejects_every_id_except_8():
             driver.enable_gripper_current_mode(dxl_id, 20.0)
 
 
+def test_xl330_m077_t_model_1190_is_accepted():
+    handler = FakePacketHandler(model_number=1190)
+    driver = make_driver(handler)
+
+    info = driver.enable_gripper_current_mode(8, 20.0)
+    assert info.model_number == 1190
+    assert info.model_name == "XL330-M077-T"
+    assert info.current_unit_ma == 1.0
+
+    driver.disable_gripper_current_mode(8)
+
+
 def test_unknown_physical_id8_model_is_rejected_before_any_write():
     handler = FakePacketHandler(model_number=9999)
     driver = make_driver(handler)

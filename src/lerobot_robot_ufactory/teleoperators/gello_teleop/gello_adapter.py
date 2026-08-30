@@ -45,13 +45,15 @@ class GripperDynamixelInfo:
     current_unit_ma: float
 
 
-# The GELLO mechanical design uses an XL330-M288-T for the shared gripper.
+# The GELLO mechanical design uses an XL330-M288-T for the shared gripper;
+# some builds ship the lower-torque XL330-M077-T instead. Both share the
+# same Control Table layout, 1 mA current unit and 0~1750 Current Limit.
 # Model Number is read from the physical ID8 before current mode is enabled;
 # an unknown/replaced servo is rejected instead of assuming a compatible table.
 SUPPORTED_GRIPPER_MODELS = {
-    1200: DynamixelModelSpec(
-        model_number=1200,
-        model_name="XL330-M288-T",
+    1190: DynamixelModelSpec(
+        model_number=1190,
+        model_name="XL330-M077-T",
         current_unit_ma=1.0,
         maximum_current_limit_raw=1750,
     ),
