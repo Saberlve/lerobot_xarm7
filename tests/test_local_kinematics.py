@@ -10,6 +10,7 @@ from lerobot_robot_ufactory.robots.uf_robot.local_kinematics import (
     rot6d_to_rotation,
     rotation_to_6d,
     rotation_to_axis_angle,
+    xarm_rpy_transform,
 )
 from lerobot_robot_ufactory.robots.uf_robot.uf_robot import UFRobot
 
@@ -412,3 +413,107 @@ def test_both_record_space_keeps_joints_and_adds_tcp_pose():
     assert converted_action["J1.pos"] == float(joints[0])
     assert converted_action["gripper.pos"] == 0.25
     assert "pose.x" in converted_action
+
+
+def _rotation_angle_error(a: np.ndarray, b: np.ndarray) -> float:
+    """Rotation angle (rad) of ``a @ b.T``; 0 when the matrices agree.
+
+    Trace-based angle recovery saturates near 2e-8 rad in float64 (the
+    ``acos((tr - 1) / 2)`` noise floor), so tests must not assert below ~1e-7.
+    """
+    delta = a @ b.T
+    cos_angle = np.clip((np.trace(delta) - 1.0) / 2.0, -1.0, 1.0)
+    return float(np.arccos(cos_angle))
+
+
+def test_rot6d_roundtrip_random_rotations():
+    rng = np.random.default_rng(0)
+    # Mix uniform angles with cases near 0 and near pi, the hard regions for
+    # most rotation representations.
+    angles = np.concatenate(
+        [
+            rng.uniform(-np.pi, np.pi, size=150),
+            rng.uniform(-1e-6, 1e-6, size=25),
+            np.pi - rng.uniform(0.0, 1e-6, size=25),
+        ]
+    )
+    for angle in angles:
+        axis = rng.normal(size=3)
+        rotation = _axis_angle_rotation(axis, angle)
+
+        recovered = rot6d_to_rotation(rotation_to_6d(rotation))
+
+        assert _rotation_angle_error(recovered, rotation) < 1e-7
+        assert recovered.T @ recovered == pytest.approx(np.eye(3), abs=1e-12)
+        assert np.linalg.det(recovered) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_rot6d_roundtrip_edge_poses():
+    cases = [np.eye(3)]
+    for axis in ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]):
+        for angle in (np.pi, -np.pi, np.pi / 2, -np.pi / 2):
+            cases.append(_axis_angle_rotation(axis, angle))
+    # pi about an arbitrary axis: the axis-angle singular point.
+    cases.append(_axis_angle_rotation([0.3, -0.5, 0.8], np.pi))
+
+    for rotation in cases:
+        recovered = rot6d_to_rotation(rotation_to_6d(rotation))
+        assert _rotation_angle_error(recovered, rotation) < 1e-7
+
+
+def test_rot6d_order_matches_tcp_record_pose_keys():
+    """pose.r11/r21/r31/r12/r22/r32 must be the first two matrix columns."""
+    rotation = _axis_angle_rotation([0.3, -0.5, 0.8], 1.1)
+
+    vector = rotation_to_6d(rotation)
+    expected = [rotation[0, 0], rotation[1, 0], rotation[2, 0],
+                rotation[0, 1], rotation[1, 1], rotation[2, 1]]
+    assert vector == pytest.approx(expected)
+
+    # The recording pipeline must emit the same convention under these keys.
+    robot = make_tcp_record_robot()
+
+    class FixedKinematics:
+        def forward_matrix(self, joints):
+            transform = np.eye(4)
+            transform[:3, :3] = rotation
+            return transform
+
+    robot._local_kinematics = FixedKinematics()
+    obs = {f"J{i + 1}.pos": 0.0 for i in range(7)}
+    obs["gripper.pos"] = 0.0
+    converted = robot.convert_observation_for_recording(obs)
+    for key, value in zip(TCP_RECORD_ROT_KEYS, expected):
+        assert converted[key] == pytest.approx(value)
+
+
+def test_rot6d_gram_schmidt_tolerates_noise():
+    """Noisy 6D vectors (e.g. policy outputs) still recover to a rotation."""
+    rng = np.random.default_rng(1)
+    rotation = _axis_angle_rotation([0.3, -0.5, 0.8], 1.7)
+    clean = rotation_to_6d(rotation)
+
+    for sigma in (1e-4, 1e-2):
+        noisy = clean + rng.normal(scale=sigma, size=6)
+        recovered = rot6d_to_rotation(noisy)
+        assert recovered.T @ recovered == pytest.approx(np.eye(3), abs=1e-9)
+        assert np.linalg.det(recovered) == pytest.approx(1.0, abs=1e-9)
+        # First-order perturbation bound: angular error stays within a small
+        # multiple of the injected noise.
+        assert _rotation_angle_error(recovered, rotation) < 10.0 * sigma
+
+
+def test_rot6d_matches_xarm_rpy_convention():
+    """xarm_rpy_transform -> 6D -> matrix must round-trip exactly.
+
+    Pins the chain used to compare local FK rotations against controller
+    roll/pitch/yaw output.
+    """
+    rng = np.random.default_rng(2)
+    for _ in range(100):
+        pose = np.concatenate(
+            [rng.uniform(-500.0, 500.0, size=3), rng.uniform(-np.pi, np.pi, size=3)]
+        )
+        rotation = xarm_rpy_transform(pose)[:3, :3]
+        recovered = rot6d_to_rotation(rotation_to_6d(rotation))
+        assert _rotation_angle_error(recovered, rotation) < 1e-7
