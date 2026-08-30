@@ -575,7 +575,11 @@ def record_loop(
             preview_publish_ms = (time.perf_counter() - before_preview_publish_t) * 1000
 
         if policy is not None or dataset is not None:
-            observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+            obs_for_dataset = obs_processed
+            convert_observation = getattr(robot, "convert_observation_for_recording", None)
+            if convert_observation is not None:
+                obs_for_dataset = convert_observation(obs_processed)
+            observation_frame = build_dataset_frame(dataset.features, obs_for_dataset, prefix=OBS_STR)
 
         # Get action from either policy or teleop
         if policy is not None and preprocessor is not None and postprocessor is not None:
@@ -666,6 +670,10 @@ def record_loop(
         # Store that effective command so demonstrations match the motion.
         if isinstance(_sent_action, dict):
             action_values = _sent_action
+
+        convert_action = getattr(robot, "convert_action_for_recording", None)
+        if convert_action is not None:
+            action_values = convert_action(action_values)
 
         # Write to dataset
         if dataset is not None:

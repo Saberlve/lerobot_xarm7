@@ -13,6 +13,11 @@ class UFRobotConfig(RobotConfig):
     robot_ip: str = "192.168.1.127"
     robot_dof: int | None = None  # Set it correctly if controlling in joint space!
     control_space: str = "joint"
+    # Representation of the saved dataset, only effective with control_space="joint".
+    # "joint" records J1..Jn (rad); "tcp" records the FK-converted TCP pose
+    # (mm; continuous 6D rotation, Zhou et al. CVPR 2019); "both" records
+    # joints and TCP pose side by side. Control stays in joint space.
+    record_space: str = "joint"
     gripper_type: int = 1       # 1: xArm Gripper, 2: xArm Gripper G2, 10: Pika Gripper, 11: Robotiq 2F-85
     gripper_port: str = None    # only used by pika gripper (gripper_type=10)
     gripper_speed: int = -1     # auto
@@ -84,6 +89,15 @@ class UFRobotConfig(RobotConfig):
             raise ValueError("gripper_current_stale_timeout_s must be finite and positive")
         if self.control_space == "joint" and self.joint_command_mode != 6:
             raise ValueError("joint_command_mode must be 6 for joint control")
+        if self.record_space not in ("joint", "tcp", "both"):
+            raise ValueError("record_space must be 'joint', 'tcp' or 'both'")
+        if self.record_space in ("tcp", "both"):
+            if self.control_space != "joint" or self.robot_dof != 7:
+                raise ValueError(f"record_space='{self.record_space}' requires joint control on an xArm7")
+            if self.manual_mode:
+                raise ValueError(f"record_space='{self.record_space}' is not supported in manual_mode")
+        if self.record_space == "tcp" and self.observe_joint_vel:
+            raise ValueError("record_space='tcp' does not support observe_joint_vel")
         if self.min_tcp_z_mm is not None and not math.isfinite(self.min_tcp_z_mm):
             raise ValueError("min_tcp_z_mm must be finite when provided")
         if (

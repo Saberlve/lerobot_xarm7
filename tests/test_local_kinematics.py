@@ -4,7 +4,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from lerobot_robot_ufactory.robots.uf_robot.local_kinematics import XArm7Kinematics
+from lerobot_robot_ufactory.robots.uf_robot.local_kinematics import (
+    XArm7Kinematics,
+    axis_angle_continuous,
+    rot6d_to_rotation,
+    rotation_to_6d,
+    rotation_to_axis_angle,
+)
 from lerobot_robot_ufactory.robots.uf_robot.uf_robot import UFRobot
 
 
@@ -207,3 +213,202 @@ def test_startup_validation_compares_controller_fk_to_flange_not_tcp():
     flange_position = flange_model.tcp_position(np.zeros(7))
     tcp_position = robot._local_kinematics.tcp_position(np.zeros(7))
     assert np.linalg.norm(tcp_position - flange_position) == pytest.approx(172.0)
+
+
+def _axis_angle_rotation(axis, angle):
+    axis = np.asarray(axis, dtype=np.float64)
+    axis = axis / np.linalg.norm(axis)
+    x, y, z = axis
+    c, s = np.cos(angle), np.sin(angle)
+    return np.asarray(
+        [
+            [c + x * x * (1 - c), x * y * (1 - c) - z * s, x * z * (1 - c) + y * s],
+            [y * x * (1 - c) + z * s, c + y * y * (1 - c), y * z * (1 - c) - x * s],
+            [z * x * (1 - c) - y * s, z * y * (1 - c) + x * s, c + z * z * (1 - c)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def test_axis_angle_continuous_avoids_pi_flip():
+    rotation_a = _axis_angle_rotation([0.0, 0.0, 1.0], np.pi - 1e-3)
+    rotation_b = _axis_angle_rotation([0.0, 0.0, 1.0], -(np.pi - 1e-3))
+
+    aa_a = axis_angle_continuous(rotation_a, None)
+    aa_b = axis_angle_continuous(rotation_b, aa_a)
+
+    # The raw representatives point along opposite axes (~2*pi apart); the
+    # continuous representative stays close to the previous frame instead.
+    assert np.linalg.norm(rotation_to_axis_angle(rotation_b) - aa_a) > 5.0
+    assert np.linalg.norm(aa_b - aa_a) == pytest.approx(0.0, abs=1e-2)
+
+
+def test_tcp_record_space_config_validation():
+    from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
+
+    UFRobotConfig(robot_dof=7, control_space="joint", record_space="tcp")
+
+    with pytest.raises(ValueError, match="record_space must be"):
+        UFRobotConfig(robot_dof=7, control_space="joint", record_space="bogus")
+    with pytest.raises(ValueError, match="requires joint control on an xArm7"):
+        UFRobotConfig(robot_dof=7, control_space="cartesian", record_space="tcp")
+    with pytest.raises(ValueError, match="requires joint control on an xArm7"):
+        UFRobotConfig(robot_dof=6, control_space="joint", record_space="tcp")
+    with pytest.raises(ValueError, match="does not support observe_joint_vel"):
+        UFRobotConfig(
+            robot_dof=7, control_space="joint", record_space="tcp", observe_joint_vel=True
+        )
+    with pytest.raises(ValueError, match="not supported in manual_mode"):
+        UFRobotConfig(robot_dof=7, control_space="joint", record_space="tcp", manual_mode=True)
+
+
+def make_tcp_record_robot(record_space="tcp"):
+    robot = UFRobot.__new__(UFRobot)
+    robot.prefix = ""
+    robot._dof = 7
+    robot._control_space = "joint"
+    robot._record_space = record_space
+    robot._jnt_obs_has_vel = False
+    robot._gripper_type = 2
+    robot.cameras = {}
+    robot.camera_width = 0
+    robot.camera_height = 0
+    robot._local_kinematics = XArm7Kinematics(NOMINAL_XARM7_ORIGINS)
+    return robot
+
+
+TCP_RECORD_ROT_KEYS = [f"pose.r{r}{c}" for c in (1, 2) for r in (1, 2, 3)]
+TCP_RECORD_POSE_KEYS = ["pose.x", "pose.y", "pose.z", *TCP_RECORD_ROT_KEYS]
+
+
+def test_tcp_record_space_features():
+    robot = make_tcp_record_robot()
+
+    expected_pose = set(TCP_RECORD_POSE_KEYS)
+    assert expected_pose | {"gripper.pos"} == set(robot.action_features)
+    assert expected_pose | {"gripper.pos"} == set(robot.observation_features)
+
+    robot._record_space = "joint"
+    expected_joints = {f"J{i}.pos" for i in range(1, 8)}
+    assert expected_joints | {"gripper.pos"} == set(robot.action_features)
+    assert expected_joints | {"gripper.pos"} == set(robot.observation_features)
+
+
+def test_convert_observation_for_recording_uses_fk():
+    robot = make_tcp_record_robot()
+    joints = np.asarray([0.2, -0.4, 0.3, 0.7, -0.2, 0.5, 0.4])
+    obs = {f"J{i + 1}.pos": float(joints[i]) for i in range(7)}
+    obs["gripper.pos"] = 0.5
+    obs["camera"] = "frame"
+
+    converted = robot.convert_observation_for_recording(obs)
+
+    assert not any(key.startswith("J") for key in converted)
+    assert converted["gripper.pos"] == 0.5
+    assert converted["camera"] == "frame"
+    transform = robot._local_kinematics.forward_matrix(joints)
+    assert [converted["pose.x"], converted["pose.y"], converted["pose.z"]] == pytest.approx(
+        transform[:3, 3].tolist()
+    )
+    assert [converted[key] for key in TCP_RECORD_ROT_KEYS] == pytest.approx(
+        rotation_to_6d(transform[:3, :3]).tolist()
+    )
+
+
+def test_rot6d_roundtrip_recovers_rotation_matrix():
+    rotation = _axis_angle_rotation([0.3, -0.5, 0.8], 2.3)
+
+    recovered = rot6d_to_rotation(rotation_to_6d(rotation))
+
+    assert recovered == pytest.approx(rotation)
+
+
+def test_rot6d_is_continuous_across_pi_flip():
+    rotation_a = _axis_angle_rotation([0.0, 0.0, 1.0], np.pi - 1e-3)
+    rotation_b = _axis_angle_rotation([0.0, 0.0, 1.0], -(np.pi - 1e-3))
+
+    # The axis-angle representatives flip by ~2*pi here; the 6D vectors do not.
+    assert np.linalg.norm(
+        rotation_to_axis_angle(rotation_b) - rotation_to_axis_angle(rotation_a)
+    ) > 5.0
+    assert np.linalg.norm(rotation_to_6d(rotation_b) - rotation_to_6d(rotation_a)) < 1e-2
+
+
+def test_convert_action_for_recording_is_deterministic():
+    robot = make_tcp_record_robot()
+    joints = [0.0] * 7
+    action = {f"J{i + 1}.pos": joints[i] for i in range(7)}
+    action["gripper.pos"] = 0.1
+
+    first = robot.convert_action_for_recording(action)
+    second = robot.convert_action_for_recording(action)
+
+    assert [second[key] for key in TCP_RECORD_ROT_KEYS] == pytest.approx(
+        [first[key] for key in TCP_RECORD_ROT_KEYS]
+    )
+    assert second["gripper.pos"] == 0.1
+
+
+def test_convert_recording_passthrough_in_joint_space():
+    robot = make_tcp_record_robot(record_space="joint")
+    obs = {f"J{i + 1}.pos": 0.0 for i in range(7)}
+    action = {f"J{i + 1}.pos": 0.0 for i in range(7)}
+
+    assert robot.convert_observation_for_recording(obs) is obs
+    assert robot.convert_action_for_recording(action) is action
+
+
+def test_both_record_space_config_validation():
+    from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
+
+    UFRobotConfig(robot_dof=7, control_space="joint", record_space="both")
+    # Joint velocity keys remain valid when joints stay in the dataset.
+    UFRobotConfig(
+        robot_dof=7, control_space="joint", record_space="both", observe_joint_vel=True
+    )
+
+    with pytest.raises(ValueError, match="requires joint control on an xArm7"):
+        UFRobotConfig(robot_dof=7, control_space="cartesian", record_space="both")
+    with pytest.raises(ValueError, match="not supported in manual_mode"):
+        UFRobotConfig(robot_dof=7, control_space="joint", record_space="both", manual_mode=True)
+
+
+def test_both_record_space_features():
+    robot = make_tcp_record_robot(record_space="both")
+
+    expected_joints = {f"J{i}.pos" for i in range(1, 8)}
+    expected_pose = set(TCP_RECORD_POSE_KEYS)
+    assert expected_joints | expected_pose | {"gripper.pos"} == set(robot.action_features)
+    assert expected_joints | expected_pose | {"gripper.pos"} == set(robot.observation_features)
+
+    robot._jnt_obs_has_vel = True
+    expected_vel = {f"J{i}.vel" for i in range(1, 8)}
+    assert expected_joints | expected_vel | expected_pose | {"gripper.pos"} == set(
+        robot.observation_features
+    )
+
+
+def test_both_record_space_keeps_joints_and_adds_tcp_pose():
+    robot = make_tcp_record_robot(record_space="both")
+    joints = np.asarray([0.2, -0.4, 0.3, 0.7, -0.2, 0.5, 0.4])
+    obs = {f"J{i + 1}.pos": float(joints[i]) for i in range(7)}
+    obs["gripper.pos"] = 0.5
+    obs["camera"] = "frame"
+
+    converted = robot.convert_observation_for_recording(obs)
+
+    for i in range(7):
+        assert converted[f"J{i + 1}.pos"] == float(joints[i])
+    assert converted["gripper.pos"] == 0.5
+    assert converted["camera"] == "frame"
+    position = robot._local_kinematics.tcp_position(joints)
+    assert [converted["pose.x"], converted["pose.y"], converted["pose.z"]] == pytest.approx(
+        position.tolist()
+    )
+
+    action = {f"J{i + 1}.pos": float(joints[i]) for i in range(7)}
+    action["gripper.pos"] = 0.25
+    converted_action = robot.convert_action_for_recording(action)
+    assert converted_action["J1.pos"] == float(joints[0])
+    assert converted_action["gripper.pos"] == 0.25
+    assert "pose.x" in converted_action

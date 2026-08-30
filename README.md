@@ -67,6 +67,7 @@ Predefined configs are provided under `config/`:
 
 - `robot.robot_ip` — xArm controller IP (e.g. `192.168.1.245`)
 - `robot.robot_dof` — `7`
+- `robot.record_space` — saved dataset representation: `"joint"` (default) records J1..J7 in rad; `"tcp"` records the FK-converted TCP pose (`pose.x/y/z` in mm, `pose.r11/r21/r31/r12/r22/r32` — the continuous 6D rotation representation from [Zhou et al., CVPR 2019](https://arxiv.org/abs/1812.07035), i.e. the first two columns of the rotation matrix); `"both"` records joints and TCP pose side by side. GELLO control stays in joint space
 - `robot.gripper_type` — `2` for the xArm Gripper G2
 - `robot.gripper_speed` — G2 opening/closing speed in mm/s (`15`–`225`; configured as `100`)
 - `robot.gripper_force` — G2 gripping force (`1`–`100`; configured as `50`)

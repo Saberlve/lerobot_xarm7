@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import math
 import shutil
 import sys
 from pathlib import Path
@@ -53,31 +52,20 @@ def _load_local_kinematics_module():
     return module
 
 
+_LOCAL_KINEMATICS_MODULE = None
+
+
+def _local_kinematics():
+    """Return a cached local_kinematics module instance."""
+    global _LOCAL_KINEMATICS_MODULE
+    if _LOCAL_KINEMATICS_MODULE is None:
+        _LOCAL_KINEMATICS_MODULE = _load_local_kinematics_module()
+    return _LOCAL_KINEMATICS_MODULE
+
+
 def _rotation_to_axis_angle(rotation: np.ndarray) -> np.ndarray:
     """Rotation matrix -> axis-angle vector (rad), angle in [0, pi]."""
-    cos_angle = float(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0))
-    angle = math.acos(cos_angle)
-    if angle < 1e-9:
-        return np.zeros(3)
-    if math.pi - angle < 1e-4:
-        # Near pi: R + I = 2 * axis * axis^T; recover axis from the diagonal
-        # and resolve signs with the off-diagonal terms.
-        axis = np.sqrt(np.clip((np.diag(rotation) + 1.0) / 2.0, 0.0, None))
-        axis[0] = math.copysign(axis[0], rotation[0, 1] * axis[1] if abs(axis[1]) > 1e-9 else rotation[0, 1])
-        axis[1] = math.copysign(axis[1], rotation[0, 1])
-        axis[2] = math.copysign(axis[2], rotation[0, 2])
-        norm = np.linalg.norm(axis)
-        if norm < 1e-9:
-            return np.zeros(3)
-        return axis / norm * angle
-    axis = np.array(
-        [
-            rotation[2, 1] - rotation[1, 2],
-            rotation[0, 2] - rotation[2, 0],
-            rotation[1, 0] - rotation[0, 1],
-        ]
-    ) / (2.0 * math.sin(angle))
-    return axis * angle
+    return _local_kinematics().rotation_to_axis_angle(rotation)
 
 
 def _to_axis_angle_continuous(rotation: np.ndarray, previous: np.ndarray | None) -> np.ndarray:
@@ -86,14 +74,7 @@ def _to_axis_angle_continuous(rotation: np.ndarray, previous: np.ndarray | None)
     R(axis, angle) == R(-axis, 2*pi - angle); choosing per frame between the
     two avoids pi-flip discontinuities (e.g. TCP pointing straight down).
     """
-    aa = _rotation_to_axis_angle(rotation)
-    if previous is None:
-        return aa
-    angle = np.linalg.norm(aa)
-    if angle < 1e-9:
-        return previous.copy()
-    alt = -aa / angle * (2.0 * math.pi - angle)
-    return alt if np.linalg.norm(alt - previous) < np.linalg.norm(aa - previous) else aa
+    return _local_kinematics().axis_angle_continuous(rotation, previous)
 
 
 def _joints_to_tcp_pose(kinematics, joints: np.ndarray) -> np.ndarray:

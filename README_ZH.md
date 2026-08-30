@@ -67,6 +67,7 @@ ls /dev/serial/by-id/
 
 - `robot.robot_ip` — xArm 控制器 IP（如 `192.168.1.245`）
 - `robot.robot_dof` — `7`
+- `robot.record_space` — 数据集保存格式：`"joint"`（默认）记录 J1..J7 关节角（弧度）；`"tcp"` 记录经 FK 转换的 TCP 位姿（`pose.x/y/z` 单位 mm，旋转用连续 6D 表示 `pose.r11/r21/r31/r12/r22/r32`，即旋转矩阵的前两列，参考 [Zhou et al., CVPR 2019](https://arxiv.org/abs/1812.07035)，不存在欧拉角/轴角的跳变问题）；`"both"` 同时记录关节角和 TCP 位姿。GELLO 控制仍保持在关节空间
 - `robot.gripper_type` — `2` 表示 xArm Gripper G2
 - `robot.gripper_speed` — G2 开合速度，单位 mm/s（范围 `15`–`225`，当前配置为 `100`）
 - `robot.gripper_force` — G2 夹持力（范围 `1`–`100`，当前配置为 `50`）

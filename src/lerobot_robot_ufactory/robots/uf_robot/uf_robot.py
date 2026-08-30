@@ -20,6 +20,7 @@ from xarm.core.utils import convert
 from .local_kinematics import (
     XArm7Kinematics,
     read_xarm7_kinematics,
+    rotation_to_6d,
     xarm_rpy_transform,
 )
 
@@ -58,6 +59,16 @@ CARTESIAN_OBS_KEYS = [
 
 CARTESIAN_ACTION_KEYS = [
     "pose.x", "pose.y", "pose.z", "pose.rx", "pose.ry", "pose.rz",
+]
+
+# TCP recording for joint-controlled GELLO (record_space="tcp"/"both"). The
+# rotation uses the continuous 6D representation from Zhou et al., "On the
+# Continuity of Rotation Representations in Neural Networks" (CVPR 2019):
+# the first two columns of the TCP rotation matrix. Unlike axis-angle it has
+# no pi-flip discontinuity, so no per-frame continuity fixing is needed.
+TCP_RECORD_POSE_KEYS = [
+    "pose.x", "pose.y", "pose.z",
+    "pose.r11", "pose.r21", "pose.r31", "pose.r12", "pose.r22", "pose.r32",
 ]
 
 class GripperType(IntEnum):
@@ -149,6 +160,7 @@ class UFRobot(Robot, Thread):
         self.robot_type = f"xarm{self._dof}"
         
         self._control_space = self.config.control_space
+        self._record_space = self.config.record_space
 
         self.real_arm = None
         self._initial_point = None
@@ -201,9 +213,11 @@ class UFRobot(Robot, Thread):
         self._gripper_current_sample_monotonic_s = None
         self._gripper_current_state = None
         # Cartesian observations and the joint-mode TCP z guard use the
-        # asynchronous RT report.
+        # asynchronous RT report. TCP recording needs the RT actual joints.
         self._rt_report_required_for_control = (
-            self._control_space == "cartesian" or self._min_tcp_z_mm is not None
+            self._control_space == "cartesian"
+            or self._min_tcp_z_mm is not None
+            or self._record_space in ("tcp", "both")
         )
         self._use_rt_report = (
             self._rt_report_required_for_control or self._gripper_current_monitor_requested
@@ -246,7 +260,17 @@ class UFRobot(Robot, Thread):
 
     @property
     def _robot_state_features(self)-> dict:
-        if self._control_space == "joint":
+        if self._record_space in ("tcp", "both"):
+            # Joint-controlled GELLO recording saved (also) as FK-converted TCP poses.
+            state_features = {}
+            if self._record_space == "both":
+                state_features.update({f"{self.prefix}J{motor}.pos": float for motor in range(1, self._dof+1)})
+                if self._jnt_obs_has_vel:
+                    state_features.update({f"{self.prefix}J{motor}.vel": float for motor in range(1, self._dof+1)})
+            state_features.update({f"{self.prefix}{key}": float for key in TCP_RECORD_POSE_KEYS})
+            if self._gripper_type > GripperType.NoGripper:
+                state_features.update({f"{self.prefix}gripper.pos": float})
+        elif self._control_space == "joint":
             state_features = {f"{self.prefix}J{motor}.pos": float for motor in range(1, self._dof+1)}
             if self._jnt_obs_has_vel:
                 state_features.update({f"{self.prefix}J{motor}.vel": float for motor in range(1, self._dof+1)})
@@ -277,7 +301,13 @@ class UFRobot(Robot, Thread):
 
     @property
     def action_features(self)-> dict:
-        if self._control_space == "joint":
+        if self._record_space in ("tcp", "both"):
+            # Joint-controlled GELLO recording saved (also) as FK-converted TCP poses.
+            action_ft = {}
+            if self._record_space == "both":
+                action_ft.update({f"{self.prefix}J{motor}.pos": float for motor in range(1, self._dof+1)})
+            action_ft.update({f"{self.prefix}{key}": float for key in TCP_RECORD_POSE_KEYS})
+        elif self._control_space == "joint":
             action_ft = {f"{self.prefix}J{motor}.pos": float for motor in range(1, self._dof+1)}
         elif self._control_space == "cartesian":
             action_ft = {f"{self.prefix}{key}": float for key in CARTESIAN_ACTION_KEYS}
@@ -288,8 +318,11 @@ class UFRobot(Robot, Thread):
             action_ft.update({f"{self.prefix}gripper.pos": float})
         return action_ft
 
+    def _needs_local_kinematics(self) -> bool:
+        return self._tcp_z_guard_backend == "local_projection" or self._record_space in ("tcp", "both")
+
     def connect(self, calibrate: bool = True) -> None:
-        if self._tcp_z_guard_backend == "local_projection":
+        if self._needs_local_kinematics():
             self._local_joint_origins = read_xarm7_kinematics(self.config.robot_ip)
         self.real_arm = XArmAPI(self.config.robot_ip)
         time.sleep(0.2)
@@ -310,7 +343,7 @@ class UFRobot(Robot, Thread):
             raise RuntimeError(f"Invalid initial point returned by xArm: {initial_point}")
         self._initial_point = list(initial_point[:self._dof])
 
-        if self._tcp_z_guard_backend == "local_projection":
+        if self._needs_local_kinematics():
             self._initialize_local_kinematics()
 
         for cam in self.cameras.values():
@@ -436,7 +469,7 @@ class UFRobot(Robot, Thread):
         )
 
         current_z = float(self._local_kinematics.tcp_position(current)[2])
-        if current_z < self._min_tcp_z_mm:
+        if self._min_tcp_z_mm is not None and current_z < self._min_tcp_z_mm:
             raise RuntimeError(
                 f"Current TCP z {current_z:.2f} mm is below the configured hard floor "
                 f"{self._min_tcp_z_mm:.2f} mm"
@@ -1055,6 +1088,53 @@ class UFRobot(Robot, Thread):
             "camera": camera_timing,
         }
         return obs_dict
+
+    def _joints_to_tcp_pose_dict(self, joints: list[float]) -> dict:
+        """FK joint positions -> TCP pose dict (mm, 6D rotation) for recording."""
+        if self._local_kinematics is None:
+            raise RuntimeError("Local xArm7 kinematics has not been initialized")
+        transform = self._local_kinematics.forward_matrix(
+            np.asarray(joints, dtype=np.float64)
+        )
+        position = transform[:3, 3]
+        rotation_6d = rotation_to_6d(transform[:3, :3])
+        return {
+            f"{self.prefix}{key}": float(value)
+            for key, value in zip(TCP_RECORD_POSE_KEYS, (*position, *rotation_6d))
+        }
+
+    def convert_observation_for_recording(self, obs: dict) -> dict:
+        """Add or swap in the FK-converted TCP pose for 'tcp'/'both' recording.
+
+        Control-facing observations keep joint keys; this conversion only runs
+        at the dataset frame boundary in the record loop. 'tcp' replaces the
+        J* keys, 'both' keeps them alongside the pose.* keys.
+        """
+        record_space = getattr(self, "_record_space", "joint")
+        if record_space == "joint":
+            return obs
+        joints = [obs[f"{self.prefix}J{i + 1}.pos"] for i in range(self._dof)]
+        converted = {
+            key: value
+            for key, value in obs.items()
+            if record_space == "both" or not key.startswith(f"{self.prefix}J")
+        }
+        converted.update(self._joints_to_tcp_pose_dict(joints))
+        return converted
+
+    def convert_action_for_recording(self, action: dict) -> dict:
+        """Add or swap in the FK-converted TCP pose for 'tcp'/'both' recording."""
+        record_space = getattr(self, "_record_space", "joint")
+        if record_space == "joint":
+            return action
+        joints = [action[f"{self.prefix}J{i + 1}.pos"] for i in range(self._dof)]
+        converted = {
+            key: value
+            for key, value in action.items()
+            if record_space == "both" or not key.startswith(f"{self.prefix}J")
+        }
+        converted.update(self._joints_to_tcp_pose_dict(joints))
+        return converted
 
     def _send_gripper_action(self, gripper_norm: float) -> None:
         gripper_norm = min(max(float(gripper_norm), 0.0), 1.0)

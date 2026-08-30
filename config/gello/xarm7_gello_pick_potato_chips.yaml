@@ -3,6 +3,10 @@ robot:
   id: "uf_robot"
   robot_dof: 7
   control_space: "joint"
+  # Saved dataset representation: "joint" records J1..J7 (rad); "tcp" records
+  # the FK-converted TCP pose (mm; continuous 6D rotation, Zhou et al. CVPR 2019);
+  # "both" records joints and TCP pose side by side. Control stays in joint space.
+  record_space: "joint"
   robot_ip: "192.168.1.245"
   # 2: xArm Gripper G2 (0-84 mm opening range).
   gripper_type: 2
