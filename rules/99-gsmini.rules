@@ -1,0 +1,6 @@
+# GelSight Mini 触觉传感器 — 固定设备名 + 权限
+# 先用 `lsusb` 查到实际的 idVendor/idProduct 替换下面的 xxxx，
+# 再 `sudo cp rules/99-gsmini.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger`。
+# 双传感器可用 ATTR{devpath} 或 serial 区分成 gsmini0/gsmini1。
+# 若 config 里直接用 /dev/v4l/by-id/... 路径，可不安装本规则。
+KERNEL=="video*", ATTRS{idVendor}=="xxxx", ATTRS{idProduct}=="xxxx", MODE:="0666", SYMLINK+="gsmini0"
