@@ -70,7 +70,7 @@ teleop:
   gripper_feedback_output_sign: 1
   # Must be <= gripper_current_limit_ma (the Phase 2 safety ceiling).
   gripper_feedback_output_limit_ma: 100
-  gripper_feedback_slew_rate_ma_s: 1000
+  gripper_feedback_slew_rate_ma_s: 3000
   gripper_feedback_timeout_s: 0.1
 
 # Lossy browser preview of the frames already captured for the dataset.
