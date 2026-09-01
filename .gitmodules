@@ -1,3 +1,0 @@
-[submodule "third_party/tactile/GsminiSDK"]
-	path = third_party/tactile/GsminiSDK
-	url = https://github.com/Saberlve/GsminiSDK.git
