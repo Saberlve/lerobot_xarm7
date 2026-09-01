@@ -12,7 +12,7 @@ robot:
   # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
   gripper_force: 50
   # Phase 1 cache; set true when Phase 3 force feedback is explicitly enabled.
-  gripper_current_monitor: false
+  gripper_current_monitor: true
   gripper_current_monitor_frequency_hz: 250
   gripper_current_stale_timeout_s: 0.25
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
@@ -56,22 +56,22 @@ teleop:
   gripper_open_deg: 198.28125
   gripper_close_deg: 155.75
   # Phase 2 ID8 authorization; Phase 3 also requires the feedback switch below.
-  gripper_current_control_enabled: false
+  gripper_current_control_enabled: true
   # Keep null while disabled. Hardware tests must set a conservative value (<=100 mA).
-  gripper_current_limit_ma: null
+  gripper_current_limit_ma: 100
   # Phase 4 conditioned feedback remains fully opt-in. Every value below must
   # be measured/chosen explicitly before setting enabled=true.
-  gripper_force_feedback_enabled: false
-  gripper_feedback_bias_ma: null
-  gripper_feedback_deadzone_ma: null
-  gripper_feedback_input_limit_ma: null
-  gripper_feedback_ema_beta: null
-  gripper_feedback_gain: null
-  gripper_feedback_output_sign: null
+  gripper_force_feedback_enabled: true
+  gripper_feedback_bias_ma: 0
+  gripper_feedback_deadzone_ma: 0
+  gripper_feedback_input_limit_ma: 1000
+  gripper_feedback_ema_beta: 0.2
+  gripper_feedback_gain: 0.2
+  gripper_feedback_output_sign: 1
   # Must be <= gripper_current_limit_ma (the Phase 2 safety ceiling).
-  gripper_feedback_output_limit_ma: null
-  gripper_feedback_slew_rate_ma_s: null
-  gripper_feedback_timeout_s: null
+  gripper_feedback_output_limit_ma: 100
+  gripper_feedback_slew_rate_ma_s: 1000
+  gripper_feedback_timeout_s: 0.1
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are
@@ -93,6 +93,6 @@ dataset:
   single_task: "Pick up the purple grape and drop into the box on the left."
   # Cameras and the independent GELLO control loop run at 30 Hz.
   fps: 30
-  episode_time_s: 60  # max duration for one episode
+  episode_time_s: 450  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes
   push_to_hub: False

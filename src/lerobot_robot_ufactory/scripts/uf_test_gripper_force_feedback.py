@@ -365,8 +365,8 @@ def validate_args(parser: argparse.ArgumentParser, args) -> None:
     if args.staged_calibration and args.enable_output:
         parser.error("--staged-calibration is restricted to observe-only mode")
     if args.enable_output:
-        if not 0 < args.duration_s <= 5:
-            parser.error("--enable-output requires --duration-s in (0, 5]")
+        if not 0 < args.duration_s <= 60:
+            parser.error("--enable-output requires --duration-s in (0, 60]")
         if args.phase2_current_limit_ma is None:
             parser.error("--phase2-current-limit-ma is required with --enable-output")
         if (

@@ -54,8 +54,8 @@ teleop:
   gripper_keyboard_step_mm: 2.0
   # Hold C/O for this long (seconds) before continuous open/close starts.
   gripper_keyboard_hold_delay_s: 0.5
-  # gripper_open_deg: 198.28125
-  # gripper_close_deg: 155.75
+  gripper_open_deg: 198.28125
+  gripper_close_deg: 155.75
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are

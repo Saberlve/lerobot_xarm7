@@ -10,6 +10,9 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pprint import pformat
 import lerobot_robot_ufactory # patch
+from lerobot.cameras.realsense.configuration_realsense import (  # noqa: F401
+    RealSenseCameraConfig,  # registers the "intelrealsense" camera choice for config parsing
+)
 from lerobot.processor import (
     make_default_processors,
 )
@@ -65,6 +68,32 @@ class GuardLatencyTiming:
     send_action_ms: float
     work_ms: float
     cycle_ms: float
+
+
+# How often the live GELLO ID8 feedback status line is redrawn (seconds).
+FEEDBACK_DISPLAY_INTERVAL_S = 0.2
+
+
+def _fmt_ma(value) -> str:
+    return "  ----" if value is None else f"{value:+6.1f}"
+
+
+def _print_gripper_feedback_status(controller, teleop_config) -> None:
+    """Redraw one terminal line with the live GELLO ID8 output command."""
+    diag = controller.get_gripper_feedback_diagnostic()
+    limit_ma = getattr(teleop_config, "gripper_feedback_output_limit_ma", None) or 0.0
+    bar_width = 24
+    frac = 0.0 if limit_ma <= 0 else min(abs(diag.command_ma) / limit_ma, 1.0)
+    filled = int(round(frac * bar_width))
+    bar = "█" * filled + "░" * (bar_width - filled)
+    line = (
+        f"GELLO ID8 |{bar}| cmd={_fmt_ma(diag.command_ma)}/{limit_ma:g} mA"
+        f" tgt={_fmt_ma(diag.target_ma)} filt={_fmt_ma(diag.filtered_ma)}"
+        f" raw={_fmt_ma(diag.raw_current_ma)} mA"
+        f" active={diag.feedback_active} ({diag.reason})"
+    )
+    sys.stdout.write("\r" + line + "\x1b[K")
+    sys.stdout.flush()
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -305,6 +334,10 @@ def teleop_loop(cfg: TeleopConfig):
     previous_command_t = None
     realtime_controller = None
     realtime_control_fps = int(teleop.config.realtime_control_fps)
+    feedback_display_enabled = bool(
+        getattr(teleop.config, "gripper_force_feedback_enabled", False)
+    )
+    last_feedback_display_t = 0.0
 
     def start_realtime_controller():
         nonlocal realtime_controller
@@ -413,6 +446,11 @@ def teleop_loop(cfg: TeleopConfig):
             if realtime_controller is not None:
                 realtime_controller.heartbeat()
                 realtime_controller.raise_if_failed()
+                if feedback_display_enabled:
+                    now_t = time.perf_counter()
+                    if now_t - last_feedback_display_t >= FEEDBACK_DISPLAY_INTERVAL_S:
+                        last_feedback_display_t = now_t
+                        _print_gripper_feedback_status(realtime_controller, teleop.config)
                 precise_sleep(sleep_time_s)
             else:
                 # Generic non-UFACTORY teleoperators retain the standard loop.
