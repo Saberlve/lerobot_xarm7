@@ -17,7 +17,7 @@ from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_adapter import (
 
 
 class FakePacketHandler:
-    def __init__(self, *, model_number=1200):
+    def __init__(self, *, model_number=1190):
         self.model_number = model_number
         self.registers = {
             (GRIPPER_DYNAMIXEL_ID, ADDR_OPERATING_MODE): POSITION_CONTROL_MODE,
@@ -80,8 +80,8 @@ def test_id8_enable_sequence_and_current_clamp_never_write_ids_1_to_7():
     driver = make_driver(handler)
 
     info = driver.enable_gripper_current_mode(8, 100.0)
-    assert info.model_number == 1200
-    assert info.model_name == "XL330-M288-T"
+    assert info.model_number == 1190
+    assert info.model_name == "XL330-M077-T"
     assert info.current_unit_ma == 1.0
 
     writes = [call for call in handler.calls if call[0].startswith("write")]

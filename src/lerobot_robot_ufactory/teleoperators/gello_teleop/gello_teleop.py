@@ -72,29 +72,16 @@ class GelloTeleop(UFBaseTeleop):
                 "gripper_config": gripper_config
         }
         self._dynamixel_robo_config = PatchedDynamixelRobotConfig(**param_dict)
-        print(self._dynamixel_robo_config)
         self.dof = len(self.config.joint_ids)
 
     @property
     def action_features(self) -> dict:
         # Add one more dof for gripper
-        # act_ft = {
-        #     "joint_position": {
-        #     "dtype": "float",
-        #     "shape": (self.dof+1,)
-        #     }
-        # }
         act_ft = { f"J{i+1}.pos": float for i in range(self.dof) } | {"gripper.pos": float}
         return act_ft
 
     @property
     def feedback_features(self) -> dict:
-        # fbk_ft = {
-        #     "joint_position": {
-        #     "dtype": "float",
-        #     "shape": (self.dof+1,)
-        #     }
-        # }
         fbk_ft = { f"J{i+1}.pos": float for i in range(self.dof) } | {"gripper.pos": float}
         return fbk_ft
 
