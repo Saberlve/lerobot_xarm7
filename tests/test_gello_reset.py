@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 import pytest
 
@@ -31,18 +33,34 @@ class FakeGelloRobot:
         self.gripper_open_close = (0.0, 1.0)
         self._last_pos = object()
         self.torque_calls = []
+        self.current_zero_calls = 0
+        self.current_disable_calls = 0
 
     def set_torque_mode(self, enabled):
         self.torque_calls.append(enabled)
+
+    def zero_gripper_current(self):
+        self.current_zero_calls += 1
+
+    def disable_gripper_current_mode(self):
+        self.current_disable_calls += 1
 
 
 def make_teleop(robot, align_gripper_to_current=True):
     teleop = gello_module.GelloTeleop.__new__(gello_module.GelloTeleop)
     teleop.id = "test_gello"
+    teleop.config = gello_module.GelloTeleopConfig()
     teleop._is_connected = True
     teleop._teleop_enabled = False
     teleop._needs_alignment = True
     teleop._align_gripper_to_current = align_gripper_to_current
+    teleop._feedback_lock = threading.Lock()
+    teleop._feedback_event = threading.Event()
+    teleop._feedback_stop = threading.Event()
+    teleop._feedback_thread = None
+    teleop._feedback_pending_ma = 0.0
+    teleop._feedback_output_active = False
+    teleop._feedback_output_error = None
     teleop.dof = 2
     teleop.gello_agent = type("FakeAgent", (), {"_robot": robot})()
     return teleop
@@ -57,6 +75,7 @@ def test_gello_alignment_maps_current_pose_without_moving():
     )
 
     assert robot.torque_calls == [False]
+    assert robot.current_disable_calls == 1
     assert robot._driver.commands == []
     assert np.allclose(robot._joint_offsets[:2], [0.4, -0.6])
     assert np.allclose(robot.gripper_open_close, [1.0, 2.0])
@@ -130,6 +149,7 @@ def test_gello_enable_after_pause_realigns_current_pose_before_output():
     assert np.allclose(robot._joint_offsets[:2], [0.9, 0.7])
     assert np.allclose(robot.gripper_open_close, [1.55, 2.55])
     assert robot._driver.commands == []
+    assert robot.current_disable_calls == 3
 
 
 def test_gello_disconnect_closes_driver():
@@ -141,6 +161,7 @@ def test_gello_disconnect_closes_driver():
 
     assert closed == [True]
     assert robot.torque_calls == [False]
+    assert robot.current_disable_calls == 1
     assert teleop._is_connected is False
 
 

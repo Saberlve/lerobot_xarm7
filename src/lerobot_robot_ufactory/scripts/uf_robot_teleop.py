@@ -10,6 +10,9 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pprint import pformat
 import lerobot_robot_ufactory # patch
+from lerobot.cameras.realsense.configuration_realsense import (  # noqa: F401
+    RealSenseCameraConfig,  # registers the "intelrealsense" camera choice for config parsing
+)
 from lerobot.processor import (
     make_default_processors,
 )
@@ -305,7 +308,6 @@ def teleop_loop(cfg: TeleopConfig):
     previous_command_t = None
     realtime_controller = None
     realtime_control_fps = int(teleop.config.realtime_control_fps)
-
     def start_realtime_controller():
         nonlocal realtime_controller
         if (
@@ -357,13 +359,11 @@ def teleop_loop(cfg: TeleopConfig):
                     stop_realtime_controller()
                     if is_uf_teleop:
                         teleop.set_teleop_enabled(False)
-                    # print('========== Teleop is paused ==========')
                     print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
                 else:
                     if is_reset:
                         reset_uf_control()
                         is_reset = False
-                    # print('========== Teleop is start ==========')
                     elif is_uf_teleop:
                         obs = robot.get_observation()
                         teleop.set_teleop_enabled(True, obs)
