@@ -160,11 +160,11 @@ class GelloTeleop(UFBaseTeleop):
 
     def start_feedback(self) -> GripperDynamixelInfo | None:
         """Enable ID8 current mode and start the non-blocking output worker."""
-        if not self.config.gripper_force_feedback_enabled:
+        if not self.config.feedback.enabled:
             return None
         if not self._is_connected:
             raise DeviceNotConnectedError("Gello teleop is not connected")
-        if self.config.gripper_feedback_timeout_s is None:
+        if self.config.feedback.timeout_s is None:
             raise RuntimeError("gripper_feedback_timeout_s is not configured")
         with self._feedback_lock:
             if self._feedback_output_active:
@@ -199,7 +199,7 @@ class GelloTeleop(UFBaseTeleop):
     def _feedback_output_loop(self) -> None:
         last_written_ma = 0.0
         while True:
-            self._feedback_event.wait(timeout=self.config.gripper_feedback_timeout_s)
+            self._feedback_event.wait(timeout=self.config.feedback.timeout_s)
             with self._feedback_lock:
                 command_ready = self._feedback_event.is_set()
                 self._feedback_event.clear()
@@ -421,7 +421,7 @@ class GelloTeleop(UFBaseTeleop):
 
     def send_feedback(self, feedback: dict[str, float]) -> None:
         """Publish the current frame's ID8 target without performing serial I/O."""
-        if not self.config.gripper_force_feedback_enabled:
+        if not self.config.feedback.enabled:
             return
         current_ma = feedback.get(GRIPPER_CURRENT_FEEDBACK_KEY, 0.0)
         if isinstance(current_ma, bool):
@@ -434,7 +434,7 @@ class GelloTeleop(UFBaseTeleop):
             current_ma = 0.0
 
         phase2_limit_ma = self.config.gripper_current_limit_ma
-        feedback_limit_ma = self.config.gripper_feedback_output_limit_ma
+        feedback_limit_ma = self.config.feedback.output_limit_ma
         if phase2_limit_ma is None or feedback_limit_ma is None:
             current_ma = 0.0
         else:

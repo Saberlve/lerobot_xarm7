@@ -13,8 +13,6 @@ robot:
   gripper_force: 50
   # Phase 1 cache; required for the G2-current force feedback below.
   gripper_current_monitor: true
-  gripper_current_monitor_frequency_hz: 250
-  gripper_current_stale_timeout_s: 0.25
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
   joint_command_mode: 6
   max_joint_velocity: 120
@@ -59,20 +57,9 @@ teleop:
   gripper_current_control_enabled: true
   # Conservative hardware ceiling (hard max is 100 mA).
   gripper_current_limit_ma: 100
-  # Phase 4 conditioned feedback. Values calibrated 2026-08-30 with
-  # uf-test-gripper-force-feedback on this setup (XL330-M077-T ID8):
-  # idle=0 mA, holding soft object ~=750 mA, peak ~=940 mA.
-  gripper_force_feedback_enabled: true
-  gripper_feedback_bias_ma: 0.0
-  gripper_feedback_deadzone_ma: 30.0
-  gripper_feedback_input_limit_ma: 1000.0
-  gripper_feedback_ema_beta: 0.5
-  gripper_feedback_gain: 0.12
-  gripper_feedback_output_sign: 1
-  # Must be <= gripper_current_limit_ma (the Phase 2 safety ceiling).
-  gripper_feedback_output_limit_ma: 80.0
-  gripper_feedback_slew_rate_ma_s: 100.0
-  gripper_feedback_timeout_s: 0.1
+  feedback:
+    # Parameters use calibrated GelloFeedbackConfig defaults.
+    enabled: true
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are

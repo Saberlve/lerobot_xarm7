@@ -396,20 +396,20 @@ class RealtimeTeleopController:
 
         teleop_config = getattr(teleop, "config", None)
         self._gripper_feedback_enabled = bool(
-            getattr(teleop_config, "gripper_force_feedback_enabled", False)
+            teleop_config.feedback.enabled
         )
         self._gripper_feedback_processor = None
         if self._gripper_feedback_enabled:
             self._gripper_feedback_processor = GripperFeedbackProcessor(
-                bias_ma=teleop_config.gripper_feedback_bias_ma,
-                deadzone_ma=teleop_config.gripper_feedback_deadzone_ma,
-                input_limit_ma=teleop_config.gripper_feedback_input_limit_ma,
-                ema_beta=teleop_config.gripper_feedback_ema_beta,
-                gain=teleop_config.gripper_feedback_gain,
-                output_sign=teleop_config.gripper_feedback_output_sign,
-                output_limit_ma=teleop_config.gripper_feedback_output_limit_ma,
-                slew_rate_ma_s=teleop_config.gripper_feedback_slew_rate_ma_s,
-                timeout_s=teleop_config.gripper_feedback_timeout_s,
+                bias_ma=teleop_config.feedback.bias_ma,
+                deadzone_ma=teleop_config.feedback.deadzone_ma,
+                input_limit_ma=teleop_config.feedback.input_limit_ma,
+                ema_beta=teleop_config.feedback.ema_beta,
+                gain=teleop_config.feedback.gain,
+                output_sign=teleop_config.feedback.output_sign,
+                output_limit_ma=teleop_config.feedback.output_limit_ma,
+                slew_rate_ma_s=teleop_config.feedback.slew_rate_ma_s,
+                timeout_s=teleop_config.feedback.timeout_s,
             )
         self._disabled_feedback_diagnostic = GripperFeedbackDiagnostic(
             timestamp_monotonic_s=None,

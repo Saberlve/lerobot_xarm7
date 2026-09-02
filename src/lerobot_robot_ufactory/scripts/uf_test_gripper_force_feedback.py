@@ -24,6 +24,7 @@ from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop import (
 )
 from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import (
     GelloTeleopConfig,
+    GelloFeedbackConfig,
 )
 from lerobot_robot_ufactory.utils.realtime_teleop import (
     GripperFeedbackDiagnostic,
@@ -128,16 +129,13 @@ def make_output_teleop(args) -> GelloTeleop:
             gripper_close_deg=settings.gripper_close_deg,
             gripper_current_control_enabled=True,
             gripper_current_limit_ma=args.phase2_current_limit_ma,
-            gripper_force_feedback_enabled=True,
-            gripper_feedback_bias_ma=args.bias_ma,
-            gripper_feedback_deadzone_ma=args.deadzone_ma,
-            gripper_feedback_input_limit_ma=args.input_limit_ma,
-            gripper_feedback_ema_beta=args.ema_beta,
-            gripper_feedback_gain=args.gain,
-            gripper_feedback_output_sign=args.output_sign,
-            gripper_feedback_output_limit_ma=args.output_limit_ma,
-            gripper_feedback_slew_rate_ma_s=args.slew_rate_ma_s,
-            gripper_feedback_timeout_s=args.timeout_s,
+            feedback=GelloFeedbackConfig(
+                enabled=True, bias_ma=args.bias_ma, deadzone_ma=args.deadzone_ma,
+                input_limit_ma=args.input_limit_ma, ema_beta=args.ema_beta,
+                gain=args.gain, output_sign=args.output_sign,
+                output_limit_ma=args.output_limit_ma,
+                slew_rate_ma_s=args.slew_rate_ma_s, timeout_s=args.timeout_s,
+            ),
         )
     )
 

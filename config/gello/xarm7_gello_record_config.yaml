@@ -76,17 +76,8 @@ teleop:
   gripper_current_limit_ma: 100
   # Phase 4 conditioned feedback remains fully opt-in. Every value below must
   # be measured/chosen explicitly before setting enabled=true.
-  gripper_force_feedback_enabled: true
-  gripper_feedback_bias_ma: 0
-  gripper_feedback_deadzone_ma: 0
-  gripper_feedback_input_limit_ma: 1000
-  gripper_feedback_ema_beta: 0.2
-  gripper_feedback_gain: 0.2
-  gripper_feedback_output_sign: 1
-  # Must be <= gripper_current_limit_ma (the Phase 2 safety ceiling).
-  gripper_feedback_output_limit_ma: 100
-  gripper_feedback_slew_rate_ma_s: 1000
-  gripper_feedback_timeout_s: 0.1
+  feedback:
+    enabled: true
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are
