@@ -1,10 +1,6 @@
 # Copyright 2025 starVLA community. All rights reserved.
 # Licensed under the MIT License, Version 1.0 (the "License");
 # Implemented by [Jinhui YE / HKUST University] in [2025].
-#
-# Vendored from starVLA: deployment/model_server/tools/websocket_policy_client.py (2026-08-25).
-# Source repo: https://github.com/starVLA/starVLA
-
 
 import logging
 import os
@@ -138,48 +134,70 @@ class WebsocketClientPolicy:
             raise RuntimeError(f"Error in inference server:\n{response}")
         return msgpack_numpy.unpackb(response)
 
-    def predict_action_realtime(self, query_info: Dict, inference_delay: int, **rtc_kwargs) -> Dict:
+    def predict_action_realtime(
+        self,
+        query_info: Dict,
+        inference_delay: int,
+        execution_horizon: int,
+        **rtc_kwargs,
+    ) -> Dict:
         """RTC (real-time chunking) inference against a server with rtc_supported=True.
 
         Sends an ``infer_rtc`` request; the server conditions the new chunk on
-        the previous chunk it keeps server-side, pinning the first
-        ``inference_delay`` steps. The caller must skip those first d steps of
-        the returned chunk (they overlap with what the robot already executed
-        from the previous chunk while this inference was running).
+        the previous chunk it keeps server-side. Request cadence and response
+        splicing are handled by :class:`RTCPolicyClientWrapper` in absolute
+        control-step time.
 
         Args:
             query_info: same payload as :meth:`predict_action`
                 (``examples``, optional ``unnorm_key``, ...).
-            inference_delay: d — how many steps the robot keeps executing from
-                the previous chunk while this inference runs.
-            **rtc_kwargs: extra head-specific knobs forwarded to the framework.
+            inference_delay: predicted latency prefix ``d`` in control steps.
+            execution_horizon: rolling request stride ``s`` in control steps.
+                This value is forwarded unchanged; the server/model owns ``H``
+                and derives the overlap constraint horizon as ``H-s``.
+            **rtc_kwargs: extra knobs. ``prev_chunk_offset`` (int, default 0)
+                is consumed by the server wrapper: it is how many steps of the
+                tracked previous chunk the robot had already executed when
+                this request's observation was captured — the prefix is pinned
+                to the old chunk's tail starting there (the RTC client wrapper
+                passes its issue step automatically). Other kwargs are
+                head-specific and forwarded to the framework.
                 ``mode`` is accepted by every RTC-capable framework but the
                 values are framework-specific: PI0/PI05 take ``"prefix_pin"``
                 (the default and only mode), QwenPI takes ``"pigdm"`` /
                 ``"simulated_delay"`` (plus ``prefix_attention_schedule`` /
                 ``max_guidance_weight``), QwenDiscreteDiffusion takes
-                ``execution_horizon`` / ``hard_mask`` / ``early_stop`` / ...
+                ``hard_mask`` / ``early_stop`` / ...
 
         Returns:
             The server response dict; the chunk is at
             ``response["data"]["actions"]`` and RTC diagnostics at
             ``response["data"]["rtc"]`` (``used_prefix`` / ``inference_delay``).
 
-        Typical async RTC loop (client responsibility):
-
-        1. Execute the current chunk step by step. d steps before it
-           exhausts, capture the observation and issue
-           ``predict_action_realtime`` on a background thread; the main thread
-           keeps executing the remaining d steps of the old chunk.
-        2. When the response arrives, continue from
-           ``new_chunk[inference_delay:]``.
-        3. At episode boundaries call :meth:`reset` so the server drops the
-           previous-chunk state.
+        If a rolling request from control step ``T`` is collected at step
+        ``T+e``, the wrapper selects ``new_chunk[e]``. It never assumes the
+        actual elapsed value equals the configured ``inference_delay``.
         """
+        inference_delay = int(inference_delay)
+        execution_horizon = int(execution_horizon)
+        if inference_delay <= 0:
+            raise ValueError(
+                f"RTC requires inference_delay d > 0, got d={inference_delay}"
+            )
+        if execution_horizon <= 0 or inference_delay > execution_horizon:
+            raise ValueError(
+                "RTC requires 0 < d <= s, "
+                f"got d={inference_delay}, s={execution_horizon}"
+            )
         self._check_eval_observation_contract(query_info)
         request = {
             "type": "infer_rtc",
-            "payload": {**query_info, "inference_delay": inference_delay, **rtc_kwargs},
+            "payload": {
+                **query_info,
+                "inference_delay": inference_delay,
+                "execution_horizon": execution_horizon,
+                **rtc_kwargs,
+            },
         }
         self._ws.send(self._packer.pack(request))
         response = self._ws.recv()

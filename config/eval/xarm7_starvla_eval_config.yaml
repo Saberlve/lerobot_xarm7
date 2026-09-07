@@ -56,9 +56,13 @@ fps: 30
 # from the checkpoint's action_horizon), then re-infer.
 # N=1 means fully closed-loop (re-infer every step).
 steps_per_inference: 20
-#  null/none or prefix_pin
+# null/none, prefix_pin, or PI05 Kinetix-style pigdm
 rtc_mode: none
+# Predicted latency prefix d (control steps), not the rolling request period.
 inference_delay: 4
+# ΠGDM overlap schedule and guidance cap (forwarded unchanged to PI05).
+prefix_attention_schedule: exp
+max_guidance_weight: 5.0
 
 # Temporal ensembling (TE): mutually exclusive with rtc_mode. 
 temporal_ensemble: true

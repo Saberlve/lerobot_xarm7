@@ -16,12 +16,11 @@ Keyboard controls (same as uf_lerobot_eval):
     Right/Left arrow : reset current episode (robot returns to initial pose)
     Esc              : exit eval loop and disconnect
 
-RTC (real-time chunking): set `rtc_mode: prefix_pin` (PI0/PI05) or another
-framework-supported mode in the config to overlap inference with execution —
-the next chunk is generated in the background while the robot executes the
-tail of the current one, and the server pins the new chunk's first
-`inference_delay` steps to the old chunk's tail, removing the pause at chunk
-boundaries. `rtc_mode: null` (or "none") keeps the default blocking loop.
+RTC (real-time chunking): set `rtc_mode: prefix_pin` for the hard-prefix
+baseline or `rtc_mode: pigdm` for PI05 Kinetix-style guidance. Requests are
+issued every `steps_per_inference` absolute control steps while execution
+continues; `inference_delay` is the predicted latency prefix, not that request
+period. `rtc_mode: null` (or "none") keeps the default blocking loop.
 
 Temporal ensembling (TE): set `temporal_ensemble: true` to re-infer in the
 background every `steps_per_inference_te` steps and execute, at every control tick,
@@ -78,11 +77,14 @@ class StarVLAEvalConfig:
     # --- RTC (real-time chunking) ---
     # RTC mode: None / "none" disables (default blocking chunk loop). Any other
     # value enables RTC and is forwarded to the framework as `mode`:
-    # "prefix_pin" for PI0/PI05 (their only mode)
+    # "prefix_pin" for the hard-prefix baseline; PI05 also supports "pigdm".
     rtc_mode: str | None = None
-    # Steps the robot keeps executing from the old chunk while the next
-    # inference runs
+    # Predicted inference latency prefix d, in control steps.
     inference_delay: int = 8
+    # PI05 ΠGDM overlap-weight schedule and guidance cap. These are ignored by
+    # normal (rtc_mode=none) inference.
+    prefix_attention_schedule: str = "exp"
+    max_guidance_weight: float = 5.0
     # --- Temporal ensembling (TE) ---
     # Mutually exclusive with rtc_mode. When enabled, a background thread
     # re-infers every `steps_per_inference_te` steps and every control tick executes
@@ -259,10 +261,18 @@ def eval_loop(cfg: StarVLAEvalConfig):
     rtc = None
     rtc_mode = (cfg.rtc_mode or "").strip().lower()
     if rtc_mode and rtc_mode != "none":
-        if not 0 < cfg.inference_delay < cfg.steps_per_inference:
+        action_horizon = server_meta.get("action_chunk_size")
+        if not isinstance(action_horizon, int) or action_horizon < 1:
             raise ValueError(
-                f"inference_delay ({cfg.inference_delay}) must be in "
-                f"(0, steps_per_inference={cfg.steps_per_inference}) for RTC."
+                "RTC needs the model-owned action_chunk_size H in server "
+                f"metadata, got {action_horizon!r}."
+            )
+        d = cfg.inference_delay
+        s = cfg.steps_per_inference
+        if not (0 < d <= s <= action_horizon - d and s < action_horizon):
+            raise ValueError(
+                "RTC requires 0 < d <= s <= H-d and s < H, "
+                f"got H={action_horizon}, d={d}, s={s}."
             )
         if not server_meta.get("rtc_supported", False):
             logging.warning(
@@ -276,10 +286,14 @@ def eval_loop(cfg: StarVLAEvalConfig):
             inference_delay=cfg.inference_delay,
             execution_horizon=cfg.steps_per_inference,
             mode=cfg.rtc_mode,
+            prefix_attention_schedule=cfg.prefix_attention_schedule,
+            max_guidance_weight=cfg.max_guidance_weight,
         )
         logging.info(
             f"RTC enabled: mode={cfg.rtc_mode} inference_delay={cfg.inference_delay} "
-            f"execution_horizon={cfg.steps_per_inference} (fps={cfg.fps})"
+            f"execution_horizon={cfg.steps_per_inference} "
+            f"prefix_attention_schedule={cfg.prefix_attention_schedule} "
+            f"max_guidance_weight={cfg.max_guidance_weight} (fps={cfg.fps})"
         )
 
     te = None
