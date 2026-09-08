@@ -68,6 +68,11 @@ class RTCRequestDiagnostic:
     request_skipped: bool
     request_id: Optional[int] = None
     ownership_mismatch: bool = False
+    realtime_request: bool = True
+    timed_out: bool = False
+    last_target_hold: bool = False
+    chunk_switch_step: Optional[int] = None
+    boundary_action_jump_l2: Optional[float] = None
 
 
 @dataclass
@@ -337,19 +342,99 @@ class RTCPolicyClientWrapper:
             "used_prefix": bool(rtc_info.get("used_prefix", False)),
         }
 
-    def _activate_result(self, result: Dict[str, Any], origin_step: int) -> None:
+    def _activate_result(self, result: Dict[str, Any], origin_step: int) -> Dict[str, Any]:
         chunk = self._validate_chunk(result["chunk"])
+        switch_step = self._absolute_control_step
+        previous_expected = None
+        had_active_chunk = self._chunk is not None
+        if had_active_chunk and self._active_chunk_covers(switch_step):
+            old_index = switch_step - int(self._active_chunk_origin_step)
+            previous_expected = np.asarray(self._chunk[old_index])
+        selected_index = switch_step - int(origin_step)
+        boundary_jump = None
+        if previous_expected is not None and 0 <= selected_index < len(chunk):
+            boundary_jump = float(
+                np.linalg.norm(np.asarray(chunk[selected_index]) - previous_expected)
+            )
         self._chunk = chunk
         self._active_chunk_origin_step = int(origin_step)
         self.last_inference_ms = float(result["elapsed_ms"])
         self.last_used_prefix = bool(result["used_prefix"])
         self.chunk_index += 1
+        return {
+            "chunk_switch_step": switch_step if had_active_chunk else None,
+            "selected_action_index": selected_index,
+            "boundary_action_jump_l2": boundary_jump,
+        }
 
-    def _blocking_fresh_infer(self, query_info: Dict, origin_step: int) -> None:
+    def _blocking_fresh_infer(
+        self,
+        query_info: Dict,
+        origin_step: int,
+        *,
+        last_target_hold: bool = False,
+    ) -> None:
         # Plain inference also replaces the server's cached normalized chunk,
         # which is essential after a stale RTC result is dropped.
-        result = self._infer(query_info, realtime=False)
-        self._activate_result(result, origin_step=origin_step)
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        request_wall_time = time.perf_counter()
+        try:
+            result = self._infer(query_info, realtime=False)
+        except Exception as exc:
+            response_wall_time = time.perf_counter()
+            self.request_diagnostics.append(
+                RTCRequestDiagnostic(
+                    request_control_step=origin_step,
+                    response_control_step=self._absolute_control_step,
+                    request_wall_time=request_wall_time,
+                    response_wall_time=response_wall_time,
+                    latency_ms=(response_wall_time - request_wall_time) * 1000.0,
+                    elapsed_control_steps=0,
+                    predicted_inference_delay=self._delay,
+                    new_chunk_origin_step=origin_step,
+                    splice_index=None,
+                    used_old_steps_after_request=0,
+                    buffer_remaining_at_response=None,
+                    blocked_ms=(response_wall_time - request_wall_time) * 1000.0
+                    if last_target_hold
+                    else 0.0,
+                    stale_response=False,
+                    request_skipped=False,
+                    request_id=request_id,
+                    realtime_request=False,
+                    timed_out=isinstance(exc, TimeoutError),
+                    last_target_hold=last_target_hold,
+                )
+            )
+            raise
+        response_wall_time = time.perf_counter()
+        switch = self._activate_result(result, origin_step=origin_step)
+        self.request_diagnostics.append(
+            RTCRequestDiagnostic(
+                request_control_step=origin_step,
+                response_control_step=self._absolute_control_step,
+                request_wall_time=request_wall_time,
+                response_wall_time=response_wall_time,
+                latency_ms=(response_wall_time - request_wall_time) * 1000.0,
+                elapsed_control_steps=0,
+                predicted_inference_delay=self._delay,
+                new_chunk_origin_step=origin_step,
+                splice_index=switch["selected_action_index"],
+                used_old_steps_after_request=0,
+                buffer_remaining_at_response=None,
+                blocked_ms=(response_wall_time - request_wall_time) * 1000.0
+                if last_target_hold
+                else 0.0,
+                stale_response=False,
+                request_skipped=False,
+                request_id=request_id,
+                realtime_request=False,
+                last_target_hold=last_target_hold,
+                chunk_switch_step=switch["chunk_switch_step"],
+                boundary_action_jump_l2=switch["boundary_action_jump_l2"],
+            )
+        )
 
     # ------------------------------------------------------------------
     # Rolling-s scheduling
@@ -445,6 +530,7 @@ class RTCPolicyClientWrapper:
                 blocked_ms=0.0,
                 stale_response=False,
                 request_skipped=True,
+                realtime_request=True,
             )
         )
 
@@ -494,6 +580,9 @@ class RTCPolicyClientWrapper:
                     stale_response=False,
                     request_skipped=False,
                     request_id=context.request_id,
+                    realtime_request=True,
+                    timed_out=isinstance(box["error"], TimeoutError),
+                    last_target_hold=block,
                 )
             )
             raise RuntimeError(
@@ -516,10 +605,17 @@ class RTCPolicyClientWrapper:
             self.rtc_stale_response_count += 1
             if ownership_mismatch:
                 self.rtc_response_ownership_mismatch_count += 1
+            switch = {
+                "chunk_switch_step": None,
+                "selected_action_index": None,
+                "boundary_action_jump_l2": None,
+            }
         else:
             result = dict(result)
             result["chunk"] = chunk
-            self._activate_result(result, origin_step=context.new_chunk_origin_step)
+            switch = self._activate_result(
+                result, origin_step=context.new_chunk_origin_step
+            )
 
         self.request_diagnostics.append(
             RTCRequestDiagnostic(
@@ -531,7 +627,7 @@ class RTCPolicyClientWrapper:
                 elapsed_control_steps=elapsed_steps,
                 predicted_inference_delay=self._delay,
                 new_chunk_origin_step=context.new_chunk_origin_step,
-                splice_index=None if stale else elapsed_steps,
+                splice_index=switch["selected_action_index"],
                 used_old_steps_after_request=max(elapsed_steps, 0),
                 buffer_remaining_at_response=buffer_remaining,
                 blocked_ms=blocked_ms,
@@ -539,6 +635,10 @@ class RTCPolicyClientWrapper:
                 request_skipped=False,
                 request_id=context.request_id,
                 ownership_mismatch=ownership_mismatch,
+                realtime_request=True,
+                last_target_hold=block,
+                chunk_switch_step=switch["chunk_switch_step"],
+                boundary_action_jump_l2=switch["boundary_action_jump_l2"],
             )
         )
         return not stale
@@ -555,7 +655,9 @@ class RTCPolicyClientWrapper:
                 self._collect_pending(block=True)
             if not self._active_chunk_covers(self._absolute_control_step):
                 self._blocking_fresh_infer(
-                    query_info, origin_step=self._absolute_control_step
+                    query_info,
+                    origin_step=self._absolute_control_step,
+                    last_target_hold=True,
                 )
         finally:
             # Wall-clock blocking is diagnostic only. It must never be turned
@@ -575,5 +677,7 @@ class RTCPolicyClientWrapper:
             execute_length = min(execute_length, self._stride)
         if local_index >= execute_length:
             self._blocking_fresh_infer(
-                query_info, origin_step=self._absolute_control_step
+                query_info,
+                origin_step=self._absolute_control_step,
+                last_target_hold=True,
             )

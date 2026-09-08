@@ -56,16 +56,18 @@ fps: 30
 # from the checkpoint's action_horizon), then re-infer.
 # N=1 means fully closed-loop (re-infer every step).
 steps_per_inference: 20
-# null/none, prefix_pin, or PI05 Kinetix-style pigdm
-rtc_mode: none
+# normal (blocking baseline) or PI05 Kinetix-style pigdm.
+rtc_mode: normal
 # Predicted latency prefix d (control steps), not the rolling request period.
 inference_delay: 4
 # ΠGDM overlap schedule and guidance cap (forwarded unchanged to PI05).
 prefix_attention_schedule: exp
 max_guidance_weight: 5.0
+# PI05 flow-matching steps; keep identical between normal and pigdm.
+num_steps: 10
 
 # Temporal ensembling (TE): mutually exclusive with rtc_mode. 
-temporal_ensemble: true
+temporal_ensemble: false
 # Re-infer every N executed steps; with a 40-step chunk, N=10 keeps ~4 chunks
 # overlapping in the ensemble. Must be < the checkpoint's action chunk size.
 steps_per_inference_te: 1
@@ -89,6 +91,11 @@ camera_keys: ["camera2", "camera"]
 enable_logs: false
 # Directory for the diagnostic logs (only used when enable_logs is true).
 log_dir: "logs"
+
+# Structured normal-vs-pigdm experiment logs. Set these from the CLI so every
+# run has a unique name; an existing run directory is never overwritten.
+experiment_log_dir: ""
+experiment_name: ""
 
 # REQUIRED: training-time dataset_statistics.json (state q01/q99). The policy
 # expects q99-normalized state; the server does NOT normalize it. Point this at

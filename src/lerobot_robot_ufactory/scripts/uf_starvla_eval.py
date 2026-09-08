@@ -16,11 +16,11 @@ Keyboard controls (same as uf_lerobot_eval):
     Right/Left arrow : reset current episode (robot returns to initial pose)
     Esc              : exit eval loop and disconnect
 
-RTC (real-time chunking): set `rtc_mode: prefix_pin` for the hard-prefix
-baseline or `rtc_mode: pigdm` for PI05 Kinetix-style guidance. Requests are
+RTC (real-time chunking): set `rtc_mode: normal` for the blocking baseline or
+`rtc_mode: pigdm` for PI05 Kinetix-style guidance. PiGDM requests are
 issued every `steps_per_inference` absolute control steps while execution
 continues; `inference_delay` is the predicted latency prefix, not that request
-period. `rtc_mode: null` (or "none") keeps the default blocking loop.
+period. `rtc_mode: null` (or "none") keeps the legacy blocking loop.
 
 Temporal ensembling (TE): set `temporal_ensemble: true` to re-infer in the
 background every `steps_per_inference_te` steps and execute, at every control tick,
@@ -31,13 +31,13 @@ Mutually exclusive with `rtc_mode`; `steps_per_inference` is ignored.
 
 import json
 import logging
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pprint import pformat
 
+import lerobot_robot_ufactory  # noqa: F401  # registers uf:: robot/camera types
 import numpy as np
-
-import lerobot_robot_ufactory  # patch: registers uf:: robot/camera types
 # Register camera config subclasses ("opencv", "intelrealsense") so draccus
 # can decode the robot.cameras section; uf_lerobot_eval gets these transitively
 # via lerobot.scripts.lerobot_record, which this script does not import.
@@ -59,6 +59,9 @@ from lerobot_robot_ufactory.utils.starvla_ws_client import (
     TemporalEnsembleClientWrapper,
     WebsocketClientPolicy,
 )
+from lerobot_robot_ufactory.utils.starvla_ws_client.experiment_logger import (
+    ExperimentLogger,
+)
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 
 
@@ -75,9 +78,8 @@ class StarVLAEvalConfig:
     # from the checkpoint (action_horizon=40 for the xarm7 pi05 runs).
     steps_per_inference: int = 25
     # --- RTC (real-time chunking) ---
-    # RTC mode: None / "none" disables (default blocking chunk loop). Any other
-    # value enables RTC and is forwarded to the framework as `mode`:
-    # "prefix_pin" for the hard-prefix baseline; PI05 also supports "pigdm".
+    # "normal" is the blocking chunk baseline. "pigdm" enables RTC and is
+    # forwarded to PI05. None / "none" retain the legacy non-RTC behavior.
     rtc_mode: str | None = None
     # Predicted inference latency prefix d, in control steps.
     inference_delay: int = 8
@@ -85,6 +87,8 @@ class StarVLAEvalConfig:
     # normal (rtc_mode=none) inference.
     prefix_attention_schedule: str = "exp"
     max_guidance_weight: float = 5.0
+    # PI05 flow-matching steps, forwarded identically in normal and pigdm.
+    num_steps: int = 10
     # --- Temporal ensembling (TE) ---
     # Mutually exclusive with rtc_mode. When enabled, a background thread
     # re-infers every `steps_per_inference_te` steps and every control tick executes
@@ -113,6 +117,10 @@ class StarVLAEvalConfig:
     # Directory for 30 Hz state/action diagnostic logs and per-seam diffs
     # (only used when enable_logs is true).
     log_dir: str = "logs"
+    # Optional structured comparison logs. Each experiment gets a new child
+    # directory containing config/events/state/summary files.
+    experiment_log_dir: str = ""
+    experiment_name: str = ""
     # Path to the training-time dataset_statistics.json. REQUIRED: the policy
     # was trained on q99-normalized state (see the checkpoint's DataConfig),
     # and the server does NOT normalize state -- the client must.
@@ -186,17 +194,22 @@ def _build_action_dict(action: np.ndarray) -> dict:
     return action_dict
 
 
-def _rt_joint_state(robot) -> list[float] | None:
-    """Latest joint positions from the 250 Hz RT report cache (non-blocking).
+def _rt_robot_state(
+    robot,
+) -> tuple[list[float] | None, list[float] | None, list[float] | None]:
+    """Latest joint/TCP state from the 250 Hz RT report cache (non-blocking).
 
     This is the same feedback source GELLO recordings use for the state, so
     logging it at 30 Hz does not perturb the control loop. Returns None while
     the report thread has not delivered the first packet.
     """
     if not getattr(robot, "_rt_report_normal", False):
-        return None
+        return None, None, None
     with robot._update_lock:
-        return list(robot.rt_actual_joint_pos)
+        positions = list(robot.rt_actual_joint_pos)
+        velocities = list(robot.rt_actual_joint_speed)
+        tcp_pose = list(robot.rt_actual_tcp_pose)
+    return positions, velocities, tcp_pose
 
 
 def _open_diagnostic_logs(log_dir: str):
@@ -259,8 +272,18 @@ def eval_loop(cfg: StarVLAEvalConfig):
     logging.info(f"starVLA server metadata: {pformat(server_meta)}")
 
     rtc = None
-    rtc_mode = (cfg.rtc_mode or "").strip().lower()
-    if rtc_mode and rtc_mode != "none":
+    requested_rtc_mode = (cfg.rtc_mode or "").strip().lower()
+    rtc_mode = "normal" if requested_rtc_mode in ("", "none", "normal") else requested_rtc_mode
+    if rtc_mode not in ("normal", "prefix_pin", "pigdm"):
+        raise ValueError(
+            f"Unknown rtc_mode={cfg.rtc_mode!r}; use normal, prefix_pin, or pigdm."
+        )
+    if rtc_mode == "normal" and requested_rtc_mode == "normal" and cfg.temporal_ensemble:
+        raise ValueError(
+            "rtc_mode=normal is the plain blocking baseline and cannot use temporal_ensemble. "
+            "Set temporal_ensemble=false for a fair normal/pigdm comparison."
+        )
+    if rtc_mode != "normal":
         action_horizon = server_meta.get("action_chunk_size")
         if not isinstance(action_horizon, int) or action_horizon < 1:
             raise ValueError(
@@ -285,12 +308,12 @@ def eval_loop(cfg: StarVLAEvalConfig):
             client,
             inference_delay=cfg.inference_delay,
             execution_horizon=cfg.steps_per_inference,
-            mode=cfg.rtc_mode,
+            mode=rtc_mode,
             prefix_attention_schedule=cfg.prefix_attention_schedule,
             max_guidance_weight=cfg.max_guidance_weight,
         )
         logging.info(
-            f"RTC enabled: mode={cfg.rtc_mode} inference_delay={cfg.inference_delay} "
+            f"RTC enabled: mode={rtc_mode} inference_delay={cfg.inference_delay} "
             f"execution_horizon={cfg.steps_per_inference} "
             f"prefix_attention_schedule={cfg.prefix_attention_schedule} "
             f"max_guidance_weight={cfg.max_guidance_weight} (fps={cfg.fps})"
@@ -359,6 +382,39 @@ def eval_loop(cfg: StarVLAEvalConfig):
         cfg.log_dir if cfg.enable_logs else ""
     )
     run_start_t = time.perf_counter()
+    experiment_logger = None
+    if cfg.experiment_name and not cfg.experiment_log_dir:
+        raise ValueError("experiment_name requires experiment_log_dir")
+    if cfg.experiment_log_dir:
+        experiment_name = cfg.experiment_name or time.strftime(
+            f"{rtc_mode}_%Y%m%d_%H%M%S"
+        )
+        experiment_logger = ExperimentLogger(
+            cfg.experiment_log_dir,
+            experiment_name,
+            config={
+                "mode": rtc_mode,
+                "checkpoint_path": server_meta.get("ckpt_path"),
+                "server_git_commit": server_meta.get("git_commit"),
+                "inference_delay": cfg.inference_delay,
+                "execution_horizon": cfg.steps_per_inference,
+                "num_steps": cfg.num_steps,
+                "max_guidance_weight": cfg.max_guidance_weight,
+                "prefix_attention_schedule": cfg.prefix_attention_schedule,
+                "control_frequency_hz": cfg.fps,
+                "task_text": cfg.single_task,
+                "use_bf16": server_meta.get("use_bf16"),
+                "resolved_client_config": asdict(cfg),
+            },
+            control_frequency=cfg.fps,
+            inference_delay=cfg.inference_delay,
+        )
+        print(f"Experiment logs: {experiment_logger.run_dir}")
+
+    total_control_step = 0
+    normal_request_id = 0
+    episode_start_control_step = 0
+    run_error = None
 
     try:
         episode = 0
@@ -377,6 +433,8 @@ def eval_loop(cfg: StarVLAEvalConfig):
             current_step = 0
             chunk_index = -1
             last_action = None
+            rtc_diagnostic_cursor = 0
+            episode_start_control_step = total_control_step
             if rtc is not None:
                 rtc.reset()  # drop server-side prev chunk + local chunk state
             if te is not None:
@@ -395,15 +453,71 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     obs = robot.get_observation()
                     state = _build_state(obs, gripper_cmd, state_q01, state_q99)
                     images = [obs[key] for key in cfg.camera_keys]
-                    query = {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
+                    query = {
+                        "examples": [{"image": images, "lang": cfg.single_task, "state": state}],
+                        "num_steps": cfg.num_steps,
+                    }
                     prev_chunk_index = rtc.chunk_index
-                    action = rtc.get_action(query)
+                    try:
+                        action = rtc.get_action(query)
+                    finally:
+                        if experiment_logger is not None:
+                            diagnostics = rtc.request_diagnostics[rtc_diagnostic_cursor:]
+                            for diagnostic in diagnostics:
+                                response_step = diagnostic.response_control_step
+                                switch_step = diagnostic.chunk_switch_step
+                                experiment_logger.record_inference_event(
+                                    control_step=episode_start_control_step
+                                    + (
+                                        response_step
+                                        if response_step is not None
+                                        else diagnostic.request_control_step
+                                    ),
+                                    request_id=diagnostic.request_id,
+                                    request_send_perf=diagnostic.request_wall_time,
+                                    response_receive_perf=diagnostic.response_wall_time,
+                                    request_anchor_step=episode_start_control_step
+                                    + diagnostic.request_control_step,
+                                    response_arrival_step=(
+                                        episode_start_control_step + response_step
+                                        if response_step is not None
+                                        else None
+                                    ),
+                                    actual_elapsed_steps=diagnostic.elapsed_control_steps,
+                                    chunk_switch_step=(
+                                        episode_start_control_step + switch_step
+                                        if switch_step is not None
+                                        else None
+                                    ),
+                                    selected_action_index=diagnostic.splice_index,
+                                    timeout=diagnostic.timed_out,
+                                    last_target_hold=diagnostic.last_target_hold,
+                                    boundary_action_jump_l2=diagnostic.boundary_action_jump_l2,
+                                    request_skipped=diagnostic.request_skipped,
+                                    stale_response=diagnostic.stale_response,
+                                    used_prefix=(
+                                        rtc.last_used_prefix
+                                        if diagnostic.chunk_switch_step is not None
+                                        else None
+                                    ),
+                                    event_type=(
+                                        "rtc_request"
+                                        if diagnostic.realtime_request
+                                        else "plain_request"
+                                    ),
+                                )
+                            rtc_diagnostic_cursor += len(diagnostics)
                     current_step = rtc.current_step_in_chunk + 1
                     if rtc.chunk_index != prev_chunk_index:
                         chunk_index = rtc.chunk_index
                         if seam_writer is not None and last_action is not None:
                             seam_writer.writerow(
-                                [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index, f"{rtc.last_inference_ms:.1f}"]
+                                [
+                                    f"{time.perf_counter() - run_start_t:.6f}",
+                                    episode,
+                                    chunk_index,
+                                    f"{rtc.last_inference_ms:.1f}",
+                                ]
                                 + [f"{v:.6f}" for v in (action - last_action)]
                                 + [f"{v:.6f}" for v in last_action]
                                 + [f"{v:.6f}" for v in action]
@@ -417,7 +531,10 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     obs = robot.get_observation()
                     state = _build_state(obs, gripper_cmd, state_q01, state_q99)
                     images = [obs[key] for key in cfg.camera_keys]
-                    query = {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
+                    query = {
+                        "examples": [{"image": images, "lang": cfg.single_task, "state": state}],
+                        "num_steps": cfg.num_steps,
+                    }
                     prev_chunk_index = te.chunk_index
                     action = te.get_action(query)
                     current_step += 1
@@ -427,7 +544,12 @@ def eval_loop(cfg: StarVLAEvalConfig):
                         chunk_index = te.chunk_index
                         if seam_writer is not None and last_action is not None:
                             seam_writer.writerow(
-                                [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index, f"{te.last_inference_ms:.1f}"]
+                                [
+                                    f"{time.perf_counter() - run_start_t:.6f}",
+                                    episode,
+                                    chunk_index,
+                                    f"{te.last_inference_ms:.1f}",
+                                ]
                                 + [f"{v:.6f}" for v in (action - last_action)]
                                 + [f"{v:.6f}" for v in last_action]
                                 + [f"{v:.6f}" for v in action]
@@ -440,25 +562,84 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     # Get robot observation
                     obs = robot.get_observation()
                     state = _build_state(obs, gripper_cmd, state_q01, state_q99)
-                    images = [obs[key] for key in cfg.camera_keys]  # uint8 HWC RGB, in training order
+                    # uint8 HWC RGB, in training order.
+                    images = [obs[key] for key in cfg.camera_keys]
 
                     # NOTE: inference is blocking (one flow-matching pass can take
                     # several hundred ms) and no actions are sent while waiting.
                     # Mode 6 holds the last commanded online-trajectory target, so
                     # the arm simply pauses between action chunks.
                     infer_start_t = time.perf_counter()
-                    resp = client.predict_action(
-                        {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
-                    )
+                    request_id = normal_request_id
+                    normal_request_id += 1
+                    previous_expected = None
+                    if current_actions is not None and current_step < len(current_actions):
+                        previous_expected = np.asarray(current_actions[current_step])
+                    try:
+                        resp = client.predict_action(
+                            {
+                                "examples": [
+                                    {"image": images, "lang": cfg.single_task, "state": state}
+                                ],
+                                "num_steps": cfg.num_steps,
+                            }
+                        )
+                    except Exception as exc:
+                        infer_end_t = time.perf_counter()
+                        if experiment_logger is not None:
+                            experiment_logger.record_inference_event(
+                                control_step=total_control_step,
+                                request_id=request_id,
+                                request_send_perf=infer_start_t,
+                                response_receive_perf=infer_end_t,
+                                request_anchor_step=total_control_step,
+                                response_arrival_step=total_control_step,
+                                actual_elapsed_steps=0,
+                                chunk_switch_step=None,
+                                selected_action_index=None,
+                                timeout=isinstance(exc, TimeoutError),
+                                last_target_hold=current_actions is not None,
+                                boundary_action_jump_l2=None,
+                                event_type="normal_request",
+                                error=str(exc),
+                            )
+                        raise
+                    infer_end_t = time.perf_counter()
                     inference_ms = (time.perf_counter() - infer_start_t) * 1000
                     new_actions = np.asarray(resp["data"]["actions"][0])  # (T, 8), denormalized
+                    boundary_jump = None
+                    if previous_expected is not None:
+                        boundary_jump = float(np.linalg.norm(new_actions[0] - previous_expected))
+                    if experiment_logger is not None:
+                        experiment_logger.record_inference_event(
+                            control_step=total_control_step,
+                            request_id=request_id,
+                            request_send_perf=infer_start_t,
+                            response_receive_perf=infer_end_t,
+                            request_anchor_step=total_control_step,
+                            response_arrival_step=total_control_step,
+                            actual_elapsed_steps=0,
+                            chunk_switch_step=(
+                                total_control_step if current_actions is not None else None
+                            ),
+                            selected_action_index=0,
+                            timeout=False,
+                            last_target_hold=current_actions is not None,
+                            boundary_action_jump_l2=boundary_jump,
+                            event_type="normal_request",
+                        )
 
                     # Seam diagnostic: how far the new chunk's first action
                     # jumps from the last action actually executed.
                     if seam_writer is not None and current_actions is not None and current_step > 0:
                         last_executed = current_actions[current_step - 1]
                         seam_writer.writerow(
-                            [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index + 1, f"{inference_ms:.1f}"]
+                            [
+                                f"{time.perf_counter() - run_start_t:.6f}",
+                                episode,
+                                chunk_index + 1,
+                                f"{inference_ms:.1f}",
+                            ]
                             + [f"{v:.6f}" for v in (new_actions[0] - last_executed)]
                             + [f"{v:.6f}" for v in last_executed]
                             + [f"{v:.6f}" for v in new_actions[0]]
@@ -488,23 +669,70 @@ def eval_loop(cfg: StarVLAEvalConfig):
                 # 30 Hz state/action row. State comes from the RT report
                 # cache (same source as GELLO recordings), so this does not
                 # add any blocking controller reads to the control loop.
+                actual_positions = actual_velocities = actual_tcp_pose = None
+                if step_writer is not None or experiment_logger is not None:
+                    actual_positions, actual_velocities, actual_tcp_pose = _rt_robot_state(robot)
                 if step_writer is not None:
-                    joints = _rt_joint_state(robot) or [float("nan")] * 7
+                    joints = actual_positions or [float("nan")] * 7
                     step_writer.writerow(
-                        [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index, current_step - 1]
+                        [
+                            f"{time.perf_counter() - run_start_t:.6f}",
+                            episode,
+                            chunk_index,
+                            current_step - 1,
+                        ]
                         + [f"{v:.6f}" for v in joints]
                         + ["" if gripper_cmd is None else f"{gripper_cmd:.4f}"]
                         + [f"{v:.6f}" for v in action]
                     )
+                if experiment_logger is not None:
+                    experiment_logger.record_robot_state(
+                        control_step=total_control_step,
+                        episode=episode,
+                        chunk=chunk_index,
+                        selected_action_index=current_step - 1,
+                        commanded_action=action,
+                        actual_joint_position=actual_positions,
+                        actual_joint_velocity=actual_velocities,
+                        actual_tcp_pose=actual_tcp_pose,
+                    )
+                total_control_step += 1
 
                 dt_s = time.perf_counter() - start_loop_t
                 precise_sleep(sleep_time_s - dt_s)
 
             episode += 1
 
+    except BaseException as exc:
+        run_error = exc
+        raise
     finally:
         print("\n********** starVLA Policy Eval Loop Exit **********")
         close_logs()
+        if experiment_logger is not None:
+            pending = rtc.pending_request_context if rtc is not None else None
+            if pending is not None:
+                experiment_logger.record_inference_event(
+                    control_step=total_control_step,
+                    request_id=pending.request_id,
+                    request_send_perf=pending.request_wall_time,
+                    response_receive_perf=None,
+                    request_anchor_step=episode_start_control_step
+                    + pending.request_control_step,
+                    response_arrival_step=None,
+                    actual_elapsed_steps=rtc.absolute_control_step
+                    - pending.request_control_step,
+                    chunk_switch_step=None,
+                    selected_action_index=None,
+                    timeout=False,
+                    last_target_hold=False,
+                    boundary_action_jump_l2=None,
+                    event_type="inflight_at_exit",
+                )
+            experiment_logger.close(
+                status="failed" if run_error is not None else "completed",
+                error=str(run_error) if run_error is not None else None,
+            )
         client.close()
         if robot.is_connected:
             robot.disconnect()
@@ -519,6 +747,24 @@ def get_cfg(cfg: StarVLAEvalConfig) -> StarVLAEvalConfig:
 
 def main():
     register_third_party_plugins()
+    aliases = {
+        "--rtc-mode": "--rtc_mode",
+        "--experiment-log-dir": "--experiment_log_dir",
+        "--experiment-name": "--experiment_name",
+        "--inference-delay": "--inference_delay",
+        "--execution-horizon": "--steps_per_inference",
+        "--num-steps": "--num_steps",
+        "--prefix-attention-schedule": "--prefix_attention_schedule",
+        "--max-guidance-weight": "--max_guidance_weight",
+    }
+    normalized_args = []
+    for argument in sys.argv[1:]:
+        option, separator, value = argument.partition("=")
+        normalized_option = aliases.get(option, option)
+        normalized_args.append(
+            normalized_option + separator + value if separator else normalized_option
+        )
+    sys.argv[1:] = normalized_args
     cfg = get_cfg()
     eval_loop(cfg)
 
