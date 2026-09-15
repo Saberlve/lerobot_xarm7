@@ -22,6 +22,12 @@ from lerobot.cameras.configs import CameraConfig
 
 
 def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> dict[str, Camera]:
+    xense_serials = [
+        cfg.serial_number for cfg in camera_configs.values()
+        if cfg.type == "photon"
+    ]
+    if len(xense_serials) != len(set(xense_serials)):
+        raise ValueError("Each Xense Photon camera must have a distinct serial_number")
     lerobot_camera_configs = {key: cfg for key, cfg in camera_configs.items() if not cfg.type.startswith("uf::")}
     uf_camera_configs = {key: cfg for key, cfg in camera_configs.items() if cfg.type.startswith("uf::")}
     cameras = lerobot_make_cameras_from_configs(lerobot_camera_configs)

@@ -1252,6 +1252,9 @@ gello = [
 spacemouse = [
     { name = "spnav" },
 ]
+xense = [
+    { name = "xensesdk" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1271,8 +1274,9 @@ requires-dist = [
     { name = "spnav", marker = "extra == 'spacemouse'", git = "https://github.com/kazoo-osaro/spnav" },
     { name = "websockets" },
     { name = "xarm-python-sdk" },
+    { name = "xensesdk", marker = "extra == 'xense'", specifier = ">=2.0.0,<3" },
 ]
-provides-extras = ["gello", "spacemouse", "dev"]
+provides-extras = ["xense", "gello", "spacemouse", "dev"]
 
 [[package]]
 name = "librt"
@@ -4057,6 +4061,21 @@ source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/e3/f1/5dcf5ed5bfd009b226a9656c1401df1782f7f86c7292696bb753366c9267/xarm_python_sdk-1.18.4.tar.gz", hash = "sha256:75acad469c106e1cb7074762015980372564e88a6d62b64ebaea1c7c580332d5" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/0f/25/ad2814469965e765dcf86c12276505a8aadd3d00c387aed82519f6c45434/xarm_python_sdk-1.18.4-py3-none-any.whl", hash = "sha256:943ce66308bc49619386d6eaf428a2783bcd202c1fbe3fe79de87d5f89647989" },
+]
+
+[[package]]
+name = "xensesdk"
+version = "2.0.1"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/4d/cd/86bcf4463a0fd833529b47697a1094c4997c4a7d150954b3304236cfe382/xensesdk-2.0.1-cp310-cp310-manylinux_2_34_aarch64.whl", hash = "sha256:9b0c5574c1a71280968d44dcbfe2085a98c0bac78256c1e22a15acc2bcf5a399" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/90/0e/2519ad859ad68c3e5dac1d95030fdafcd3931516f031a705ce45b48263b2/xensesdk-2.0.1-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "sha256:89038c89673d4ed5a16b7c599fb0e7a1b75aa96f6d926d06aff7bee1753ec7e5" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/26/ec/33164cdd60dcbc33bd35125fb1eca28e487d1eb252508c2b44f3b3552676/xensesdk-2.0.1-cp310-cp310-win_amd64.whl", hash = "sha256:c6111f485f6a4db3ec159d8cbc3feb41e1014b5b36ba47c269d1c3587e871b01" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/d1/69/c7c1dcf4fe9f4c7302655c03b1266f00144f00587a10e3b733d6f6604940/xensesdk-2.0.1-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "sha256:4b86adaabfbcc86d4e878b6aa42785705a97b1391e68eb464865d33d25c6e2ff" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/7a/9f/f0e6dc2067ed9a8510fc08be0385f6adc711d7c0adcb722a034c8a9c64b7/xensesdk-2.0.1-cp311-cp311-win_amd64.whl", hash = "sha256:f29717eccf4683c8757aa500609b828c6559a9e49db7625668ab274d370ade2b" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/72/04/45c226a7dcbcd553daa844f2c05b0625bcfee32dcae9bc44e939ed709eaa/xensesdk-2.0.1-cp312-cp312-manylinux_2_34_aarch64.whl", hash = "sha256:e600fe54865a18d5c18bf5ca582740d508833b1c27c75dbcad83657945557978" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/bf/bc/75eba107579dc165205c13528ec37c3d05c154e0e3f70202db927babd9cd/xensesdk-2.0.1-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:8d7c2dde01175e6d5e53e0fd6aaf9f69199799c522bf54299ca5360719ed3443" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/5c/a9/6bc799f39dc6a79afec8b3d7645ffac88827663342ea0801aa1b3ad4b3fd/xensesdk-2.0.1-cp312-cp312-win_amd64.whl", hash = "sha256:df64c81296ae5d8f64f2cb32f59c38020cd25b988ee32b7f7b945a0dc2c32a5b" },
 ]
 
 [[package]]

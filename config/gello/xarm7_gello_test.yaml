@@ -53,7 +53,7 @@ teleop:
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
   gripper_id: 8
   # Gripper input: "gello" or keyboard C/O hold control.
-  gripper_control_mode: keyboard
+  gripper_control_mode: gello
   # Gripper move per keyboard C/O tap, in mm of the G2 stroke.
   gripper_keyboard_step_mm: 2.0
   # Hold C/O for this long (seconds) before continuous open/close starts.

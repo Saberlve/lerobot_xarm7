@@ -3,6 +3,7 @@ import os
 # register plugin
 import lerobot_robot_ufactory.cameras.umi_camera
 import lerobot_robot_ufactory.cameras.gsmini_camera
+import lerobot_robot_ufactory.cameras.xense_photon_camera
 import lerobot_robot_ufactory.robots.uf_robot
 import lerobot_robot_ufactory.robots.uf_mock_robot
 import lerobot_robot_ufactory.teleoperators.uf_mock_teleop

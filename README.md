@@ -15,6 +15,7 @@ Collected data is stored in the standard LeRobot dataset format and can be used 
 - 🎮 GELLO joint-space teleoperation (Dynamixel leader arm)
 - ✋ Manual drag recording via xArm teach mode
 - 📷 Intel RealSense camera observation (D435 / D435i)
+- Dual Xense Photon tactile image recording: [setup guide (Chinese)](docs/xense_photon_zh.md)
 - 📊 LeRobot-compatible dataset recording & management
 - 🧠 Imitation learning training and policy inference
 - ▶️ Episode replay for recorded manual demonstrations

@@ -1,0 +1,2 @@
+# Xense Robotics USB devices; add the recording user to the xense group.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="3938", MODE="0660", GROUP="xense"

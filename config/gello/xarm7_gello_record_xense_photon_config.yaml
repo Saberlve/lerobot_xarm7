@@ -1,0 +1,132 @@
+robot:
+  type: uf::robot
+  id: "uf_robot"
+  robot_dof: 7
+  control_space: "joint"
+  # Saved dataset representation: "joint" records J1..J7 (rad); "tcp" records
+  # the FK-converted TCP pose (mm; continuous 6D rotation, Zhou et al. CVPR 2019);
+  # "both" records joints and TCP pose side by side. Control stays in joint space.
+  record_space: "joint"
+  robot_ip: "192.168.1.245"
+  # 2: xArm Gripper G2 (0-84 mm opening range).
+  gripper_type: 2
+  enable_logs: false
+  # Software timestamp pairing for robot state, both RealSense RGB streams,
+  # and both Photon streams. A recording step fails when either bound is
+  # exceeded, so it cannot save a mismatched frame.
+  sync_max_skew_ms: 20
+  sync_pair_max_skew_ms: 20
+  sync_wait_ms: 40
+  sync_history_size: 90
+  # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
+  gripper_speed: 100
+  # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
+  gripper_force: 50
+  # Phase 1: cache G2 actual Q-axis current from TCP 30000; no GELLO output yet.
+  gripper_current_monitor: false
+  gripper_current_monitor_frequency_hz: 250
+  gripper_current_stale_timeout_s: 0.25
+  # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
+  joint_command_mode: 6
+  max_joint_velocity: 120
+  # TCP z floor in the xArm base coordinate system (mm).
+  min_tcp_z_mm: -2.0
+  # CPU-local FK/Jacobian projection keeps mode-6 commands free of synchronous SDK queries.
+  tcp_z_guard_backend: "local_projection"
+  tcp_z_soft_margin_mm: 0.5
+  local_kinematics_max_error_mm: 2.0
+  controller_safety_boundary: true
+  # Append gripper initialization/read/write failures here.
+  gripper_error_log_path: "logs/xarm7_gripper_errors.log"
+  cameras:
+    camera:
+      type: intelrealsense
+      serial_number_or_name: "242622070583"
+      width: 640
+      height: 480
+      # RealSense has no 25 fps mode; stream at 30 and the 25 Hz recorder
+      # simply picks the latest frame each cycle.
+      fps: 30
+    camera2:
+      type: intelrealsense
+      serial_number_or_name: "148522072685"
+      width: 640
+      height: 480
+      fps: 30
+    # Replace both serial numbers with Sensor.scanSerialNumber() results.
+    # These dimensions are saved image sizes, not a Photon hardware mode.
+    xense_left:
+      type: photon
+      serial_number: "REPLACE_WITH_LEFT_PHOTON_SN"
+      width: 400
+      height: 700
+      fps: 30
+      output_type: Rectify
+      color_mode: rgb
+      use_gpu: false
+      # Rectify RGB, Marker3DFlow and TimeStamp come from one SDK call.
+      disable_infer: false
+      save_marker_motion_3d: true
+      marker_rows: 35
+      marker_cols: 20
+      sync_history_size: 90
+      timeout_ms: 2000
+      max_frame_age_ms: 1000
+      # config_path: /absolute/path/to/xense/calibrations
+    xense_right:
+      type: photon
+      serial_number: "REPLACE_WITH_RIGHT_PHOTON_SN"
+      width: 400
+      height: 700
+      fps: 30
+      output_type: Rectify
+      color_mode: rgb
+      use_gpu: false
+      # Rectify RGB, Marker3DFlow and TimeStamp come from one SDK call.
+      disable_infer: false
+      save_marker_motion_3d: true
+      marker_rows: 35
+      marker_cols: 20
+      sync_history_size: 90
+      timeout_ms: 2000
+      max_frame_age_ms: 1000
+      # config_path: /absolute/path/to/xense/calibrations
+  # Redundant args, indicating the initial pose of xarm7. Set by 192.168.1.245:18333
+  # start_joints: [0, -30, 0, 0, 0, 30, 0]
+# make sure to edit with your correct configurations!
+teleop:
+  type: uf::gello_teleop
+  id: "gello_teleop"
+  # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.
+  realtime_control_fps: 25
+  port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
+  joint_ids: [1, 2, 3, 4, 5, 6, 7]
+  joint_signs: [1, 1, 1, 1, 1, 1, 1]
+  gripper_id: 8
+  gripper_control_mode: gello
+  gripper_open_deg: 198.28125
+  gripper_close_deg: 155.75
+
+# Lossy browser preview of the frames already captured for the dataset.
+# JPEG encoding and network I/O run in the background; preview frames are
+# dropped instead of delaying the 25 Hz recorder or GELLO control loop.
+web_preview:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8765
+  fps: 8
+  width: 480
+  jpeg_quality: 65
+
+synchronize: true
+
+dataset:
+  # Dataset path relative to the directory where the command is started.
+  root: "datasets/xarm7_gello_xense_photon_datas1"
+  repo_id: "ufactory/xarm7_gello_xense_photon_datas1"
+  single_task: "Pick up the purple grape and drop into the box on the left."
+  # Record at 25 Hz; each Photon reader polls the SDK independently at 30 Hz.
+  fps: 25
+  episode_time_s: 60  # max duration for one episode
+  reset_time_s: 20    # time for resetting env between episodes
+  push_to_hub: False

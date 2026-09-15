@@ -52,6 +52,8 @@ uf-test-gello-gripper-current = "lerobot_robot_ufactory.scripts.uf_test_gello_gr
 uf-test-gripper-force-feedback = "lerobot_robot_ufactory.scripts.uf_test_gripper_force_feedback:main"
 
 [project.optional-dependencies]
+# Xense Photon tactile images (inference disabled by default).
+xense = ["xensesdk>=2.0.0,<3"]
 # GELLO 遥操作
 gello = [
     "gello @ git+https://github.com/xArm-Developer/gello_software.git",

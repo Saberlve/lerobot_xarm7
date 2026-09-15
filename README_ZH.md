@@ -15,6 +15,7 @@ UFACTORY xArm 与 [LeRobot](https://github.com/huggingface/lerobot) 框架的集
 - 🎮 GELLO 关节空间遥操作（Dynamixel 示教臂）
 - ✋ xArm 示教模式手动拖拽采集
 - 📷 Intel RealSense 相机观测（D435 / D435i）
+- 双 Xense Photon 触觉图像采集：[安装与配置](docs/xense_photon_zh.md)
 - 📊 兼容 LeRobot 格式的数据集录制与管理
 - 🧠 模仿学习训练与策略推理
 - ▶️ 手动演示数据的 episode 回放
