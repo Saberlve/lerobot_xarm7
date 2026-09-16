@@ -139,8 +139,8 @@ def test_duplicate_serial_rejected():
 def test_two_sensors_and_lifecycle(sdk):
     _, instances = sdk
     assert len(XensePhotonCamera.find_cameras()) == 2
-    left = XensePhotonCamera(config(config_path="/calibration", use_gpu=False,
-                                    disable_infer=True, save_marker_motion_3d=False))
+    left = XensePhotonCamera(config(config_path="/calibration", disable_infer=True,
+                                    save_marker_motion_3d=False))
     right = XensePhotonCamera(config("RIGHT", output_type="Raw",
                                      disable_infer=True, save_marker_motion_3d=False))
     with pytest.raises(DeviceNotConnectedError):
@@ -157,9 +157,7 @@ def test_two_sensors_and_lifecycle(sdk):
         np.testing.assert_array_equal(left.read(ColorMode.BGR)[0, 0], [10, 20, 30])
         frame[:] = 0
         assert left.read()[0, 0, 0] == 30
-        assert instances[0].kwargs == dict(
-            use_gpu=False, disable_infer=True, config_path="/calibration"
-        )
+        assert instances[0].kwargs == dict(disable_infer=True, config_path="/calibration")
         assert instances[1].output == (2, 5)
     finally:
         left.disconnect()
@@ -275,18 +273,12 @@ def test_missing_sdk_is_optional(monkeypatch):
     assert not camera.is_connected
 
 
-def test_sdk_21_create_without_use_gpu(sdk, monkeypatch):
-    sensor, instances = sdk
-    original = sensor.create
-
-    def modern_create(serial, *, disable_infer, config_path=None):
-        return original(serial, disable_infer=disable_infer, config_path=config_path)
-
-    monkeypatch.setattr(sensor, "create", modern_create)
+def test_sdk_create_uses_supported_options(sdk):
+    _, instances = sdk
     camera = XensePhotonCamera(config())
     camera.connect()
     try:
-        assert "use_gpu" not in instances[0].kwargs
+        assert instances[0].kwargs == {"disable_infer": False}
         assert camera.sync_samples()
     finally:
         camera.disconnect()

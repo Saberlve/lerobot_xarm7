@@ -11,23 +11,6 @@ robot:
   # 2: xArm Gripper G2 (0-84 mm opening range).
   gripper_type: 2
   enable_logs: false
-  # Software timestamp pairing for robot state, both RealSense RGB streams,
-  # and both Photon streams. A recording step fails when either bound is
-  # exceeded, so it cannot save a mismatched frame.
-  # Bounds validated by the four-camera hardware probe. The independent 30 Hz
-  # streams cannot reliably satisfy tighter gates (see docs/xense_photon_zh.md).
-  sync_max_skew_ms: 70.0
-  sync_pair_max_skew_ms: 90.0
-  sync_wait_ms: 70.0
-  sync_history_size: 90
-  # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
-  gripper_speed: 100
-  # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
-  gripper_force: 50
-  # Phase 1: cache G2 actual Q-axis current from TCP 30000; no GELLO output yet.
-  gripper_current_monitor: false
-  gripper_current_monitor_frequency_hz: 250
-  gripper_current_stale_timeout_s: 0.25
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
   joint_command_mode: 6
   max_joint_velocity: 120
@@ -64,7 +47,6 @@ robot:
       fps: 60  # 最终按60hz采触觉
       output_type: Rectify
       color_mode: rgb
-      use_gpu: false
       # This device/SDK provides Mesh3DFlow, not Marker3DFlow.
       disable_infer: false
       save_marker_motion_3d: true
@@ -72,9 +54,6 @@ robot:
       infer_mode: fast
       marker_rows: 35
       marker_cols: 20
-      sync_history_size: 90
-      timeout_ms: 2000
-      max_frame_age_ms: 1000
       # config_path: /absolute/path/to/xense/calibrations
     photon_left:  # 左边
       type: photon
@@ -84,7 +63,6 @@ robot:
       fps: 60
       output_type: Rectify
       color_mode: rgb
-      use_gpu: false
       # Rectify RGB, Mesh3DFlow and TimeStamp come from one SDK call.
       disable_infer: false
       save_marker_motion_3d: true
@@ -92,9 +70,6 @@ robot:
       infer_mode: fast
       marker_rows: 35
       marker_cols: 20
-      sync_history_size: 90
-      timeout_ms: 2000
-      max_frame_age_ms: 1000
       # config_path: /absolute/path/to/xense/calibrations
   # Redundant args, indicating the initial pose of xarm7. Set by 192.168.1.245:18333
   # start_joints: [0, -30, 0, 0, 0, 30, 0]

@@ -6,8 +6,6 @@ consumers receive timestamped copies with bounded cache age.
 
 from collections import deque
 from dataclasses import dataclass
-import inspect
-import logging
 from threading import Condition, Event, Thread
 from time import perf_counter
 from typing import Any
@@ -79,16 +77,7 @@ class XensePhotonCamera(Camera):
             raise DeviceAlreadyConnectedError()
         sensor_class = _sensor_class()
         output = getattr(sensor_class.OutputType, self.config.output_type)
-        kwargs = {"use_gpu": self.config.use_gpu, "disable_infer": self.config.disable_infer}
-        parameters = inspect.signature(sensor_class.create).parameters
-        if "use_gpu" not in parameters and not any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
-        ):
-            kwargs.pop("use_gpu")
-            logging.getLogger(__name__).info(
-                "This Xense SDK selects its inference device from the sensor runtime "
-                "configuration; the legacy use_gpu option is not supported."
-            )
+        kwargs = {"disable_infer": self.config.disable_infer}
         if self.config.config_path is not None:
             kwargs["config_path"] = self.config.config_path
         if self.config.infer_mode is not None:

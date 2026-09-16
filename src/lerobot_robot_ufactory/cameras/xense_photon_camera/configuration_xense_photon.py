@@ -17,7 +17,6 @@ class XensePhotonCameraConfig(CameraConfig):
     config_path: str | None = None
     # Save the SDK Marker3DFlow output with the RGB image. The SDK documents
     # this as the 3D marker displacement field.
-    use_gpu: bool = True
     disable_infer: bool = False
     save_marker_motion_3d: bool = True
     # Legacy save_marker_motion_3d enables the selected displacement output.
@@ -27,8 +26,8 @@ class XensePhotonCameraConfig(CameraConfig):
     marker_rows: int = 35
     marker_cols: int = 20
     # Recent complete SDK samples retained for timestamp-bounded pairing by
-    # the recorder. At 30 Hz, 90 samples retain roughly three seconds.
-    sync_history_size: int = 90
+    # the recorder. At 30 Hz, 30 samples retain roughly one second.
+    sync_history_size: int = 30
     timeout_ms: int = 2000
     max_frame_age_ms: int = 1000
 

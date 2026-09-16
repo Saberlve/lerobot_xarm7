@@ -33,10 +33,10 @@ class UFRobotConfig(RobotConfig):
     enable_logs: bool = False  # optional per-cycle timing and diagnostic logs
     # Software-bounded pairing for robot state, every RGB camera and Photon.
     # These are host monotonic-clock bounds, not a common hardware trigger.
-    sync_max_skew_ms: float = 15.0
-    sync_pair_max_skew_ms: float = 10.0
-    sync_wait_ms: float = 40.0
-    sync_history_size: int = 90
+    sync_max_skew_ms: float = 70.0
+    sync_pair_max_skew_ms: float = 90.0
+    sync_wait_ms: float = 70.0
+    sync_history_size: int = 30
     observe_joint_vel: bool = False # only effective in joint control mode
     manual_mode: bool = False  # xArm joint teaching mode; records state and optional gripper actions
     manual_gripper_speed: float = 0.5  # normalized gripper position per second in manual mode
