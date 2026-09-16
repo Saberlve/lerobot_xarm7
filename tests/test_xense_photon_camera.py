@@ -51,6 +51,7 @@ def sdk(monkeypatch):
             Difference=3,
             Marker3DFlow=4,
             TimeStamp=5,
+            Mesh3DFlow=6,
         )
 
         @staticmethod
@@ -63,7 +64,7 @@ def sdk(monkeypatch):
             obj.serial, obj.kwargs = serial, kwargs
             obj.frame = np.full((6, 4, 3), [10, 20, 30 if serial == "LEFT" else 90], np.uint8)
             obj.marker_motion_3d = np.full((35, 20, 3), 1.25, np.float32)
-            obj.timestamp = np.array(42.5, dtype=np.float64)
+            obj.timestamp = np.array(1_700_000_042.5, dtype=np.float64)
             obj.released = False
             obj.error = None
             obj.gate = None
@@ -80,6 +81,8 @@ def sdk(monkeypatch):
                 raise self.error
             if len(outputs) == 1:
                 return self.frame
+            if len(outputs) == 2:
+                return self.frame, self.timestamp
             return self.frame, self.marker_motion_3d, self.timestamp
 
         def release(self):
@@ -102,14 +105,14 @@ def test_registration_and_yaml():
     configs = {
         key: draccus.decode(CameraConfig, value)
         for key, value in raw["robot"]["cameras"].items()
-        if key.startswith("xense_")
+        if value["type"] == "photon"
     }
     cameras = make_cameras_from_configs(configs)
-    assert set(cameras) == {"xense_left", "xense_right"}
+    assert set(cameras) == {"photon_right", "photon_left"}
     assert all(isinstance(cam, XensePhotonCamera) for cam in cameras.values())
-    assert cameras["xense_left"].config.color_mode == ColorMode.RGB
-    assert cameras["xense_left"].saves_marker_motion_3d
-    assert not cameras["xense_left"].config.disable_infer
+    assert cameras["photon_right"].config.color_mode == ColorMode.RGB
+    assert cameras["photon_right"].saves_marker_motion_3d
+    assert not cameras["photon_right"].config.disable_infer
 
 
 @pytest.mark.parametrize(
@@ -120,7 +123,7 @@ def test_registration_and_yaml():
         dict(serial_number=""),
         dict(output_type="Depth"),
         dict(color_mode="gray"),
-        dict(save_marker_motion_3d=True),
+        dict(save_marker_motion_3d=True, disable_infer=True),
     ],
 )
 def test_bad_config(kwargs):
@@ -136,8 +139,10 @@ def test_duplicate_serial_rejected():
 def test_two_sensors_and_lifecycle(sdk):
     _, instances = sdk
     assert len(XensePhotonCamera.find_cameras()) == 2
-    left = XensePhotonCamera(config(config_path="/calibration"))
-    right = XensePhotonCamera(config("RIGHT", output_type="Raw"))
+    left = XensePhotonCamera(config(config_path="/calibration", use_gpu=False,
+                                    disable_infer=True, save_marker_motion_3d=False))
+    right = XensePhotonCamera(config("RIGHT", output_type="Raw",
+                                     disable_infer=True, save_marker_motion_3d=False))
     with pytest.raises(DeviceNotConnectedError):
         left.read()
     left.connect()
@@ -155,7 +160,7 @@ def test_two_sensors_and_lifecycle(sdk):
         assert instances[0].kwargs == dict(
             use_gpu=False, disable_infer=True, config_path="/calibration"
         )
-        assert instances[1].output == 2
+        assert instances[1].output == (2, 5)
     finally:
         left.disconnect()
         right.disconnect()
@@ -177,7 +182,7 @@ def test_marker_motion_3d_and_rgb_share_one_sdk_sample(sdk):
         np.testing.assert_array_equal(frame[0, 0], [30, 20, 10])
         assert tactile["marker_motion_3d"].shape == (35, 20, 3)
         assert tactile["marker_motion_3d"].dtype == np.float32
-        assert tactile["sensor_timestamp_s"] == pytest.approx(42.5)
+        assert tactile["sensor_timestamp_s"] == pytest.approx(1_700_000_042.5)
         assert tactile["capture_monotonic_s"] > 0
         tactile["marker_motion_3d"][:] = 0
         assert camera.async_read_with_marker_motion_3d()[1]["marker_motion_3d"][0, 0, 0] == 1.25
@@ -217,7 +222,7 @@ def test_nearest_marker_sample_enforces_the_time_budget(sdk):
 
 def test_empty_warmup_releases(sdk, monkeypatch):
     sensor, instances = sdk
-    monkeypatch.setattr(sensor, "selectSensorInfo", lambda self, output: None)
+    monkeypatch.setattr(sensor, "selectSensorInfo", lambda self, *outputs: (None, None, None))
     camera = XensePhotonCamera(config(timeout_ms=30))
     with pytest.raises(TimeoutError):
         camera.connect()
@@ -228,7 +233,7 @@ def test_empty_warmup_releases(sdk, monkeypatch):
 def test_worker_failure_propagates_and_releases(sdk, monkeypatch):
     sensor, instances = sdk
 
-    def fail(self, output):
+    def fail(self, *outputs):
         raise OSError("USB disconnected")
 
     monkeypatch.setattr(sensor, "selectSensorInfo", fail)
@@ -268,3 +273,48 @@ def test_missing_sdk_is_optional(monkeypatch):
     with pytest.raises(ImportError, match="pip install"):
         camera.connect()
     assert not camera.is_connected
+
+
+def test_sdk_21_create_without_use_gpu(sdk, monkeypatch):
+    sensor, instances = sdk
+    original = sensor.create
+
+    def modern_create(serial, *, disable_infer, config_path=None):
+        return original(serial, disable_infer=disable_infer, config_path=config_path)
+
+    monkeypatch.setattr(sensor, "create", modern_create)
+    camera = XensePhotonCamera(config())
+    camera.connect()
+    try:
+        assert "use_gpu" not in instances[0].kwargs
+        assert camera.sync_samples()
+    finally:
+        camera.disconnect()
+
+
+def test_repeated_sdk_timestamp_does_not_refresh_history(sdk):
+    from time import sleep
+    camera = XensePhotonCamera(config())
+    camera.connect()
+    try:
+        first = camera.sync_samples()[0]
+        sleep(0.05)
+        samples = camera.sync_samples()
+        assert len(samples) == 1
+        assert samples[0].capture_monotonic_s == first.capture_monotonic_s
+    finally:
+        camera.disconnect()
+
+
+def test_mesh_displacement_has_distinct_dataset_key(sdk):
+    _, instances = sdk
+    camera = XensePhotonCamera(config(motion_3d_output="Mesh3DFlow"))
+    camera.connect()
+    try:
+        frame, timing = camera.export_sync_sample(camera.sync_samples()[0])
+        assert instances[0].output == (1, 6, 5)
+        assert "mesh_motion_3d" in timing
+        assert "marker_motion_3d" not in timing
+        assert frame.shape == (12, 8, 3)
+    finally:
+        camera.disconnect()

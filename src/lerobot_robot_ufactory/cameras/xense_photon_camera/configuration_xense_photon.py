@@ -20,6 +20,10 @@ class XensePhotonCameraConfig(CameraConfig):
     use_gpu: bool = True
     disable_infer: bool = False
     save_marker_motion_3d: bool = True
+    # Legacy save_marker_motion_3d enables the selected displacement output.
+    # Mesh3DFlow and Marker3DFlow have distinct dataset feature names.
+    motion_3d_output: str = "Marker3DFlow"
+    infer_mode: str | None = None
     marker_rows: int = 35
     marker_cols: int = 20
     # Recent complete SDK samples retained for timestamp-bounded pairing by
@@ -48,4 +52,6 @@ class XensePhotonCameraConfig(CameraConfig):
             raise ValueError("output_type must be Rectify, Raw or Difference (BGR images)")
         if self.save_marker_motion_3d and self.disable_infer:
             raise ValueError("save_marker_motion_3d requires disable_infer=False")
+        if self.motion_3d_output not in ("Marker3DFlow", "Mesh3DFlow"):
+            raise ValueError("motion_3d_output must be Marker3DFlow or Mesh3DFlow")
         self.color_mode = ColorMode(self.color_mode)

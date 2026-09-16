@@ -9,9 +9,13 @@ from datetime import datetime
 from enum import IntEnum
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Thread, Event, Lock
+from threading import Condition, Thread, Event, Lock
 from lerobot.robots import Robot
 from lerobot.cameras.utils import make_cameras_from_configs
+from lerobot_robot_ufactory.cameras.synchronization import (
+    TimestampedCameraBuffer,
+    select_synchronized_samples,
+)
 from lerobot_robot_ufactory.devices.pika import PikaDevice
 from .uf_robot_config import UFRobotConfig
 from xarm.wrapper import XArmAPI
@@ -168,6 +172,9 @@ class UFRobot(Robot, Thread):
         self.camera_width = cameras_args.get('w', 0)
         self.camera_height = cameras_args.get('h', 0)
         self.cameras = make_cameras_from_configs(config.cameras)
+        # Photon owns its timestamped SDK queue. Every other RGB backend gets
+        # a host-receipt timestamp queue after connect.
+        self._rgb_sync_buffers = {}
 
         self._is_connected = False
         self._is_calibrated =True
@@ -212,12 +219,23 @@ class UFRobot(Robot, Thread):
         self._gripper_current_ma = None
         self._gripper_current_sample_monotonic_s = None
         self._gripper_current_state = None
+        self._gripper_actual_pos_mm = None  # 新增：用于缓存真实的夹爪毫米级位置
+        self._camera_cond = Condition()
+        self._camera_stop_event = Event()
+        self._camera_thread = None
+        self._latest_camera_obs = {}
+        self._latest_camera_timing = {}
+        self._latest_camera_anchor_s = None
+        self._camera_updated = False
         # Cartesian observations and the joint-mode TCP z guard use the
         # asynchronous RT report. TCP recording needs the RT actual joints.
         self._rt_report_required_for_control = (
             self._control_space == "cartesian"
             or self._min_tcp_z_mm is not None
             or self._record_space in ("tcp", "both")
+            # A timestamped RT state is the common anchor for strict software
+            # pairing during realtime recording, even in joint mode.
+            or bool(self.cameras)
         )
         self._use_rt_report = (
             self._rt_report_required_for_control or self._gripper_current_monitor_requested
@@ -296,6 +314,37 @@ class UFRobot(Robot, Thread):
         return cam_ft
 
     @property
+    def tactile_observation_features(self) -> dict[str, dict]:
+        """Non-image Photon features written alongside each RGB observation.
+
+        These are already in LeRobot dataset-feature form. Keeping them out of
+        ``observation_features`` prevents the generic feature builder from
+        mistaking a ``(rows, cols, 3)`` displacement field for an image.
+        """
+        features = {}
+        for camera_key, camera in self.cameras.items():
+            if not getattr(camera, "saves_marker_motion_3d", False):
+                continue
+            base_key = f"observation.{self.prefix}{camera_key}"
+            features[f"{base_key}.{camera.motion_3d_feature_key}"] = {
+                "dtype": "float32",
+                "shape": (
+                    camera.config.marker_rows,
+                    camera.config.marker_cols,
+                    3,
+                ),
+                "names": None,
+            }
+            features[f"{base_key}.sensor_timestamp"] = {
+                # SDK 2.1 returns Unix seconds (~1e9); float32 loses seconds
+                # of precision and cannot represent per-frame timestamps.
+                "dtype": "float64",
+                "shape": (1,),
+                "names": None,
+            }
+        return features
+
+    @property
     def observation_features(self) -> dict[str, type | tuple]:
         return {**self._robot_state_features, **self._cam_features}
 
@@ -354,6 +403,16 @@ class UFRobot(Robot, Thread):
             print("Could not connect to the cameras, check that all cameras are plugged-in.")
             raise ConnectionError()
 
+        self._start_rgb_sync_buffers()
+        if self.cameras:
+            self._camera_stop_event.clear()
+            self._camera_thread = Thread(
+                target=self._camera_read_worker,
+                daemon=True,
+                name="uf-camera-worker",
+            )
+            self._camera_thread.start()
+
         # if self._gripper_type == GripperType.PikaGripper:
         #     if not self.pika_gripper.connect():
         #         print('Could not connect to pika gripper.')
@@ -379,14 +438,170 @@ class UFRobot(Robot, Thread):
 
         self._is_connected = True
 
+    def _start_rgb_sync_buffers(self) -> None:
+        """Timestamp every non-Photon RGB stream in a dedicated reader.
+
+        Once started, these buffers are the only callers of ``async_read`` for
+        regular RGB backends.  This preserves their new-frame semantics and
+        gives RealSense, Azure-style, OpenCV, and future Camera backends one
+        common host-clock pairing interface.
+        """
+        self._stop_rgb_sync_buffers()
+        try:
+            for camera_key, camera in self.cameras.items():
+                if hasattr(camera, "sync_samples"):
+                    continue
+                buffer = TimestampedCameraBuffer(
+                    camera,
+                    history_size=self.config.sync_history_size,
+                )
+                buffer.start()
+                self._rgb_sync_buffers[camera_key] = buffer
+        except BaseException:
+            self._stop_rgb_sync_buffers()
+            raise
+
+    def _stop_rgb_sync_buffers(self) -> None:
+        buffers = tuple(self._rgb_sync_buffers.values())
+        self._rgb_sync_buffers.clear()
+        errors = []
+        for buffer in buffers:
+            try:
+                buffer.stop()
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise errors[0]
+
+    def _read_synchronized_cameras(self, target_monotonic_s: float) -> dict:
+        sources = {
+            key: camera if hasattr(camera, "sync_samples") else self._rgb_sync_buffers[key]
+            for key, camera in self.cameras.items()
+        }
+        selected = select_synchronized_samples(
+            sources,
+            target_monotonic_s,
+            self.config.sync_max_skew_ms,
+            self.config.sync_pair_max_skew_ms,
+            self.config.sync_wait_ms,
+        )
+        result = {}
+        for key, sample in selected.items():
+            frame, timing = sources[key].export_sync_sample(sample)
+            signed_offset_ms = (sample.capture_monotonic_s - target_monotonic_s) * 1_000
+            timing.update(
+                sync_target_monotonic_s=target_monotonic_s,
+                sync_offset_ms=abs(signed_offset_ms),
+                sync_signed_offset_ms=signed_offset_ms,
+            )
+            result[key] = frame, timing
+        return result
+
+    def _camera_read_worker(self) -> None:
+        """Prefetch synchronized camera frames and resize them off the control loop."""
+        logger.info("Camera async reader thread started")
+        last_anchor_s = None
+        last_frame_times = None
+        try:
+            while not self._camera_stop_event.is_set():
+                anchor_s = self._last_rt_report_monotonic_s
+                if anchor_s is None:
+                    anchor_s = time.perf_counter()
+                if last_anchor_s is not None and anchor_s <= last_anchor_s:
+                    self._camera_stop_event.wait(0.001)
+                    continue
+
+                try:
+                    synchronized_cameras = self._read_synchronized_cameras(anchor_s)
+                    obs_dict = {}
+                    camera_timing = {}
+                    before_cameras_s = time.perf_counter()
+                    frame_times = []
+                    for camera_key, camera in self.cameras.items():
+                        frame, sample_timing = synchronized_cameras[camera_key]
+                        frame_times.append(sample_timing["capture_monotonic_s"])
+                        shape = frame.shape
+                        if (
+                            self.camera_height > 0 and self.camera_height != shape[0]
+                        ) or (
+                            self.camera_width > 0 and self.camera_width != shape[1]
+                        ):
+                            import cv2
+
+                            width = self.camera_width if self.camera_width != 0 else shape[1]
+                            height = self.camera_height if self.camera_height != 0 else shape[0]
+                            frame = cv2.resize(
+                                frame, (width, height), interpolation=cv2.INTER_AREA
+                            )
+
+                        obs_dict[f"{self.prefix}{camera_key}"] = frame
+                        if getattr(camera, "saves_marker_motion_3d", False):
+                            motion_key = camera.motion_3d_feature_key
+                            obs_dict[f"{self.prefix}{camera_key}.{motion_key}"] = (
+                                sample_timing[motion_key]
+                            )
+                            obs_dict[f"{self.prefix}{camera_key}.sensor_timestamp"] = (
+                                sample_timing["sensor_timestamp_s"]
+                            )
+                        camera_timing[camera_key] = {
+                            "frame_index": self._realtime_camera_frame_index[camera_key],
+                            "read_start_s": before_cameras_s,
+                            "read_end_s": time.perf_counter(),
+                            **sample_timing,
+                        }
+                        self._realtime_camera_frame_index[camera_key] += 1
+
+                    self._validate_camera_pair_skew(camera_timing)
+                    frame_times = tuple(frame_times)
+                    if frame_times == last_frame_times:
+                        last_anchor_s = anchor_s
+                        self._camera_stop_event.wait(0.001)
+                        continue
+                    with self._camera_cond:
+                        self._latest_camera_obs = obs_dict
+                        self._latest_camera_timing = camera_timing
+                        self._latest_camera_anchor_s = anchor_s
+                        self._camera_updated = True
+                        self._camera_cond.notify_all()
+                    last_anchor_s = anchor_s
+                    last_frame_times = frame_times
+                except TimeoutError:
+                    last_anchor_s = anchor_s
+                except Exception:
+                    logger.exception("Camera async reader error")
+                    self._camera_stop_event.wait(0.01)
+        finally:
+            with self._camera_cond:
+                self._camera_cond.notify_all()
+            logger.info("Camera async reader thread stopped")
+
+    def _validate_camera_pair_skew(self, camera_timing: dict) -> None:
+        """Reject a frame if any saved visual samples exceed the pair bound."""
+        capture_times = [
+            timing["capture_monotonic_s"]
+            for timing in camera_timing.values()
+            if "capture_monotonic_s" in timing
+        ]
+        if len(capture_times) < 2:
+            return
+
+        pair_skew_ms = (max(capture_times) - min(capture_times)) * 1_000
+        if pair_skew_ms > self.config.sync_pair_max_skew_ms:
+            raise TimeoutError(
+                "Visual-stream pair skew is "
+                f"{pair_skew_ms:.3f} ms; limit is "
+                f"{self.config.sync_pair_max_skew_ms:.3f} ms"
+            )
+        for timing in camera_timing.values():
+            if "capture_monotonic_s" in timing:
+                timing["pair_skew_ms"] = pair_skew_ms
+
     def reset_to_initial(self) -> None:
         if not self._is_connected or self.real_arm is None:
             raise ConnectionError("UF Robot is not connected")
         if self._initial_point is None:
             raise RuntimeError("xArm initial point has not been loaded")
 
-        # The controller requires motion to be enabled again after an
-        # emergency stop has been released, before any reset motion command.
         code = self.real_arm.motion_enable(enable=True)
         self._check_motion_code("motion_enable", code)
         code = self.real_arm.clean_error()
@@ -945,6 +1160,8 @@ class UFRobot(Robot, Thread):
         before_read_t = time.perf_counter() if logs_enabled else None
         if self._control_space == "joint":
             code, states = self.real_arm.get_joint_states(is_radian=True, num=3)
+            state_sample_s = time.perf_counter()
+            state_rt_receive_s = None
             pos_list = states[0].copy()
             obs_dict = {f"{self.prefix}J{k+1}.pos": pos_list[k] for k in range(self._dof)}
             if self._jnt_obs_has_vel:
@@ -957,6 +1174,8 @@ class UFRobot(Robot, Thread):
             with self._update_lock:
                 pos_list = self.rt_actual_tcp_pose.copy()
                 vel_list = self.rt_actual_tcp_speed.copy()
+                state_sample_s = time.perf_counter()
+                state_rt_receive_s = self._last_rt_report_monotonic_s
                 # pos_cmd_list = self.rt_cmd_tcp_pose.copy()
                 # vel_cmd_list = self.rt_cmd_tcp_vel.copy()
                 # jpos_fbk_list = self.rt_actual_joint_pos.copy()
@@ -994,21 +1213,50 @@ class UFRobot(Robot, Thread):
                 self.logs["read_pos_dt_s"] = time.perf_counter() - before_read_t
             obs_dict[f"{self.prefix}gripper.pos"] = grippos_norm
 
-        # Capture images from cameras
+        # Keep the arm state's own receipt time, including any delay introduced
+        # by the subsequent gripper query, when selecting visual samples.
+        sync_anchor_s = state_rt_receive_s if state_rt_receive_s is not None else state_sample_s
+        if (state_sample_s - sync_anchor_s) * 1_000 > self.config.sync_max_skew_ms:
+            raise TimeoutError("Robot RT state was stale when sampled")
+        before_cameras_s = time.perf_counter()
+        synchronized_cameras = self._read_synchronized_cameras(sync_anchor_s)
+        camera_timing = {}
         for cam_key, cam in self.cameras.items():
             before_camread_t = time.perf_counter() if logs_enabled else None
-            frame = cam.async_read()
+            frame, sample_timing = synchronized_cameras[cam_key]
             shape = frame.shape
             if (self.camera_height > 0 and self.camera_height != shape[0]) or (self.camera_width > 0 and self.camera_width != shape[1]):
                 camera_width = self.camera_width if self.camera_width != 0 else shape[1]
                 camera_height = self.camera_height if self.camera_height != 0 else shape[0]
                 import cv2
-                frame = cv2.resize(frame, (camera_height, camera_width), interpolation=cv2.INTER_AREA)
+                frame = cv2.resize(frame, (camera_width, camera_height), interpolation=cv2.INTER_AREA)
             obs_dict[f"{self.prefix}{cam_key}"] = frame
+            if getattr(cam, "saves_marker_motion_3d", False):
+                obs_dict[f"{self.prefix}{cam_key}.{cam.motion_3d_feature_key}"] = sample_timing[
+                    cam.motion_3d_feature_key
+                ]
+                obs_dict[f"{self.prefix}{cam_key}.sensor_timestamp"] = sample_timing[
+                    "sensor_timestamp_s"
+                ]
+            camera_timing[cam_key] = {
+                "frame_index": self._realtime_camera_frame_index[cam_key],
+                "read_start_s": before_cameras_s,
+                "read_end_s": time.perf_counter(),
+                **sample_timing,
+            }
+            self._realtime_camera_frame_index[cam_key] += 1
             if logs_enabled:
                 self.logs[f"async_read_camera_{cam_key}_dt_s"] = (
                     time.perf_counter() - before_camread_t
                 )
+
+        self._validate_camera_pair_skew(camera_timing)
+        self._last_observation_sync_timing = {
+            "state_sample_s": state_sample_s,
+            "state_rt_receive_s": state_rt_receive_s,
+            "state_age_ms": (before_cameras_s - sync_anchor_s) * 1_000,
+            "camera": camera_timing,
+        }
 
         return obs_dict
 
@@ -1031,6 +1279,22 @@ class UFRobot(Robot, Thread):
             self._last_realtime_observation_monotonic_s = time.perf_counter()
             state_rt_receive_s = self._last_rt_report_monotonic_s
             camera_timing = {}
+        # All RGB and Photon streams select their sample against this exact
+        # anchor. The RT report time is the best available host timestamp of
+        # robot state; use the local snapshot only while it is unavailable.
+        sync_anchor_s = (
+            state_rt_receive_s
+            if state_rt_receive_s is not None
+            else self._last_realtime_observation_monotonic_s
+        )
+        state_age_ms = (
+            self._last_realtime_observation_monotonic_s - sync_anchor_s
+        ) * 1_000
+        if state_age_ms > self.config.sync_max_skew_ms:
+            raise TimeoutError(
+                "Robot RT state is "
+                f"{state_age_ms:.3f} ms old; limit is {self.config.sync_max_skew_ms:.3f} ms"
+            )
         obs_dict = {
             f"{self.prefix}J{index + 1}.pos": positions[index]
             for index in range(self._dof)
@@ -1043,14 +1307,22 @@ class UFRobot(Robot, Thread):
                 }
             )
         if self._gripper_type > GripperType.NoGripper:
-            gripper = self._last_gripper_command
-            if gripper is None:
-                gripper = self._gripper_param.gripper_norm
+            # 如果开启了 RT 实时监控，且成功拿到了 G2 夹爪的真实物理位置
+            if getattr(self, "_gripper_current_monitor_active", False) and getattr(self, "_gripper_actual_pos_mm", None) is not None:
+                # 传入真实的毫米级位置，转换为 0.0-1.0 的归一化 state
+                gripper = self._gripper_param.get_gripper_norm(self._gripper_actual_pos_mm)
+            else:
+                # 兼容旧版本或非 G2 夹爪的回退逻辑
+                gripper = self._last_gripper_command
+                if gripper is None:
+                    gripper = self._gripper_param.gripper_norm
             obs_dict[f"{self.prefix}gripper.pos"] = float(gripper)
 
+        before_cameras_s = time.perf_counter()
+        synchronized_cameras = self._read_synchronized_cameras(sync_anchor_s)
         for camera_key, camera in self.cameras.items():
             before_camera_t = time.perf_counter()
-            frame = camera.async_read()
+            frame, sample_timing = synchronized_cameras[camera_key]
             after_camera_t = time.perf_counter()
             shape = frame.shape
             if (
@@ -1065,10 +1337,18 @@ class UFRobot(Robot, Thread):
                 height = self.camera_height if self.camera_height != 0 else shape[0]
                 frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
             obs_dict[f"{self.prefix}{camera_key}"] = frame
+            if getattr(camera, "saves_marker_motion_3d", False):
+                obs_dict[f"{self.prefix}{camera_key}.{camera.motion_3d_feature_key}"] = sample_timing[
+                    camera.motion_3d_feature_key
+                ]
+                obs_dict[f"{self.prefix}{camera_key}.sensor_timestamp"] = sample_timing[
+                    "sensor_timestamp_s"
+                ]
             camera_timing[camera_key] = {
                 "frame_index": self._realtime_camera_frame_index[camera_key],
-                "read_start_s": before_camera_t,
+                "read_start_s": before_cameras_s,
                 "read_end_s": after_camera_t,
+                **sample_timing,
             }
             self._realtime_camera_frame_index[camera_key] += 1
             if logs_enabled:
@@ -1081,10 +1361,12 @@ class UFRobot(Robot, Thread):
                     before_camera_t,
                     after_camera_t,
                 )
+        self._validate_camera_pair_skew(camera_timing)
         self._last_realtime_observation_end_monotonic_s = time.perf_counter()
         self._last_realtime_sync_timing = {
             "state_sample_s": self._last_realtime_observation_monotonic_s,
             "state_rt_receive_s": state_rt_receive_s,
+            "state_age_ms": state_age_ms,
             "camera": camera_timing,
         }
         return obs_dict
@@ -1160,8 +1442,8 @@ class UFRobot(Robot, Thread):
             grippos = self._gripper_param.get_grippos(gripper_norm)
             # Use the SDK's dedicated gripper command instead of injecting a
             # generic RS485 packet through set_rs485_data. During continuous
-            # Online joint motion may not complete the default wait_motion check, so
-            # explicitly bypass it while retaining a non-blocking write.
+            # online joint motion the default wait_motion check may not finish,
+            # so bypass it while retaining a non-blocking write.
             result = self.real_arm.set_gripper_position(
                 grippos,
                 wait=False,
@@ -1479,6 +1761,17 @@ class UFRobot(Robot, Thread):
     def disconnect(self) -> None:
         if not self._is_connected and self.real_arm is None:
             return
+        self._camera_stop_event.set()
+        with self._camera_cond:
+            self._camera_cond.notify_all()
+        if self._camera_thread is not None and self._camera_thread.is_alive():
+            self._camera_thread.join(timeout=1.0)
+            if self._camera_thread.is_alive():
+                logger.warning("Camera async reader thread did not stop within 1 second")
+        self._camera_thread = None
+        # Stop timestamp readers before disconnecting their underlying USB
+        # cameras, so no worker can issue a read against a released device.
+        self._stop_rgb_sync_buffers()
         if self._use_rt_report:
             self.report_stop_event.set()
             if self.is_alive():
@@ -1584,6 +1877,7 @@ class UFRobot(Robot, Thread):
                         self._gripper_current_ma = external_report.current_ma
                         self._gripper_current_sample_monotonic_s = sample_monotonic_s
                         self._gripper_current_state = external_report.gripper_state
+                        self._gripper_actual_pos_mm = external_report.position_mm  # 新增：接住真实位置
                         self._gripper_current_monitor_error = None
                     elif monitor_error is not None:
                         self._gripper_current_monitor_error = monitor_error

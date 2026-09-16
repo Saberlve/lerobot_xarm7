@@ -6,6 +6,8 @@ consumers receive timestamped copies with bounded cache age.
 
 from collections import deque
 from dataclasses import dataclass
+import inspect
+import logging
 from threading import Condition, Event, Thread
 from time import perf_counter
 from typing import Any
@@ -61,6 +63,10 @@ class XensePhotonCamera(Camera):
     def saves_marker_motion_3d(self) -> bool:
         return self.config.save_marker_motion_3d
 
+    @property
+    def motion_3d_feature_key(self) -> str:
+        return "mesh_motion_3d" if self.config.motion_3d_output == "Mesh3DFlow" else "marker_motion_3d"
+
     @staticmethod
     def find_cameras() -> list[dict[str, Any]]:
         return [
@@ -74,8 +80,19 @@ class XensePhotonCamera(Camera):
         sensor_class = _sensor_class()
         output = getattr(sensor_class.OutputType, self.config.output_type)
         kwargs = {"use_gpu": self.config.use_gpu, "disable_infer": self.config.disable_infer}
+        parameters = inspect.signature(sensor_class.create).parameters
+        if "use_gpu" not in parameters and not any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+        ):
+            kwargs.pop("use_gpu")
+            logging.getLogger(__name__).info(
+                "This Xense SDK selects its inference device from the sensor runtime "
+                "configuration; the legacy use_gpu option is not supported."
+            )
         if self.config.config_path is not None:
             kwargs["config_path"] = self.config.config_path
+        if self.config.infer_mode is not None:
+            kwargs["infer_mode"] = self.config.infer_mode
         self._sensor = sensor_class.create(self.config.serial_number, **kwargs)
         if self._sensor is None:
             raise ConnectionError(f"Xense SDK could not open {self.config.serial_number}")
@@ -100,6 +117,9 @@ class XensePhotonCamera(Camera):
             raise
 
     def _capture_loop(self, output) -> None:
+        last_sensor_timestamp = None
+        clock_offset = None
+        last_mapped_monotonic_s = None
         try:
             while not self._stop.is_set():
                 started = perf_counter()
@@ -107,19 +127,54 @@ class XensePhotonCamera(Camera):
                     output_types = self._sensor.OutputType
                     result = self._sensor.selectSensorInfo(
                         output,
-                        output_types.Marker3DFlow,
+                        getattr(output_types, self.config.motion_3d_output),
                         output_types.TimeStamp,
                     )
                     if not isinstance(result, tuple) or len(result) != 3:
                         raise ValueError(
-                            "Xense SDK did not return image, Marker3DFlow and TimeStamp"
+                            f"Xense SDK did not return image, {self.config.motion_3d_output} and TimeStamp"
                         )
                     frame, marker_motion_3d, sensor_timestamp = result
                 else:
-                    frame = self._sensor.selectSensorInfo(output)
+                    frame, sensor_timestamp = self._sensor.selectSensorInfo(
+                        output, self._sensor.OutputType.TimeStamp
+                    )
                     marker_motion_3d = None
-                    sensor_timestamp = None
+                captured_at = perf_counter()
                 if frame is not None:
+                    timestamp_values = np.asarray(sensor_timestamp)
+                    if timestamp_values.size != 1:
+                        raise ValueError("Expected Xense TimeStamp to contain one scalar")
+                    sensor_timestamp = float(timestamp_values.reshape(-1)[0])
+                    if not np.isfinite(sensor_timestamp):
+                        raise ValueError("Xense TimeStamp must be finite")
+                    # Xense SDK 2.1 reports Unix seconds. Reject another unit
+                    # instead of silently pairing it against perf_counter().
+                    if not 1e8 <= sensor_timestamp <= 1e11:
+                        raise ValueError(
+                            "Xense TimeStamp is not in Unix seconds: "
+                            f"{sensor_timestamp}"
+                        )
+                    if sensor_timestamp == last_sensor_timestamp:
+                        self._stop.wait(max(0, 1 / self.fps - (perf_counter() - started)))
+                        continue
+                    # The minimum observed receive-minus-sensor offset is the
+                    # least transport delay seen so far. Mapping every SDK
+                    # timestamp with it removes variable USB/SDK queue delay
+                    # while never placing a frame after its host receipt time.
+                    current_offset = captured_at - sensor_timestamp
+                    if clock_offset is None or current_offset < clock_offset:
+                        clock_offset = current_offset
+                    mapped_monotonic_s = sensor_timestamp + clock_offset
+                    if (
+                        last_mapped_monotonic_s is not None
+                        and mapped_monotonic_s <= last_mapped_monotonic_s
+                    ):
+                        last_sensor_timestamp = sensor_timestamp
+                        self._stop.wait(
+                            max(0, 1 / self.fps - (perf_counter() - started))
+                        )
+                        continue
                     if not isinstance(frame, np.ndarray) or frame.dtype != np.uint8:
                         raise ValueError("Xense image must be a uint8 numpy array")
                     if frame.ndim != 3 or frame.shape[2] != 3:
@@ -135,19 +190,11 @@ class XensePhotonCamera(Camera):
                         )
                         if marker_motion_3d.shape != expected_shape:
                             raise ValueError(
-                                "Expected Xense Marker3DFlow shape "
+                                f"Expected Xense {self.config.motion_3d_output} shape "
                                 f"{expected_shape}, got {marker_motion_3d.shape}"
                             )
-                        timestamp_values = np.asarray(sensor_timestamp)
-                        if timestamp_values.size != 1:
-                            raise ValueError(
-                                "Expected Xense TimeStamp to contain one scalar, got "
-                                f"shape {timestamp_values.shape}"
-                            )
-                        sensor_timestamp = float(timestamp_values.reshape(-1)[0])
-                        if not np.isfinite(sensor_timestamp):
-                            raise ValueError("Xense TimeStamp must be finite")
-                    captured_at = perf_counter()
+                    last_sensor_timestamp = sensor_timestamp
+                    last_mapped_monotonic_s = mapped_monotonic_s
                     with self._condition:
                         self._frame = frame.copy()
                         self._sample = XensePhotonSample(
@@ -156,7 +203,7 @@ class XensePhotonCamera(Camera):
                                 None if marker_motion_3d is None else marker_motion_3d.copy()
                             ),
                             sensor_timestamp_s=sensor_timestamp,
-                            capture_monotonic_s=captured_at,
+                            capture_monotonic_s=mapped_monotonic_s,
                         )
                         self._sample_history.append(self._sample)
                         self._frame_time = captured_at
@@ -169,6 +216,27 @@ class XensePhotonCamera(Camera):
 
     def _latest_frame(self, timeout_ms: float) -> NDArray[Any]:
         return self._latest_sample(timeout_ms).frame_bgr.copy()
+
+    def sync_samples(self) -> tuple[XensePhotonSample, ...]:
+        with self._condition:
+            if not self.is_connected or self._stop.is_set():
+                raise DeviceNotConnectedError()
+            if self._error is not None:
+                raise RuntimeError(f"Xense capture failed for {self.config.serial_number}") from self._error
+            return tuple(self._sample_history)
+
+    def export_sync_sample(self, sample: XensePhotonSample) -> tuple[NDArray[Any], dict]:
+        sample = self._copy_sample(sample)
+        frame = sample.frame_bgr
+        if self.config.color_mode == ColorMode.RGB:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        timing = {
+            "capture_monotonic_s": sample.capture_monotonic_s,
+            "sensor_timestamp_s": sample.sensor_timestamp_s,
+        }
+        if self.saves_marker_motion_3d:
+            timing[self.motion_3d_feature_key] = sample.marker_motion_3d
+        return frame, timing
 
     @staticmethod
     def _copy_sample(sample: XensePhotonSample) -> XensePhotonSample:
@@ -282,7 +350,7 @@ class XensePhotonCamera(Camera):
         if self.config.color_mode == ColorMode.RGB:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return frame, {
-            "marker_motion_3d": sample.marker_motion_3d,
+            self.motion_3d_feature_key: sample.marker_motion_3d,
             "sensor_timestamp_s": sample.sensor_timestamp_s,
             "capture_monotonic_s": sample.capture_monotonic_s,
         }
@@ -307,7 +375,7 @@ class XensePhotonCamera(Camera):
         if self.config.color_mode == ColorMode.RGB:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return frame, {
-            "marker_motion_3d": sample.marker_motion_3d,
+            self.motion_3d_feature_key: sample.marker_motion_3d,
             "sensor_timestamp_s": sample.sensor_timestamp_s,
             "capture_monotonic_s": sample.capture_monotonic_s,
             "sync_target_monotonic_s": target_monotonic_s,

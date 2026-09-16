@@ -29,6 +29,10 @@ robot:
   tcp_z_soft_margin_mm: 0.5
   local_kinematics_max_error_mm: 2.0
   controller_safety_boundary: true
+  # Pair robot state, RGB and GelSight exposure times tightly.
+  sync_max_skew_ms: 15.0
+  sync_pair_max_skew_ms: 10.0
+  sync_wait_ms: 40.0
   # Append gripper initialization/read/write failures here.
   gripper_error_log_path: "logs/xarm7_gripper_errors.log"
   cameras:

@@ -31,6 +31,12 @@ class UFRobotConfig(RobotConfig):
     gripper_current_monitor_frequency_hz: int = 250
     gripper_current_stale_timeout_s: float = 0.25
     enable_logs: bool = False  # optional per-cycle timing and diagnostic logs
+    # Software-bounded pairing for robot state, every RGB camera and Photon.
+    # These are host monotonic-clock bounds, not a common hardware trigger.
+    sync_max_skew_ms: float = 15.0
+    sync_pair_max_skew_ms: float = 10.0
+    sync_wait_ms: float = 40.0
+    sync_history_size: int = 90
     observe_joint_vel: bool = False # only effective in joint control mode
     manual_mode: bool = False  # xArm joint teaching mode; records state and optional gripper actions
     manual_gripper_speed: float = 0.5  # normalized gripper position per second in manual mode
@@ -65,6 +71,20 @@ class UFRobotConfig(RobotConfig):
                 raise ValueError("teach_sensitivity must be between 1 and 5")
         if self.manual_gripper_speed < 0:
             raise ValueError("manual_gripper_speed must be non-negative")
+        for name in (
+            "sync_max_skew_ms",
+            "sync_pair_max_skew_ms",
+            "sync_wait_ms",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if (
+            not isinstance(self.sync_history_size, int)
+            or isinstance(self.sync_history_size, bool)
+            or self.sync_history_size <= 0
+        ):
+            raise ValueError("sync_history_size must be a positive integer")
         if not 0 <= self.gripper_command_threshold <= 1:
             raise ValueError("gripper_command_threshold must be between 0 and 1")
         if not math.isfinite(self.gripper_command_interval_s) or self.gripper_command_interval_s < 0:

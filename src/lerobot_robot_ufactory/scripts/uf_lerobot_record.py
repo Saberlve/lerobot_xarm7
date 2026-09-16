@@ -9,11 +9,13 @@ import shutil
 import threading
 import os
 import json
+import numpy as np
 from dataclasses import dataclass, field
 from pathlib import Path
 import lerobot_robot_ufactory # patch
 from lerobot.scripts.lerobot_record import *
 from lerobot.scripts.lerobot_record import RecordConfig as LeRobotRecordConfig
+from lerobot.datasets.utils import DEFAULT_FEATURES
 from lerobot_robot_ufactory.teleoperators.uf_mock_teleop import UFMockTeleop
 from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
 from lerobot_robot_ufactory.utils.realtime_teleop import RealtimeTeleopController
@@ -38,6 +40,41 @@ class UFRecordConfig(LeRobotRecordConfig):
                 raise ValueError("manual_mode recording cannot be combined with a teleop or policy")
             return
         super().__post_init__()
+
+
+def build_dataset_frame(
+    ds_features: dict[str, dict], values: dict[str, object], prefix: str
+) -> dict[str, np.ndarray]:
+    """Build a dataset frame, including fixed-shape tactile tensors.
+
+    LeRobot's stock helper handles vector states and images. Photon
+    ``Marker3DFlow`` is a float32 ``(rows, cols, 3)`` field, so it needs to
+    pass through as an explicit tensor instead of being classified as an
+    image solely because it has three dimensions.
+    """
+    frame = {}
+    for key, feature in ds_features.items():
+        if key in DEFAULT_FEATURES or not key.startswith(prefix):
+            continue
+        if feature["dtype"] in ("image", "video"):
+            frame[key] = values[key.removeprefix(f"{prefix}.images.")]
+            continue
+        if feature["dtype"] not in ("float32", "float64"):
+            continue
+
+        raw_key = key.removeprefix(f"{prefix}.")
+        if feature.get("names") is not None and len(feature["shape"]) == 1:
+            value = np.array([values[name] for name in feature["names"]], dtype=feature["dtype"])
+        else:
+            value = np.asarray(values[raw_key], dtype=feature["dtype"])
+            if value.ndim == 0 and tuple(feature["shape"]) == (1,):
+                value = value.reshape(1)
+        if tuple(value.shape) != tuple(feature["shape"]):
+            raise ValueError(
+                f"Feature '{key}' has shape {value.shape}; expected {feature['shape']}"
+            )
+        frame[key] = value
+    return frame
 
 
 def _dataset_robot_type(robot) -> str:
@@ -134,7 +171,7 @@ def _diagnostic_logs_enabled(robot) -> bool:
 class EpisodeSynchronization:
     """Per-episode timing sidecar, intentionally outside LeRobot features."""
 
-    def __init__(self, controller: RealtimeTeleopController, fps: int):
+    def __init__(self, controller: RealtimeTeleopController | None, fps: int):
         self.controller = controller
         self.fps = fps
         self.frames: list[dict] = []
@@ -146,16 +183,30 @@ class EpisodeSynchronization:
         state_rt_receive_s: float | None,
         action_sent_s: float,
         camera_timing: dict,
+        state_age_ms: float | None = None,
     ) -> None:
         anchor_s = state_rt_receive_s if state_rt_receive_s is not None else state_sample_s
-        camera_timestamps = {
-            key: {
+        camera_timestamps = {}
+        for key, timing in camera_timing.items():
+            camera_timestamp = {
                 "frame_index": timing.get("frame_index"),
                 "read_start_ns": round(timing["read_start_s"] * 1_000_000_000),
                 "read_end_ns": round(timing["read_end_s"] * 1_000_000_000),
             }
-            for key, timing in camera_timing.items()
-        }
+            if "capture_monotonic_s" in timing:
+                camera_timestamp["capture_monotonic_ns"] = round(
+                    timing["capture_monotonic_s"] * 1_000_000_000
+                )
+            if "sensor_timestamp_s" in timing:
+                camera_timestamp["sensor_timestamp_s"] = timing["sensor_timestamp_s"]
+            if "sync_offset_ms" in timing:
+                camera_timestamp["sync_target_monotonic_ns"] = round(
+                    timing["sync_target_monotonic_s"] * 1_000_000_000
+                )
+                camera_timestamp["sync_offset_ms"] = timing["sync_offset_ms"]
+                camera_timestamp["sync_signed_offset_ms"] = timing.get("sync_signed_offset_ms")
+                camera_timestamp["pair_skew_ms"] = timing.get("pair_skew_ms")
+            camera_timestamps[key] = camera_timestamp
         self.frames.append(
             {
                 "frame_index": frame_index,
@@ -167,6 +218,7 @@ class EpisodeSynchronization:
                 ),
                 "action_send_end_ns": round(action_sent_s * 1_000_000_000),
                 "action_state_age_ms": (anchor_s - action_sent_s) * 1000,
+                "state_age_ms": state_age_ms,
                 "camera_timing_json": json.dumps(camera_timestamps, sort_keys=True),
             }
         )
@@ -179,7 +231,7 @@ class EpisodeSynchronization:
         output_dir = dataset_root / "timestamps"
         output_dir.mkdir(parents=True, exist_ok=True)
         base = f"episode_{episode_index:06d}"
-        action_rows = self.controller.action_timings()
+        action_rows = self.controller.action_timings() if self.controller is not None else []
         files = (
             (output_dir / f"{base}.parquet", self.frames),
             (output_dir / f"{base}_actions.parquet", action_rows),
@@ -191,6 +243,45 @@ class EpisodeSynchronization:
             temporary = path.with_suffix(path.suffix + ".tmp")
             pq.write_table(table, temporary)
             os.replace(temporary, path)
+
+        summary_path = output_dir / f"{base}_summary.json"
+        temporary = summary_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(self.statistics(), indent=2) + "\n")
+        os.replace(temporary, summary_path)
+        csv_path = output_dir / f"{base}.csv"
+        temporary = csv_path.with_suffix(".csv.tmp")
+        with temporary.open("w", newline="") as handle:
+            if self.frames:
+                writer = csv.DictWriter(handle, fieldnames=list(self.frames[0]))
+                writer.writeheader()
+                writer.writerows(self.frames)
+        os.replace(temporary, csv_path)
+
+    def statistics(self) -> dict:
+        def stats(values):
+            values = [v for v in values if v is not None]
+            if not values:
+                return None
+            return {"mean": float(np.mean(values)), "p95": float(np.percentile(values, 95)),
+                    "max": float(np.max(values))}
+
+        cameras = {}
+        pairs = []
+        for row in self.frames:
+            timings = json.loads(row["camera_timing_json"])
+            for name, timing in timings.items():
+                cameras.setdefault(name, []).append(timing.get("sync_offset_ms"))
+            pair_values = [t["pair_skew_ms"] for t in timings.values() if t.get("pair_skew_ms") is not None]
+            if pair_values:
+                pairs.append(max(pair_values))
+        return {
+            "frames": len(self.frames),
+            "timing_basis": "host receipt, not exposure; gripper feedback is separately sampled/cached",
+            "action_state_age_ms": stats([r["action_state_age_ms"] for r in self.frames]),
+            "state_age_ms": stats([r["state_age_ms"] for r in self.frames]),
+            "camera_state_abs_offset_ms": {name: stats(values) for name, values in cameras.items()},
+            "camera_pair_skew_ms": stats(pairs),
+        }
 
     def summary(self) -> str:
         if not self.frames:
@@ -206,7 +297,9 @@ class EpisodeSynchronization:
         camera_text = "n/a" if not camera_ages else f"{max(camera_ages):.1f} ms max"
         return (
             f"synchronization: {len(self.frames)} frames, "
-            f"action-state p95={p95:.1f} ms, camera-after-state={camera_text}"
+            f"action-state p95={p95:.1f} ms, camera-after-state={camera_text}; "
+            f"capture errors={json.dumps(self.statistics()['camera_state_abs_offset_ms'])}, "
+            f"pair errors={json.dumps(self.statistics()['camera_pair_skew_ms'])}"
         )
 
 
@@ -476,269 +569,282 @@ def record_loop(
     sync_log_file = None
     sync_log_writer = None
     sync_frame_index = 0
-    if (
-        policy is None
-        and isinstance(teleop, UFBaseTeleop)
-        and getattr(robot, "_control_space", None) == "joint"
-        and hasattr(robot, "get_realtime_observation")
-    ):
-        realtime_controller = RealtimeTeleopController(
-            robot=robot,
-            teleop=teleop,
-            teleop_action_processor=teleop_action_processor,
-            robot_action_processor=robot_action_processor,
-            fps=int(teleop.config.realtime_control_fps),
-            initial_observation=last_robot_cmd,
-            record_timing=synchronize,
-        )
-        realtime_controller.start()
-        if synchronize:
-            episode_synchronization = EpisodeSynchronization(realtime_controller, fps)
-        if diagnostic_logs_enabled:
-            sync_log_dir = Path("logs")
-            sync_log_dir.mkdir(parents=True, exist_ok=True)
-            sync_log_path = sync_log_dir / (
-                f"gello_record_sync_{time.strftime('%Y%m%d_%H%M%S')}_"
-                f"{time.time_ns() % 1_000_000:06d}.csv"
+    try:
+        if (
+            policy is None
+            and isinstance(teleop, UFBaseTeleop)
+            and getattr(robot, "_control_space", None) == "joint"
+            and hasattr(robot, "get_realtime_observation")
+        ):
+            realtime_controller = RealtimeTeleopController(
+                robot=robot,
+                teleop=teleop,
+                teleop_action_processor=teleop_action_processor,
+                robot_action_processor=robot_action_processor,
+                fps=int(teleop.config.realtime_control_fps),
+                initial_observation=last_robot_cmd,
+                record_timing=synchronize,
             )
-            sync_log_file = sync_log_path.open("w", newline="", buffering=1)
-            sync_log_writer = csv.DictWriter(
-                sync_log_file,
-                fieldnames=[
-                    "frame",
-                    "state_sample_s",
-                    "action_sent_s",
-                    "action_age_ms",
-                    "observation_end_s",
-                    "state_to_observation_end_ms",
-                    "camera_timings",
-                    "preview_publish_ms",
-                    "preview_clients",
-                    "preview_source_generation",
-                    "preview_encoded_frames",
-                    "preview_last_encode_ms",
-                    "preview_max_encode_ms",
-                    "record_period_ms",
-                    "frame_loop_ms",
-                    "frame_budget_ms",
-                    "frame_overrun_ms",
-                ],
-            )
-            sync_log_writer.writeheader()
-            logging.info("Realtime dataset synchronization log: %s", sync_log_path)
-
-    timestamp = 0
-    start_episode_t = time.perf_counter()
-    previous_loop_start_t = None
-    while timestamp < control_time_s:
-        start_loop_t = time.perf_counter()
-        record_period_ms = (
-            0.0
-            if previous_loop_start_t is None
-            else (start_loop_t - previous_loop_start_t) * 1000
-        )
-        previous_loop_start_t = start_loop_t
-
-        if events["exit_early"]:
-            events["exit_early"] = False
-            break
-
-        # Get robot observation
-        if realtime_controller is not None:
-            obs = robot.get_realtime_observation()
-            observation_monotonic_s = getattr(robot, "_last_realtime_observation_monotonic_s", None)
-            if observation_monotonic_s is None:
-                observation_monotonic_s = time.perf_counter()
-            sync_timing = getattr(robot, "_last_realtime_sync_timing", {})
-            state_rt_receive_s = sync_timing.get("state_rt_receive_s")
-            state_anchor_s = state_rt_receive_s or observation_monotonic_s
-            realtime_controller.update_observation(obs)
+            realtime_controller.start()
+            if synchronize:
+                episode_synchronization = EpisodeSynchronization(realtime_controller, fps)
             if diagnostic_logs_enabled:
-                matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
-                    state_anchor_s
+                sync_log_dir = Path("logs")
+                sync_log_dir.mkdir(parents=True, exist_ok=True)
+                sync_log_path = sync_log_dir / (
+                    f"gello_record_sync_{time.strftime('%Y%m%d_%H%M%S')}_"
+                    f"{time.time_ns() % 1_000_000:06d}.csv"
                 )
-            else:
-                matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
-                    state_anchor_s
+                sync_log_file = sync_log_path.open("w", newline="", buffering=1)
+                sync_log_writer = csv.DictWriter(
+                    sync_log_file,
+                    fieldnames=[
+                        "frame",
+                        "state_sample_s",
+                        "action_sent_s",
+                        "action_age_ms",
+                        "observation_end_s",
+                        "state_to_observation_end_ms",
+                        "camera_timings",
+                        "preview_publish_ms",
+                        "preview_clients",
+                        "preview_source_generation",
+                        "preview_encoded_frames",
+                        "preview_last_encode_ms",
+                        "preview_max_encode_ms",
+                        "record_period_ms",
+                        "frame_loop_ms",
+                        "frame_budget_ms",
+                        "frame_overrun_ms",
+                    ],
                 )
-        else:
-            obs = robot.get_observation()
+                sync_log_writer.writeheader()
+                logging.info("Realtime dataset synchronization log: %s", sync_log_path)
 
-        # Applies a pipeline to the raw robot observation, default is IdentityProcessor
-        obs_processed = robot_observation_processor(obs)
-        preview_publish_ms = 0.0
-        if web_preview is not None:
-            # This only replaces references in a latest-frame slot. All image
-            # processing and network I/O remain on preview background threads.
-            before_preview_publish_t = time.perf_counter()
-            web_preview.publish(obs_processed)
-            preview_publish_ms = (time.perf_counter() - before_preview_publish_t) * 1000
+        if synchronize and episode_synchronization is None:
+            episode_synchronization = EpisodeSynchronization(None, fps)
 
-        if policy is not None or dataset is not None:
-            obs_for_dataset = obs_processed
-            convert_observation = getattr(robot, "convert_observation_for_recording", None)
-            if convert_observation is not None:
-                obs_for_dataset = convert_observation(obs_processed)
-            observation_frame = build_dataset_frame(dataset.features, obs_for_dataset, prefix=OBS_STR)
-
-        # Get action from either policy or teleop
-        if policy is not None and preprocessor is not None and postprocessor is not None:
-            action_values = predict_action(
-                observation=observation_frame,
-                policy=policy,
-                device=get_safe_torch_device(policy.config.device),
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                use_amp=policy.config.use_amp,
-                task=single_task,
-                robot_type=robot.robot_type,
+        timestamp = 0
+        start_episode_t = time.perf_counter()
+        previous_loop_start_t = None
+        while timestamp < control_time_s:
+            start_loop_t = time.perf_counter()
+            record_period_ms = (
+                0.0
+                if previous_loop_start_t is None
+                else (start_loop_t - previous_loop_start_t) * 1000
             )
+            previous_loop_start_t = start_loop_t
 
-            act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
+            if events["exit_early"]:
+                events["exit_early"] = False
+                break
 
-        elif policy is None and manual_mode:
-            # In manual mode the physical arm is the source of both the
-            # observation and the demonstrated target state.
-            if manual_gripper_action_key is not None and manual_gripper_target is None:
-                gripper_value = obs_processed.get(manual_gripper_action_key)
-                if gripper_value is None:
-                    gripper_value = obs.get(manual_gripper_action_key)
-                if gripper_value is not None:
-                    manual_gripper_target = min(max(float(gripper_value), 0.0), 1.0)
-
-            manual_gripper_target = _update_manual_gripper_target(
-                manual_gripper_target,
-                manual_gripper_keys,
-                manual_gripper_speed,
-                fps,
-            )
-            act = _manual_action_from_observation(
-                obs_processed,
-                robot.action_features,
-                gripper_target=manual_gripper_target,
-            )
-            act_processed_teleop = teleop_action_processor((act, obs))
-
-        elif policy is None and isinstance(teleop, Teleoperator):
+            # Get robot observation
             if realtime_controller is not None:
-                act_processed_teleop = matched_action
-                act = None
+                obs = robot.get_realtime_observation()
+                observation_monotonic_s = getattr(robot, "_last_realtime_observation_monotonic_s", None)
+                if observation_monotonic_s is None:
+                    observation_monotonic_s = time.perf_counter()
+                sync_timing = getattr(robot, "_last_realtime_sync_timing", {})
+                state_rt_receive_s = sync_timing.get("state_rt_receive_s")
+                state_anchor_s = state_rt_receive_s or observation_monotonic_s
+                realtime_controller.update_observation(obs)
+                if diagnostic_logs_enabled:
+                    matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
+                        state_anchor_s
+                    )
+                else:
+                    matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
+                        state_anchor_s
+                    )
             else:
-                act = teleop.get_action()
+                obs = robot.get_observation()
+                sync_timing = getattr(robot, "_last_observation_sync_timing", {})
+                observation_monotonic_s = sync_timing.get("state_sample_s", time.perf_counter())
+                state_rt_receive_s = sync_timing.get("state_rt_receive_s")
 
-            # (space mouse) from delta Cartesian cmd to absolute command
-            if act is not None and "pose.dx" in act:
-                last_robot_cmd.update({"pose.x": last_robot_cmd["pose.x"] + act["pose.dx"], "pose.y": last_robot_cmd["pose.y"] + act["pose.dy"], "pose.z": last_robot_cmd["pose.z"] + act["pose.dz"]})
-                act = last_robot_cmd.copy() # watch out this is shallow copy, not for nested dict
+            # Applies a pipeline to the raw robot observation, default is IdentityProcessor
+            obs_processed = robot_observation_processor(obs)
+            preview_publish_ms = 0.0
+            if web_preview is not None:
+                # This only replaces references in a latest-frame slot. All image
+                # processing and network I/O remain on preview background threads.
+                before_preview_publish_t = time.perf_counter()
+                web_preview.publish(obs_processed)
+                preview_publish_ms = (time.perf_counter() - before_preview_publish_t) * 1000
 
-            # Applies a pipeline to the raw teleop action, default is IdentityProcessor
-            if realtime_controller is None:
+            if policy is not None or dataset is not None:
+                obs_for_dataset = obs_processed
+                convert_observation = getattr(robot, "convert_observation_for_recording", None)
+                if convert_observation is not None:
+                    obs_for_dataset = convert_observation(obs_processed)
+                observation_frame = build_dataset_frame(dataset.features, obs_for_dataset, prefix=OBS_STR)
+
+            # Get action from either policy or teleop
+            if policy is not None and preprocessor is not None and postprocessor is not None:
+                action_values = predict_action(
+                    observation=observation_frame,
+                    policy=policy,
+                    device=get_safe_torch_device(policy.config.device),
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    use_amp=policy.config.use_amp,
+                    task=single_task,
+                    robot_type=robot.robot_type,
+                )
+
+                act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
+
+            elif policy is None and manual_mode:
+                # In manual mode the physical arm is the source of both the
+                # observation and the demonstrated target state.
+                if manual_gripper_action_key is not None and manual_gripper_target is None:
+                    gripper_value = obs_processed.get(manual_gripper_action_key)
+                    if gripper_value is None:
+                        gripper_value = obs.get(manual_gripper_action_key)
+                    if gripper_value is not None:
+                        manual_gripper_target = min(max(float(gripper_value), 0.0), 1.0)
+
+                manual_gripper_target = _update_manual_gripper_target(
+                    manual_gripper_target,
+                    manual_gripper_keys,
+                    manual_gripper_speed,
+                    fps,
+                )
+                act = _manual_action_from_observation(
+                    obs_processed,
+                    robot.action_features,
+                    gripper_target=manual_gripper_target,
+                )
                 act_processed_teleop = teleop_action_processor((act, obs))
 
-        elif policy is None and isinstance(teleop, list):
-            arm_action = teleop_arm.get_action()
-            arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
-            keyboard_action = teleop_keyboard.get_action()
-            base_action = robot._from_keyboard_to_base_action(keyboard_action)
-            act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
-            act_processed_teleop = teleop_action_processor((act, obs))
-        else:
-            logging.info(
-                "No policy or teleoperator provided, skipping action generation."
-                "This is likely to happen when resetting the environment without a teleop device."
-                "The robot won't be at its rest position at the start of the next episode."
-            )
-            continue
+            elif policy is None and isinstance(teleop, Teleoperator):
+                if realtime_controller is not None:
+                    act_processed_teleop = matched_action
+                    act = None
+                else:
+                    act = teleop.get_action()
 
-        # Applies a pipeline to the action, default is IdentityProcessor
-        if policy is not None and act_processed_policy is not None:
-            action_values = act_processed_policy
-            robot_action_to_send = robot_action_processor((act_processed_policy, obs))
-        else:
-            action_values = act_processed_teleop
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+                # (space mouse) from delta Cartesian cmd to absolute command
+                if act is not None and "pose.dx" in act:
+                    last_robot_cmd.update({"pose.x": last_robot_cmd["pose.x"] + act["pose.dx"], "pose.y": last_robot_cmd["pose.y"] + act["pose.dy"], "pose.z": last_robot_cmd["pose.z"] + act["pose.dz"]})
+                    act = last_robot_cmd.copy() # watch out this is shallow copy, not for nested dict
 
-        # Send action to robot
-        # Action can eventually be clipped using `max_relative_target`,
-        # so action actually sent is saved in the dataset. action = postprocessor.process(action)
-        # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        if realtime_controller is None:
-            _sent_action = robot.send_action(robot_action_to_send)
-        else:
-            _sent_action = matched_action
-        # Robots may clamp or otherwise sanitize a command before sending it.
-        # Store that effective command so demonstrations match the motion.
-        if isinstance(_sent_action, dict):
-            action_values = _sent_action
+                # Applies a pipeline to the raw teleop action, default is IdentityProcessor
+                if realtime_controller is None:
+                    act_processed_teleop = teleop_action_processor((act, obs))
 
-        convert_action = getattr(robot, "convert_action_for_recording", None)
-        if convert_action is not None:
-            action_values = convert_action(action_values)
+            elif policy is None and isinstance(teleop, list):
+                arm_action = teleop_arm.get_action()
+                arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
+                keyboard_action = teleop_keyboard.get_action()
+                base_action = robot._from_keyboard_to_base_action(keyboard_action)
+                act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
+                act_processed_teleop = teleop_action_processor((act, obs))
+            else:
+                logging.info(
+                    "No policy or teleoperator provided, skipping action generation."
+                    "This is likely to happen when resetting the environment without a teleop device."
+                    "The robot won't be at its rest position at the start of the next episode."
+                )
+                continue
 
-        # Write to dataset
-        if dataset is not None:
-            action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
-            frame = {**observation_frame, **action_frame, "task": single_task}
-            if frame_callback is not None:
-                frame = frame_callback(frame)
-            dataset.add_frame(frame)
+            # Applies a pipeline to the action, default is IdentityProcessor
+            if policy is not None and act_processed_policy is not None:
+                action_values = act_processed_policy
+                robot_action_to_send = robot_action_processor((act_processed_policy, obs))
+            else:
+                action_values = act_processed_teleop
+                robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
 
-        if episode_synchronization is not None and realtime_controller is not None:
-            episode_synchronization.add_frame(
-                frame_index=sync_frame_index,
-                state_sample_s=observation_monotonic_s,
-                state_rt_receive_s=state_rt_receive_s,
-                action_sent_s=matched_action_sent_s,
-                camera_timing=sync_timing.get("camera", {}),
-            )
+            # Send action to robot
+            # Action can eventually be clipped using `max_relative_target`,
+            # so action actually sent is saved in the dataset. action = postprocessor.process(action)
+            # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
+            if realtime_controller is None:
+                _sent_action = robot.send_action(robot_action_to_send)
+                matched_action_sent_s = time.perf_counter()
+            else:
+                _sent_action = matched_action
+            # Robots may clamp or otherwise sanitize a command before sending it.
+            # Store that effective command so demonstrations match the motion.
+            if isinstance(_sent_action, dict):
+                action_values = _sent_action
 
-        if sync_log_writer is not None:
-            observation_end_s = getattr(
-                robot, "_last_realtime_observation_end_monotonic_s", observation_monotonic_s
-            )
-            camera_timings = getattr(robot, "_last_realtime_camera_timings", {})
-            preview_stats = web_preview.timing_stats() if web_preview is not None else {}
-            frame_loop_ms = (time.perf_counter() - start_loop_t) * 1000
-            frame_budget_ms = 1000 / fps
-            sync_log_writer.writerow(
-                {
-                    "frame": sync_frame_index,
-                    "state_sample_s": f"{observation_monotonic_s:.9f}",
-                    "action_sent_s": f"{matched_action_sent_s:.9f}",
-                    "action_age_ms": f"{(state_anchor_s - matched_action_sent_s) * 1000:.3f}",
-                    "observation_end_s": f"{observation_end_s:.9f}",
-                    "state_to_observation_end_ms": f"{(observation_end_s - observation_monotonic_s) * 1000:.3f}",
-                    "camera_timings": repr(camera_timings),
-                    "preview_publish_ms": f"{preview_publish_ms:.6f}",
-                    "preview_clients": preview_stats.get("preview_clients", 0),
-                    "preview_source_generation": preview_stats.get(
-                        "preview_source_generation", 0
-                    ),
-                    "preview_encoded_frames": preview_stats.get("preview_encoded_frames", 0),
-                    "preview_last_encode_ms": f'{preview_stats.get("preview_last_encode_ms", 0.0):.3f}',
-                    "preview_max_encode_ms": f'{preview_stats.get("preview_max_encode_ms", 0.0):.3f}',
-                    "record_period_ms": f"{record_period_ms:.3f}",
-                    "frame_loop_ms": f"{frame_loop_ms:.3f}",
-                    "frame_budget_ms": f"{frame_budget_ms:.3f}",
-                    "frame_overrun_ms": f"{max(0.0, frame_loop_ms - frame_budget_ms):.3f}",
-                }
-            )
+            convert_action = getattr(robot, "convert_action_for_recording", None)
+            if convert_action is not None:
+                action_values = convert_action(action_values)
+
+            # Write to dataset
+            if dataset is not None:
+                action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
+                frame = {**observation_frame, **action_frame, "task": single_task}
+                if frame_callback is not None:
+                    frame = frame_callback(frame)
+                dataset.add_frame(frame)
+
+            if episode_synchronization is not None:
+                episode_synchronization.add_frame(
+                    frame_index=sync_frame_index,
+                    state_sample_s=observation_monotonic_s,
+                    state_rt_receive_s=state_rt_receive_s,
+                    action_sent_s=matched_action_sent_s,
+                    camera_timing=sync_timing.get("camera", {}),
+                    state_age_ms=sync_timing.get("state_age_ms"),
+                )
+
+            if sync_log_writer is not None:
+                observation_end_s = getattr(
+                    robot, "_last_realtime_observation_end_monotonic_s", observation_monotonic_s
+                )
+                camera_timings = getattr(robot, "_last_realtime_camera_timings", {})
+                preview_stats = web_preview.timing_stats() if web_preview is not None else {}
+                frame_loop_ms = (time.perf_counter() - start_loop_t) * 1000
+                frame_budget_ms = 1000 / fps
+                sync_log_writer.writerow(
+                    {
+                        "frame": sync_frame_index,
+                        "state_sample_s": f"{observation_monotonic_s:.9f}",
+                        "action_sent_s": f"{matched_action_sent_s:.9f}",
+                        "action_age_ms": f"{(state_anchor_s - matched_action_sent_s) * 1000:.3f}",
+                        "observation_end_s": f"{observation_end_s:.9f}",
+                        "state_to_observation_end_ms": f"{(observation_end_s - observation_monotonic_s) * 1000:.3f}",
+                        "camera_timings": repr(camera_timings),
+                        "preview_publish_ms": f"{preview_publish_ms:.6f}",
+                        "preview_clients": preview_stats.get("preview_clients", 0),
+                        "preview_source_generation": preview_stats.get(
+                            "preview_source_generation", 0
+                        ),
+                        "preview_encoded_frames": preview_stats.get("preview_encoded_frames", 0),
+                        "preview_last_encode_ms": f'{preview_stats.get("preview_last_encode_ms", 0.0):.3f}',
+                        "preview_max_encode_ms": f'{preview_stats.get("preview_max_encode_ms", 0.0):.3f}',
+                        "record_period_ms": f"{record_period_ms:.3f}",
+                        "frame_loop_ms": f"{frame_loop_ms:.3f}",
+                        "frame_budget_ms": f"{frame_budget_ms:.3f}",
+                        "frame_overrun_ms": f"{max(0.0, frame_loop_ms - frame_budget_ms):.3f}",
+                    }
+                )
+
             sync_frame_index += 1
 
-        if display_data:
-            log_rerun_data(
-                observation=obs_processed, action=action_values, compress_images=display_compressed_images
-            )
+            if display_data:
+                log_rerun_data(
+                    observation=obs_processed, action=action_values, compress_images=display_compressed_images
+                )
 
-        dt_s = time.perf_counter() - start_loop_t
-        precise_sleep(max(1 / fps - dt_s, 0.0))
+            dt_s = time.perf_counter() - start_loop_t
+            precise_sleep(max(1 / fps - dt_s, 0.0))
 
-        timestamp = time.perf_counter() - start_episode_t
+            timestamp = time.perf_counter() - start_episode_t
 
-    if realtime_controller is not None:
-        realtime_controller.stop()
-    if sync_log_file is not None:
-        sync_log_file.close()
+    finally:
+        try:
+            if realtime_controller is not None:
+                realtime_controller.stop()
+        finally:
+            if sync_log_file is not None:
+                sync_log_file.close()
     return episode_synchronization
 
 
@@ -885,6 +991,9 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
             use_videos=cfg.dataset.video,
         ),
     )
+    # Keep 3D tactile displacement tensors out of the generic camera feature
+    # pipeline, which treats every HxWx3 shape as an image/video stream.
+    dataset_features.update(getattr(robot, "tactile_observation_features", {}))
 
     if cfg.resume:
         dataset = LeRobotDataset(

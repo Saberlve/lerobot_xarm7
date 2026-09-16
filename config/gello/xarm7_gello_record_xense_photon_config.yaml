@@ -6,7 +6,7 @@ robot:
   # Saved dataset representation: "joint" records J1..J7 (rad); "tcp" records
   # the FK-converted TCP pose (mm; continuous 6D rotation, Zhou et al. CVPR 2019);
   # "both" records joints and TCP pose side by side. Control stays in joint space.
-  record_space: "joint"
+  record_space: "both"
   robot_ip: "192.168.1.245"
   # 2: xArm Gripper G2 (0-84 mm opening range).
   gripper_type: 2
@@ -14,9 +14,11 @@ robot:
   # Software timestamp pairing for robot state, both RealSense RGB streams,
   # and both Photon streams. A recording step fails when either bound is
   # exceeded, so it cannot save a mismatched frame.
-  sync_max_skew_ms: 20
-  sync_pair_max_skew_ms: 20
-  sync_wait_ms: 40
+  # Bounds validated by the four-camera hardware probe. The independent 30 Hz
+  # streams cannot reliably satisfy tighter gates (see docs/xense_photon_zh.md).
+  sync_max_skew_ms: 70.0
+  sync_pair_max_skew_ms: 90.0
+  sync_wait_ms: 70.0
   sync_history_size: 90
   # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
   gripper_speed: 100
@@ -39,52 +41,55 @@ robot:
   # Append gripper initialization/read/write failures here.
   gripper_error_log_path: "logs/xarm7_gripper_errors.log"
   cameras:
-    camera:
+    wrist_camera:
       type: intelrealsense
       serial_number_or_name: "242622070583"
       width: 640
       height: 480
-      # RealSense has no 25 fps mode; stream at 30 and the 25 Hz recorder
-      # simply picks the latest frame each cycle.
+      # Stream at 30 and jointly select frames around the 25 Hz state anchor.
       fps: 30
-    camera2:
+    third_camera:
       type: intelrealsense
       serial_number_or_name: "148522072685"
       width: 640
       height: 480
       fps: 30
-    # Replace both serial numbers with Sensor.scanSerialNumber() results.
+    # Probed hardware. Physical left/right mapping is not yet identified.
     # These dimensions are saved image sizes, not a Photon hardware mode.
-    xense_left:
+    photon_right: # 右边
       type: photon
-      serial_number: "REPLACE_WITH_LEFT_PHOTON_SN"
+      serial_number: "OG001932"
       width: 400
       height: 700
-      fps: 30
+      fps: 60  # 最终按60hz采触觉
       output_type: Rectify
       color_mode: rgb
       use_gpu: false
-      # Rectify RGB, Marker3DFlow and TimeStamp come from one SDK call.
+      # This device/SDK provides Mesh3DFlow, not Marker3DFlow.
       disable_infer: false
       save_marker_motion_3d: true
+      motion_3d_output: Mesh3DFlow
+      infer_mode: fast
       marker_rows: 35
       marker_cols: 20
       sync_history_size: 90
       timeout_ms: 2000
       max_frame_age_ms: 1000
       # config_path: /absolute/path/to/xense/calibrations
-    xense_right:
+    photon_left:  # 左边
       type: photon
-      serial_number: "REPLACE_WITH_RIGHT_PHOTON_SN"
+      serial_number: "OG001931"
       width: 400
       height: 700
-      fps: 30
+      fps: 60
       output_type: Rectify
       color_mode: rgb
       use_gpu: false
-      # Rectify RGB, Marker3DFlow and TimeStamp come from one SDK call.
+      # Rectify RGB, Mesh3DFlow and TimeStamp come from one SDK call.
       disable_infer: false
       save_marker_motion_3d: true
+      motion_3d_output: Mesh3DFlow
+      infer_mode: fast
       marker_rows: 35
       marker_cols: 20
       sync_history_size: 90
@@ -111,9 +116,9 @@ teleop:
 # JPEG encoding and network I/O run in the background; preview frames are
 # dropped instead of delaying the 25 Hz recorder or GELLO control loop.
 web_preview:
-  enabled: true
+  enabled: false
   host: "0.0.0.0"
-  port: 8765
+  port: 8769
   fps: 8
   width: 480
   jpeg_quality: 65
@@ -124,9 +129,9 @@ dataset:
   # Dataset path relative to the directory where the command is started.
   root: "datasets/xarm7_gello_xense_photon_datas1"
   repo_id: "ufactory/xarm7_gello_xense_photon_datas1"
-  single_task: "Pick up the purple grape and drop into the box on the left."
+  single_task: "请填写."
   # Record at 25 Hz; each Photon reader polls the SDK independently at 30 Hz.
-  fps: 25
-  episode_time_s: 60  # max duration for one episode
+  fps: 15
+  episode_time_s: 960  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes
   push_to_hub: False

@@ -88,6 +88,83 @@ def test_episode_synchronization_writes_training_schema_sidecars(tmp_path):
     assert action_rows[0]["action_index"] == 0
 
 
+def test_tactile_tensor_and_unix_timestamp_survive_dataset_save(tmp_path):
+    import pyarrow.parquet as pq
+    mesh_key = "observation.photon.mesh_motion_3d"
+    time_key = "observation.photon.sensor_timestamp"
+    features = {
+        mesh_key: {"dtype": "float32", "shape": (35, 20, 3), "names": None},
+        time_key: {"dtype": "float64", "shape": (1,), "names": None},
+    }
+    dataset = LeRobotDataset.create(
+        "test/photon", fps=25, features=features, root=tmp_path / "photon",
+        robot_type="xarm7", use_videos=False,
+    )
+    timestamps = [1789473516.7106972, 1789473516.7506971]
+    for timestamp in timestamps:
+        frame = record_module.build_dataset_frame(features, {
+            "photon.mesh_motion_3d": np.full((35, 20, 3), 1.25, np.float32),
+            "photon.sensor_timestamp": timestamp,
+        }, prefix="observation")
+        assert frame[time_key].dtype == np.float64
+        dataset.add_frame({**frame, "task": "test"})
+    dataset.save_episode()
+    dataset.finalize()
+    paths = list((tmp_path / "photon" / "data").rglob("*.parquet"))
+    rows = pq.read_table(paths[0]).to_pylist()
+    assert [r[time_key] for r in rows] == timestamps
+    np.testing.assert_array_equal(rows[0][mesh_key], np.full((35, 20, 3), 1.25))
+
+
+def test_sync_summary_uses_capture_error_not_read_duration(tmp_path):
+    import json
+    sync = EpisodeSynchronization(None, fps=25)
+    sync.add_frame(0, 100.0, 99.999, 99.998, {
+        "photon": {"read_start_s": 100.0, "read_end_s": 100.2,
+                   "capture_monotonic_s": 99.997, "sync_target_monotonic_s": 99.999,
+                   "sync_offset_ms": 2.0, "sync_signed_offset_ms": -2.0, "pair_skew_ms": 3.0},
+    }, state_age_ms=1.0)
+    sync.write(tmp_path, 0)
+    stats = json.loads((tmp_path / "timestamps/episode_000000_summary.json").read_text())
+    assert stats["camera_state_abs_offset_ms"]["photon"]["max"] == 2.0
+    assert stats["camera_pair_skew_ms"]["max"] == 3.0
+    assert (tmp_path / "timestamps/episode_000000.csv").is_file()
+
+
+def test_recording_sync_timeout_stops_realtime_controller(monkeypatch):
+    calls = []
+
+    class Teleop:
+        config = SimpleNamespace(realtime_control_fps=25)
+
+    class Controller:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            calls.append("start")
+
+        def stop(self):
+            calls.append("stop")
+
+    def fail():
+        raise TimeoutError("synchronization failed")
+
+    robot = SimpleNamespace(
+        _control_space="joint", enable_logs=False, action_features={"J1.pos": float},
+        get_observation=lambda: {"J1.pos": 0.0}, get_realtime_observation=fail,
+    )
+    monkeypatch.setattr(record_module, "UFBaseTeleop", Teleop)
+    monkeypatch.setattr(record_module, "RealtimeTeleopController", Controller)
+    pipelines = record_module.make_default_processors()
+    with pytest.raises(TimeoutError, match="synchronization failed"):
+        record_module.record_loop(
+            robot, {"exit_early": False}, 25, *pipelines,
+            teleop=Teleop(), control_time_s=1,
+        )
+    assert calls == ["start", "stop"]
+
+
 class FakeXArm:
     def __init__(self, robot_ip):
         self.robot_ip = robot_ip

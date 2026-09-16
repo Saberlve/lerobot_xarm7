@@ -87,12 +87,16 @@ class UmiCamera(Camera):
         return frame
 
     def async_read(self, timeout_ms: float = 200):
-        frame = self.read()
-        if frame is not None:
-            self.last_frame = frame
-        else:
-            frame = self.last_frame
-        return frame
+        deadline = time.perf_counter() + timeout_ms / 1000
+        while True:
+            frame = self.read()
+            if frame is not None:
+                self.last_frame = frame
+                return frame
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise TimeoutError(f"No new UMI frame within {timeout_ms} ms")
+            time.sleep(min(0.001, remaining))
 
     def disconnect(self) -> None:
         pass
