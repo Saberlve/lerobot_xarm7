@@ -8,6 +8,7 @@ from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop import (
     GelloTeleop,
 )
 from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import (
+    GelloFeedbackConfig,
     GelloTeleopConfig,
 )
 
@@ -40,16 +41,18 @@ def make_feedback_teleop(*, enabled=True, timeout_s=0.1):
     config = GelloTeleopConfig(
         gripper_current_control_enabled=enabled,
         gripper_current_limit_ma=20.0 if enabled else None,
-        gripper_force_feedback_enabled=enabled,
-        gripper_feedback_bias_ma=0.0 if enabled else None,
-        gripper_feedback_deadzone_ma=0.0 if enabled else None,
-        gripper_feedback_input_limit_ma=1000.0 if enabled else None,
-        gripper_feedback_ema_beta=0.0 if enabled else None,
-        gripper_feedback_gain=0.01 if enabled else None,
-        gripper_feedback_output_sign=1 if enabled else None,
-        gripper_feedback_output_limit_ma=20.0 if enabled else None,
-        gripper_feedback_slew_rate_ma_s=100.0 if enabled else None,
-        gripper_feedback_timeout_s=timeout_s if enabled else None,
+        feedback=GelloFeedbackConfig(
+            enabled=enabled,
+            bias_ma=0.0,
+            deadzone_ma=0.0,
+            input_limit_ma=1000.0,
+            ema_beta=0.0,
+            gain=0.01,
+            output_sign=1,
+            output_limit_ma=20.0,
+            slew_rate_ma_s=100.0,
+            timeout_s=timeout_s,
+        ),
     )
     teleop = GelloTeleop(config)
     robot = FakeGripperCurrentRobot()

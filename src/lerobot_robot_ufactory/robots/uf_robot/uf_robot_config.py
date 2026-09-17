@@ -20,7 +20,7 @@ class UFRobotConfig(RobotConfig):
     record_space: str = "joint"
     gripper_type: int = 1       # 1: xArm Gripper, 2: xArm Gripper G2, 10: Pika Gripper, 11: Robotiq 2F-85
     gripper_port: str = None    # only used by pika gripper (gripper_type=10)
-    gripper_speed: int = -1     # auto
+    gripper_speed: int = -1     # model-specific default; xArm Gripper G2: 50 mm/s
     gripper_force: int = -1     # auto
     gripper_command_threshold: float = 0.01  # normalized change required before sending a new command
     gripper_command_interval_s: float = 0.1  # minimum interval between tool RS485 goals
@@ -35,7 +35,7 @@ class UFRobotConfig(RobotConfig):
     # These are host monotonic-clock bounds, not a common hardware trigger.
     sync_max_skew_ms: float = 70.0
     sync_pair_max_skew_ms: float = 90.0
-    sync_wait_ms: float = 70.0
+    sync_wait_ms: float = 90.0
     sync_history_size: int = 30
     observe_joint_vel: bool = False # only effective in joint control mode
     manual_mode: bool = False  # xArm joint teaching mode; records state and optional gripper actions

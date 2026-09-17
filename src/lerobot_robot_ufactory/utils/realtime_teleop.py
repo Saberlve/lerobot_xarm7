@@ -395,21 +395,22 @@ class RealtimeTeleopController:
         self._thread = threading.Thread(target=self._run, name="uf-servoj-control", daemon=True)
 
         teleop_config = getattr(teleop, "config", None)
+        feedback_config = getattr(teleop_config, "feedback", None)
         self._gripper_feedback_enabled = bool(
-            teleop_config.feedback.enabled
+            getattr(feedback_config, "enabled", False)
         )
         self._gripper_feedback_processor = None
         if self._gripper_feedback_enabled:
             self._gripper_feedback_processor = GripperFeedbackProcessor(
-                bias_ma=teleop_config.feedback.bias_ma,
-                deadzone_ma=teleop_config.feedback.deadzone_ma,
-                input_limit_ma=teleop_config.feedback.input_limit_ma,
-                ema_beta=teleop_config.feedback.ema_beta,
-                gain=teleop_config.feedback.gain,
-                output_sign=teleop_config.feedback.output_sign,
-                output_limit_ma=teleop_config.feedback.output_limit_ma,
-                slew_rate_ma_s=teleop_config.feedback.slew_rate_ma_s,
-                timeout_s=teleop_config.feedback.timeout_s,
+                bias_ma=feedback_config.bias_ma,
+                deadzone_ma=feedback_config.deadzone_ma,
+                input_limit_ma=feedback_config.input_limit_ma,
+                ema_beta=feedback_config.ema_beta,
+                gain=feedback_config.gain,
+                output_sign=feedback_config.output_sign,
+                output_limit_ma=feedback_config.output_limit_ma,
+                slew_rate_ma_s=feedback_config.slew_rate_ma_s,
+                timeout_s=feedback_config.timeout_s,
             )
         self._disabled_feedback_diagnostic = GripperFeedbackDiagnostic(
             timestamp_monotonic_s=None,
@@ -593,6 +594,19 @@ class RealtimeTeleopController:
                     heartbeat = self._heartbeat
                 if time.perf_counter() - heartbeat > 1.0:
                     raise RuntimeError("Recording/teleop owner heartbeat timed out")
+                update_gripper_observation = getattr(
+                    self.teleop, "update_gripper_observation", None
+                )
+                if callable(update_gripper_observation):
+                    gripper_position = observation.get("gripper.pos")
+                    get_cached_gripper_position = getattr(
+                        self.robot, "get_cached_gripper_position", None
+                    )
+                    if callable(get_cached_gripper_position):
+                        cached_position = get_cached_gripper_position()
+                        if cached_position is not None:
+                            gripper_position = cached_position
+                    update_gripper_observation(gripper_position)
                 read_start_ns = time.perf_counter_ns()
                 action = self.teleop.get_action()
                 read_end_ns = time.perf_counter_ns()

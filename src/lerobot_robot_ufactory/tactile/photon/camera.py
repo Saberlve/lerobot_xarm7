@@ -6,18 +6,19 @@ consumers receive timestamped copies with bounded cache age.
 
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Condition, Event, Thread
 from time import perf_counter
 from typing import Any
 
 import cv2
 import numpy as np
-from lerobot.cameras.camera import Camera
 from lerobot.cameras.configs import ColorMode
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from numpy.typing import NDArray
 
-from .configuration_xense_photon import XensePhotonCameraConfig
+from ..base import TactileCamera
+from .config import XensePhotonCameraConfig
 
 
 def _sensor_class():
@@ -39,7 +40,7 @@ class XensePhotonSample:
     capture_monotonic_s: float
 
 
-class XensePhotonCamera(Camera):
+class XensePhotonCamera(TactileCamera):
     def __init__(self, config: XensePhotonCameraConfig):
         super().__init__(config)
         self.config = config
@@ -52,6 +53,51 @@ class XensePhotonCamera(Camera):
         self._sample_history = deque(maxlen=self.config.sync_history_size)
         self._frame_time = 0.0
         self._error = None
+        # Set by the recorder before connect; export before the reader starts.
+        self.runtime_export_dir: Path | None = None
+
+    @property
+    def deferred_feature_shapes(self) -> dict[str, tuple[int, ...]]:
+        return {"mesh_motion_3d": (self.config.marker_rows, self.config.marker_cols, 3)}
+
+    def runtime_manifest(self) -> dict[str, Any]:
+        from importlib.metadata import version
+
+        return {
+            "sdk_version": version("xensesdk"),
+            "serial_number": self.config.serial_number,
+            "runtime_file": f"runtime_{self.config.serial_number}",
+            "infer_mode": self.config.infer_mode,
+            "disable_infer": self.config.disable_infer,
+            "output_type": self.config.output_type,
+            "motion_3d_output": self.config.motion_3d_output,
+        }
+
+    def compute_deferred_features(
+        self, image_bgr: NDArray[np.uint8], runtime_dir: Path
+    ) -> dict[str, NDArray[np.float32]]:
+        from xensesdk import Sensor
+
+        runtime = runtime_dir / f"runtime_{self.config.serial_number}"
+        solver = Sensor.createSolver(runtime, overrides={"dev.disable_infer": False})
+        if not solver:
+            raise RuntimeError(f"Cannot create offline solver: {runtime}")
+        try:
+            flow = np.asarray(
+                solver.selectSensorInfo(
+                    Sensor.OutputType.Mesh3DFlow, rectify_image=image_bgr
+                ),
+                dtype=np.float32,
+            )
+        finally:
+            solver.release()
+        expected_shape = self.deferred_feature_shapes["mesh_motion_3d"]
+        if flow.shape != expected_shape or not np.isfinite(flow).all():
+            raise RuntimeError(
+                f"Invalid offline Mesh3DFlow for {self.config.serial_number}: "
+                f"expected {expected_shape}, got {flow.shape}"
+            )
+        return {"mesh_motion_3d": flow}
 
     @property
     def is_connected(self) -> bool:
@@ -98,10 +144,18 @@ class XensePhotonCamera(Camera):
             daemon=True,
         )
         try:
+            if self.runtime_export_dir is not None:
+                self.runtime_export_dir.mkdir(parents=True, exist_ok=True)
+                self._sensor.exportRuntimeConfig(str(self.runtime_export_dir))
+                runtime = self.runtime_export_dir / f"runtime_{self.config.serial_number}"
+                if not runtime.is_file() or runtime.stat().st_size == 0:
+                    raise RuntimeError(f"Xense runtime export missing or empty: {runtime}")
             self._thread.start()
             if warmup:
                 self.async_read()
         except BaseException:
+            if self._thread.ident is None:
+                self._thread = None
             self.disconnect()
             raise
 

@@ -13,12 +13,12 @@ from lerobot.cameras.configs import CameraConfig, ColorMode
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from lerobot_robot_ufactory.cameras.utils import make_cameras_from_configs
-from lerobot_robot_ufactory.cameras.xense_photon_camera import (
+from lerobot_robot_ufactory.tactile.photon import (
     XensePhotonCamera,
     XensePhotonCameraConfig,
-    camera_xense_photon,
 )
-from lerobot_robot_ufactory.cameras.xense_photon_camera.camera_xense_photon import (
+from lerobot_robot_ufactory.tactile.photon import camera as camera_xense_photon
+from lerobot_robot_ufactory.tactile.photon.camera import (
     XensePhotonSample,
 )
 
@@ -96,6 +96,44 @@ def config(serial="LEFT", **kwargs):
     return XensePhotonCameraConfig(serial_number=serial, width=8, height=12, fps=100, **kwargs)
 
 
+def test_runtime_export_before_capture(sdk, tmp_path, monkeypatch):
+    sensor_class, instances = sdk
+
+    def export(sensor, directory):
+        assert not sensor.entered.is_set()
+        (Path(directory) / f"runtime_{sensor.serial}").write_bytes(b"runtime-test")
+
+    monkeypatch.setattr(sensor_class, "exportRuntimeConfig", export, raising=False)
+    camera = XensePhotonCamera(config())
+    camera.runtime_export_dir = tmp_path / "session"
+    try:
+        camera.connect()
+        assert (camera.runtime_export_dir / "runtime_LEFT").read_bytes() == b"runtime-test"
+    finally:
+        if camera.is_connected:
+            camera.disconnect()
+
+
+@pytest.mark.parametrize("failure", ["missing", "empty", "exception"])
+def test_runtime_export_failure_releases_camera(sdk, tmp_path, monkeypatch, failure):
+    sensor_class, instances = sdk
+
+    def export(sensor, directory):
+        if failure == "exception":
+            raise RuntimeError("export failed")
+        if failure == "empty":
+            (Path(directory) / f"runtime_{sensor.serial}").touch()
+
+    monkeypatch.setattr(sensor_class, "exportRuntimeConfig", export, raising=False)
+    camera = XensePhotonCamera(config())
+    camera.runtime_export_dir = tmp_path
+    with pytest.raises(RuntimeError):
+        camera.connect()
+    assert instances[0].released
+    assert not instances[0].entered.is_set()
+    assert not camera.is_connected
+
+
 def test_registration_and_yaml():
     path = (
         Path(__file__).resolve().parents[1]
@@ -111,8 +149,9 @@ def test_registration_and_yaml():
     assert set(cameras) == {"photon_right", "photon_left"}
     assert all(isinstance(cam, XensePhotonCamera) for cam in cameras.values())
     assert cameras["photon_right"].config.color_mode == ColorMode.RGB
-    assert cameras["photon_right"].saves_marker_motion_3d
-    assert not cameras["photon_right"].config.disable_infer
+    assert not cameras["photon_right"].saves_marker_motion_3d
+    assert cameras["photon_right"].config.disable_infer
+    assert raw['offline_mesh3dflow']
 
 
 @pytest.mark.parametrize(

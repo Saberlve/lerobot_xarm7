@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import (
+    GelloFeedbackConfig,
     GelloTeleopConfig,
 )
 from lerobot_robot_ufactory.utils.realtime_teleop import (
@@ -69,61 +70,65 @@ def test_gello_current_control_is_default_off_and_requires_a_safe_explicit_limit
 
 def test_gello_force_feedback_is_default_off_and_requires_explicit_mapping():
     config = GelloTeleopConfig()
-    assert config.gripper_force_feedback_enabled is False
-    assert config.gripper_feedback_gain is None
-    assert config.gripper_feedback_output_sign is None
+    assert config.feedback.enabled is False
     enabled = GelloTeleopConfig(
         gripper_current_control_enabled=True,
         gripper_current_limit_ma=20.0,
-        gripper_force_feedback_enabled=True,
-        gripper_feedback_bias_ma=0.0,
-        gripper_feedback_deadzone_ma=10.0,
-        gripper_feedback_input_limit_ma=1000.0,
-        gripper_feedback_ema_beta=0.5,
-        gripper_feedback_gain=0.01,
-        gripper_feedback_output_sign=-1,
-        gripper_feedback_output_limit_ma=10.0,
-        gripper_feedback_slew_rate_ma_s=50.0,
-        gripper_feedback_timeout_s=0.2,
+        feedback=GelloFeedbackConfig(
+            enabled=True,
+            bias_ma=0.0,
+            deadzone_ma=10.0,
+            input_limit_ma=1000.0,
+            ema_beta=0.5,
+            gain=0.01,
+            output_sign=-1,
+            output_limit_ma=10.0,
+            slew_rate_ma_s=50.0,
+            timeout_s=0.2,
+        ),
     )
-    assert enabled.gripper_force_feedback_enabled is True
+    assert enabled.feedback.enabled is True
 
     with pytest.raises(ValueError, match="current_control_enabled"):
         GelloTeleopConfig(
-            gripper_force_feedback_enabled=True,
+            feedback=GelloFeedbackConfig(enabled=True),
         )
     with pytest.raises(ValueError, match="requires explicit configuration"):
         GelloTeleopConfig(
             gripper_current_control_enabled=True,
             gripper_current_limit_ma=20.0,
-            gripper_force_feedback_enabled=True,
+            feedback=GelloFeedbackConfig(
+                enabled=True,
+                gain=None,
+                output_limit_ma=20.0,
+            ),
         )
     with pytest.raises(ValueError, match="either -1 or 1"):
-        GelloTeleopConfig(gripper_feedback_output_sign=True)
+        GelloTeleopConfig(feedback=GelloFeedbackConfig(output_sign=True))
 
 
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("gripper_feedback_deadzone_ma", -1.0, "non-negative"),
-        ("gripper_feedback_input_limit_ma", 0.0, "positive"),
-        ("gripper_feedback_ema_beta", 1.0, r"\[0, 1\)"),
-        ("gripper_feedback_gain", -0.1, "non-negative"),
-        ("gripper_feedback_output_limit_ma", 0.0, "positive"),
-        ("gripper_feedback_slew_rate_ma_s", 0.0, "positive"),
-        ("gripper_feedback_timeout_s", 0.0, "positive"),
+        ("deadzone_ma", -1.0, "non-negative"),
+        ("input_limit_ma", 0.0, "positive"),
+        ("ema_beta", 1.0, r"\[0, 1\)"),
+        ("gain", -0.1, "non-negative"),
+        ("output_limit_ma", 0.0, "positive"),
+        ("slew_rate_ma_s", 0.0, "positive"),
+        ("timeout_s", 0.0, "positive"),
     ],
 )
 def test_gello_force_feedback_conditioning_config_is_validated(field, value, message):
     with pytest.raises(ValueError, match=message):
-        GelloTeleopConfig(**{field: value})
+        GelloTeleopConfig(feedback=GelloFeedbackConfig(**{field: value}))
 
 
 def test_feedback_output_limit_cannot_exceed_phase2_limit():
     with pytest.raises(ValueError, match="cannot exceed"):
         GelloTeleopConfig(
             gripper_current_limit_ma=20.0,
-            gripper_feedback_output_limit_ma=21.0,
+            feedback=GelloFeedbackConfig(output_limit_ma=21.0),
         )
 
 
@@ -180,10 +185,13 @@ def test_keyboard_gripper_hold_continues_after_delay(monkeypatch):
     clock["now"] += 0.5
     assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.85)
 
-    # Release stops the motion.
+    # Release stops at the latest measured physical position instead of
+    # leaving the gripper to travel toward the accumulated target.
+    teleop.update_gripper_observation(0.7)
     teleop.set_gripper_keyboard_state(close=False, open=False)
     clock["now"] += 0.5
-    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.85)
+    teleop.update_gripper_observation(0.72)
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.72)
 
 
 def test_keyboard_gripper_quick_tap_within_one_cycle_still_steps(monkeypatch):
@@ -197,6 +205,40 @@ def test_keyboard_gripper_quick_tap_within_one_cycle_still_steps(monkeypatch):
     assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.6)
 
 
+def test_keyboard_gripper_release_rebases_when_fresh_observation_arrives(monkeypatch):
+    teleop, clock = _make_keyboard_gripper_teleop(monkeypatch)
+
+    teleop.update_gripper_observation(0.5)
+    teleop._keyboard_gripper_action(0.5)
+    teleop.set_gripper_keyboard_state(close=True, open=False)
+    clock["now"] += 0.6
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.9)
+
+    teleop.set_gripper_keyboard_state(close=False, open=False)
+    teleop.update_gripper_observation(0.65)
+    clock["now"] += 0.1
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.65)
+
+
+def test_keyboard_gripper_zero_hold_delay_sends_distant_continuous_goal(monkeypatch):
+    teleop, clock = _make_keyboard_gripper_teleop(
+        monkeypatch, step_mm=10.0, hold_delay_s=0.0
+    )
+
+    teleop._keyboard_gripper_action(0.5)
+    teleop.set_gripper_keyboard_state(close=True, open=False)
+    clock["now"] += 0.1
+
+    # A distant goal lets the G2 maintain its configured velocity instead of
+    # replanning a new 2 mm move on every control cycle.
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(1.0)
+
+    teleop.update_gripper_observation(0.62)
+    teleop.set_gripper_keyboard_state(close=False, open=False)
+    teleop.update_gripper_observation(0.64)
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.64)
+
+
 def test_keyboard_gripper_open_direction_and_clamp(monkeypatch):
     teleop, clock = _make_keyboard_gripper_teleop(monkeypatch)
 
@@ -208,6 +250,40 @@ def test_keyboard_gripper_open_direction_and_clamp(monkeypatch):
     teleop.set_gripper_keyboard_state(close=True, open=False)
     clock["now"] += 5.0
     assert teleop._keyboard_gripper_action(0.5) == pytest.approx(1.0)
+
+
+def test_realtime_controller_uses_fresh_cached_gripper_position():
+    class ObservingTeleop:
+        config = GelloTeleopConfig()
+
+        def __init__(self):
+            self.positions = []
+
+        def update_gripper_observation(self, position):
+            self.positions.append(position)
+
+        def get_action(self):
+            return {"J1.pos": 0.0}
+
+    class CachedPositionRobot(FakeRobot):
+        def get_cached_gripper_position(self):
+            return 0.7
+
+    teleop = ObservingTeleop()
+    controller = RealtimeTeleopController(
+        CachedPositionRobot(),
+        teleop,
+        identity_action_processor,
+        identity_action_processor,
+        fps=100,
+        initial_observation={"gripper.pos": 0.2},
+    )
+
+    controller.start()
+    controller.stop()
+
+    assert teleop.positions
+    assert teleop.positions[0] == pytest.approx(0.7)
 
 
 def test_realtime_controller_sends_without_waiting_for_observation_owner():
@@ -355,17 +431,18 @@ class FeedbackTeleop(FakeTeleop):
     def __init__(self, *, enabled=True, fail_feedback=False, fail_start=False):
         super().__init__()
         self.config = SimpleNamespace(
-            gripper_force_feedback_enabled=enabled,
-            gripper_feedback_bias_ma=0.0,
-            gripper_feedback_deadzone_ma=0.0,
-            gripper_feedback_input_limit_ma=1000.0,
-            gripper_feedback_ema_beta=0.0,
-            gripper_feedback_gain=0.1,
-            gripper_feedback_output_sign=-1,
-            gripper_current_limit_ma=20.0,
-            gripper_feedback_output_limit_ma=20.0,
-            gripper_feedback_slew_rate_ma_s=10000.0,
-            gripper_feedback_timeout_s=0.25,
+            feedback=GelloFeedbackConfig(
+                enabled=enabled,
+                bias_ma=0.0,
+                deadzone_ma=0.0,
+                input_limit_ma=1000.0,
+                ema_beta=0.0,
+                gain=0.1,
+                output_sign=-1,
+                output_limit_ma=20.0,
+                slew_rate_ma_s=10000.0,
+                timeout_s=0.25,
+            ),
         )
         self.fail_feedback = fail_feedback
         self.fail_start = fail_start

@@ -12,6 +12,11 @@ robot:
   gripper_type: 2
   gripper_speed: 50
   gripper_command_interval_s: 0.03334
+  # Keyboard release stopping needs the G2's measured position instead of the
+  # last commanded target. This monitor is asynchronous and does not block the
+  # realtime control loop.
+  gripper_current_monitor: true
+  gripper_current_monitor_frequency_hz: 250
   enable_logs: false
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
   joint_command_mode: 6
@@ -85,7 +90,7 @@ teleop:
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
   gripper_id: 8
-  gripper_control_mode: gello
+  gripper_control_mode: keyboard
   gripper_keyboard_hold_delay_s: 0.0
   gripper_keyboard_step_mm: 1.0
   gripper_open_deg: 198.28125
@@ -107,9 +112,9 @@ offline_mesh3dflow: true
 
 dataset:
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_xense_whiteboard"
-  repo_id: "ufactory/xarm7_gello_xense_whiteboard"
-  single_task: "Pick up the whiteboard eraser, erase the writing on the whiteboard, and then put the eraser down."
+  root: "datasets/xarm7_gello_potato_chips"
+  repo_id: "ufactory/xarm7_gello_potato_chips"
+  single_task: "Put the potato chips into the cup"
   fps: 15
   episode_time_s: 960  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes

@@ -420,7 +420,8 @@ def test_gripper_rs485_commands_are_rate_limited(monkeypatch, tmp_path):
     robot.disconnect()
 
 
-def test_xarm_gripper_g2_uses_sdk_units_and_dedicated_api(monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize("gripper_speed, expected_speed", [(-1, 50), (100, 100)])
+def test_xarm_gripper_g2_uses_sdk_units_and_dedicated_api(monkeypatch, tmp_path, caplog, gripper_speed, expected_speed):
     from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
 
     arm = FakeXArm("192.168.1.245")
@@ -433,14 +434,14 @@ def test_xarm_gripper_g2_uses_sdk_units_and_dedicated_api(monkeypatch, tmp_path,
         robot_dof=6,
         control_space="joint",
         gripper_type=2,
-        gripper_speed=100,
+        gripper_speed=gripper_speed,
         gripper_force=50,
         gripper_command_interval_s=0.0,
         gripper_error_log_path=None,
     )
     robot = uf_robot_module.UFRobot(config)
-    assert robot._gripper_g2_speed == 100
-    assert robot._gripper_param.speed == int(((100 * 60) / 9.88235 + 140) / 0.4)
+    assert robot._gripper_g2_speed == expected_speed
+    assert robot._gripper_param.speed == int(((expected_speed * 60) / 9.88235 + 140) / 0.4)
     robot.connect()
 
     g2_writes = [call for call in arm.calls if call[0] == "set_gripper_g2_position"]
@@ -449,7 +450,7 @@ def test_xarm_gripper_g2_uses_sdk_units_and_dedicated_api(monkeypatch, tmp_path,
             "set_gripper_g2_position",
             84,
             {
-                "speed": 100,
+                "speed": expected_speed,
                 "force": 50,
                 "wait": True,
                 "check_baud": False,
@@ -462,7 +463,7 @@ def test_xarm_gripper_g2_uses_sdk_units_and_dedicated_api(monkeypatch, tmp_path,
         "set_gripper_g2_position",
         42,
         {
-            "speed": 100,
+            "speed": expected_speed,
             "force": 50,
             "wait": False,
             "wait_motion": False,

@@ -2,12 +2,14 @@
 
 from dataclasses import dataclass
 
-from lerobot.cameras.configs import CameraConfig, ColorMode
+from lerobot.cameras.configs import ColorMode
+
+from ..base import TactileCameraConfig
 
 
-@CameraConfig.register_subclass("photon")
+@TactileCameraConfig.register_subclass("photon")
 @dataclass(kw_only=True)
-class XensePhotonCameraConfig(CameraConfig):
+class XensePhotonCameraConfig(TactileCameraConfig):
     serial_number: str
     width: int = 400
     height: int = 700
@@ -30,6 +32,12 @@ class XensePhotonCameraConfig(CameraConfig):
     sync_history_size: int = 30
     timeout_ms: int = 2000
     max_frame_age_ms: int = 1000
+
+    def configure_deferred_processing(self) -> None:
+        if self.output_type != "Rectify":
+            raise ValueError("Offline tactile processing requires Rectify images")
+        self.disable_infer = True
+        self.save_marker_motion_3d = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.serial_number, str) or not self.serial_number.strip():

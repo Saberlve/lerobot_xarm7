@@ -249,7 +249,7 @@ class UFRobot(Robot, Thread):
             gripper_force = 50 if self.config.gripper_force < 0 else self.config.gripper_force # # not support
             self._gripper_param = GripperParam('xArmGripper', open_pos=800, close_pos=0, speed=gripper_speed, force=gripper_force)
         elif self._gripper_type == GripperType.xArmGripperG2:
-            speed = 225 if self.config.gripper_speed < 0 else min(max(15, self.config.gripper_speed), 225)
+            speed = 50 if self.config.gripper_speed < 0 else min(max(15, self.config.gripper_speed), 225)
             gripper_speed = int(((speed * 60) / 9.88235 + 140) / 0.4)
             # Keep the SDK-facing speed in mm/s. GripperParam.speed retains
             # the original low-level register conversion used by this repo.
@@ -1511,6 +1511,28 @@ class UFRobot(Robot, Thread):
                 speed = float(self._gripper_param.speed)
         stroke = abs(float(self._gripper_param.open_pos - self._gripper_param.close_pos))
         return speed, max(stroke, 1.0)
+
+    def get_cached_gripper_position(self) -> float | None:
+        """Return the freshest normalized G2 position without controller I/O."""
+        if not self._gripper_current_monitor_requested:
+            return None
+        if not self._update_lock.acquire(blocking=False):
+            return None
+        try:
+            if (
+                not self._gripper_current_monitor_active
+                or self._gripper_actual_pos_mm is None
+                or self._gripper_current_sample_monotonic_s is None
+            ):
+                return None
+            age_s = time.perf_counter() - self._gripper_current_sample_monotonic_s
+            if age_s > self.config.gripper_current_stale_timeout_s:
+                return None
+            return float(
+                self._gripper_param.get_gripper_norm(self._gripper_actual_pos_mm)
+            )
+        finally:
+            self._update_lock.release()
 
     def get_gripper_current_sample(
         self,

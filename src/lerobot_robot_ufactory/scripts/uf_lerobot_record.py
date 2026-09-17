@@ -9,6 +9,7 @@ import shutil
 import threading
 import os
 import json
+from uuid import uuid4
 import numpy as np
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,7 @@ from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
 from lerobot_robot_ufactory.utils.realtime_teleop import RealtimeTeleopController
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 from lerobot_robot_ufactory.utils.web_preview import RecordingWebPreview, WebPreviewConfig
+from lerobot_robot_ufactory.utils.episode_images import discard_episode_images, validate_episode_images
 
 
 @dataclass
@@ -31,6 +33,7 @@ class UFRecordConfig(LeRobotRecordConfig):
     # Keep timing sidecars out of the training schema while making diagnostics
     # available by default for GELLO recording.
     synchronize: bool = True
+    offline_mesh3dflow: bool = False
 
     def __post_init__(self):
         self.web_preview.validate()
@@ -417,6 +420,7 @@ class AsyncEpisodeSaver:
                 episode_index, episode_buffer, synchronization = item
                 print(f'[Async] saving episode {episode_index}')
                 try:
+                    validate_episode_images(self.dataset, episode_buffer)
                     self.dataset.save_episode(episode_data=episode_buffer)
                 except TypeError as exc:
                     if "episode_data" in str(exc):
@@ -679,6 +683,9 @@ def record_loop(
                 convert_observation = getattr(robot, "convert_observation_for_recording", None)
                 if convert_observation is not None:
                     obs_for_dataset = convert_observation(obs_processed)
+                obs_for_dataset = dict(obs_for_dataset)
+                for key, shape in getattr(dataset, '_offline_mesh_fields', {}).items():
+                    obs_for_dataset[key.removeprefix('observation.')] = np.full(shape, np.nan, dtype=np.float32)
                 observation_frame = build_dataset_frame(dataset.features, obs_for_dataset, prefix=OBS_STR)
 
             # Get action from either policy or teleop
@@ -969,6 +976,22 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     if cfg.display_data:
         init_rerun(session_name="recording")
 
+    if cfg.offline_mesh3dflow:
+        if async_save:
+            raise ValueError('offline_mesh3dflow requires synchronous saving; remove --async_save/-a')
+        if not cfg.dataset.video:
+            raise ValueError('offline_mesh3dflow requires video recording')
+        cfg.dataset.video_encoding_batch_size = 1
+        from lerobot_robot_ufactory.tactile import TactileCameraConfig
+
+        tactile_configs = [
+            camera for camera in cfg.robot.cameras.values()
+            if isinstance(camera, TactileCameraConfig)
+        ]
+        if not tactile_configs:
+            raise ValueError('offline_mesh3dflow requires at least one tactile sensor')
+        for camera in tactile_configs:
+            camera.configure_deferred_processing()
     _prepare_dataset_root(cfg)
 
     robot = make_robot_from_config(cfg.robot)
@@ -994,6 +1017,17 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     # Keep 3D tactile displacement tensors out of the generic camera feature
     # pipeline, which treats every HxWx3 shape as an image/video stream.
     dataset_features.update(getattr(robot, "tactile_observation_features", {}))
+    offline_mesh_fields = {}
+    if cfg.offline_mesh3dflow:
+        from lerobot_robot_ufactory.tactile import TactileCamera
+        for name, camera in robot.cameras.items():
+            if isinstance(camera, TactileCamera):
+                for suffix, shape in camera.deferred_feature_shapes.items():
+                    key = f'observation.{name}.{suffix}'
+                    offline_mesh_fields[key] = shape
+                    dataset_features[key] = {
+                        'dtype': 'float32', 'shape': shape, 'names': None
+                    }
 
     if cfg.resume:
         dataset = LeRobotDataset(
@@ -1023,6 +1057,8 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
             batch_encoding_size=cfg.dataset.video_encoding_batch_size,
         )
 
+    dataset._offline_mesh_fields = offline_mesh_fields
+
     # Load pretrained policy
     policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
     preprocessor = None
@@ -1038,9 +1074,35 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
             },
         )
 
+    # Every recording session gets its own reference/config snapshot. Resuming
+    # must not overwrite runtime files belonging to previous episodes.
+    from lerobot_robot_ufactory.tactile import TactileCamera
+
+    tactile_cameras = {
+        name: cam for name, cam in robot.cameras.items()
+        if isinstance(cam, TactileCamera)
+    }
+    runtime_dir = None
+    if tactile_cameras:
+        runtime_dir = Path(dataset.root) / "runtime" / f"session_{uuid4().hex}"
+        for cam in tactile_cameras.values():
+            cam.runtime_export_dir = runtime_dir
+
     web_preview = None
     try:
         robot.connect()
+        if runtime_dir is not None:
+            manifest = {
+                "created_unix_s": time.time(),
+                "first_episode_index": dataset.num_episodes,
+                "cameras": {
+                    name: cam.runtime_manifest()
+                    for name, cam in tactile_cameras.items()
+                },
+            }
+            with (runtime_dir / "manifest.json").open("x") as stream:
+                json.dump(manifest, stream, indent=2)
+            logging.info("Photon runtime configurations saved: %s", runtime_dir)
         if teleop is not None:
             teleop.connect()
             if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
@@ -1123,6 +1185,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
 
     frame_callback = None
     async_episode_saver = AsyncEpisodeSaver(dataset) if async_save else None
+    deferred_offline_episodes = []
     if async_episode_saver is not None:
         print('Async episode saving is enabled.')
 
@@ -1196,12 +1259,12 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                     teleop.set_teleop_enabled(False)
                 episode_buffer = _get_episode_buffer(dataset)
                 if _episode_buffer_size(episode_buffer) > 0:
-                    if async_episode_saver is None:
-                        dataset.clear_episode_buffer()
-                    else:
-                        episode_index = _episode_buffer_index(episode_buffer)
-                        empty_episode_buffer = _create_empty_episode_buffer(dataset, episode_index, episode_buffer)
-                        _set_episode_buffer(dataset, empty_episode_buffer)
+                    if async_episode_saver is not None:
+                        async_episode_saver.wait_idle()
+                    episode_index = _episode_buffer_index(episode_buffer)
+                    discard_episode_images(dataset, episode_index)
+                    empty_episode_buffer = _create_empty_episode_buffer(dataset, episode_index, episode_buffer)
+                    _set_episode_buffer(dataset, empty_episode_buffer)
                 is_recorded = False
                 if is_evt:
                     _print_record_controls(is_recorded, manual_mode)
@@ -1216,11 +1279,26 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                 if is_uf_teleop:
                     teleop.set_teleop_enabled(False)
                 if async_episode_saver is None:
-                    dataset.save_episode()
-                    if episode_synchronization is not None:
-                        episode_synchronization.write(Path(dataset.root), episode_index)
-                        log_say(episode_synchronization.summary(), cfg.play_sounds)
-                    log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
+                    validate_episode_images(dataset, _get_episode_buffer(dataset))
+                    if cfg.offline_mesh3dflow:
+                        episode_buffer = _get_episode_buffer(dataset)
+                        next_episode_buffer = _create_next_episode_buffer(
+                            dataset, episode_buffer
+                        )
+                        _set_episode_buffer(dataset, next_episode_buffer)
+                        deferred_offline_episodes.append(
+                            (episode_index, episode_buffer, episode_synchronization)
+                        )
+                        log_say(
+                            f"[Deferred] Save episode {episode_index} after recording",
+                            cfg.play_sounds,
+                        )
+                    else:
+                        dataset.save_episode()
+                        if episode_synchronization is not None:
+                            episode_synchronization.write(Path(dataset.root), episode_index)
+                            log_say(episode_synchronization.summary(), cfg.play_sounds)
+                        log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
                 else:
                     queued_episode_index = async_episode_saver.submit_current_episode(
                         episode_synchronization
@@ -1242,6 +1320,38 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
         if async_episode_saver is not None:
             print('Waiting for pending async episode saves.')
             async_episode_saver.close()
+
+        if deferred_offline_episodes:
+            # Mesh inference may take much longer than recording cleanup. Release
+            # hardware first; _RecordingCleanup safely tolerates a second call.
+            _disconnect_recording_resources(robot, teleop, listener)
+            listener = None
+            from lerobot_robot_ufactory.tactile.deferred import compute_episode_mesh
+
+            total = len(deferred_offline_episodes)
+            print(f"Computing offline Mesh3DFlow for {total} episode(s).")
+            for ordinal, (episode_index, episode_buffer, synchronization) in enumerate(
+                deferred_offline_episodes, start=1
+            ):
+                logging.info(
+                    "Computing offline Mesh3DFlow episode %s (%s/%s)",
+                    episode_index,
+                    ordinal,
+                    total,
+                )
+                compute_episode_mesh(
+                    dataset,
+                    tactile_cameras,
+                    runtime_dir,
+                    episode_index,
+                    episode_buffer=episode_buffer,
+                )
+                dataset.save_episode(episode_data=episode_buffer)
+                discard_episode_images(dataset, episode_index)
+                if synchronization is not None:
+                    synchronization.write(Path(dataset.root), episode_index)
+                    log_say(synchronization.summary(), cfg.play_sounds)
+                log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
 
     print("\n********** Episode Record Loop Exit **********")
 
