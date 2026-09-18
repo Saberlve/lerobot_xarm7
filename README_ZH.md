@@ -2,6 +2,8 @@
 
 > [English Version](README.md)
 
+实验性机械臂力反馈（默认关闭）：[xArm7 → GELLO ID1–7：审计、配置、三阶段验证与日志](docs/arm_force_feedback_zh.md)。原有 ID8 夹爪反馈和 TCP 高度保护独立保留。
+
 UFACTORY xArm 与 [LeRobot](https://github.com/huggingface/lerobot) 框架的集成项目，专注于两种数据采集方式：
 
 - **GELLO** — 使用 Dynamixel 示教臂的关节空间遥操作

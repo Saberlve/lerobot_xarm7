@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import partial
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
@@ -15,6 +16,7 @@ from dynamixel_sdk.robotis_def import (
 from gello.dynamixel import driver as driver_module
 from gello.dynamixel.driver import DynamixelDriver
 from gello.robots.dynamixel import DynamixelRobot
+from .arm_adapter import TimedArmReaderMixin
 
 
 GRIPPER_DYNAMIXEL_ID = 8
@@ -60,10 +62,12 @@ SUPPORTED_GRIPPER_MODELS = {
 }
 
 
-class SafeDynamixelDriver(DynamixelDriver):
+class SafeDynamixelDriver(TimedArmReaderMixin, DynamixelDriver):
     """GELLO driver with serialized writes and complete torque cleanup."""
 
     def __init__(self, *args, **kwargs) -> None:
+        self._arm_timed_reader = kwargs.pop("arm_timed_reader", False)
+        self._arm_feedback_adapter = None
         self._gripper_current_mode_enabled = False
         self._gripper_current_transition_active = False
         self._gripper_current_limit_raw: int | None = None
@@ -380,6 +384,8 @@ class SafeDynamixelDriver(DynamixelDriver):
             )
 
     def set_joints(self, joint_angles: Sequence[float]) -> None:
+        if getattr(getattr(self, "_arm_feedback_adapter", None), "active", False):
+            raise RuntimeError("position writes forbidden during arm current session")
         if len(joint_angles) != len(self._ids):
             raise ValueError("joint_angles must match the configured Dynamixel IDs")
         if not self._torque_enabled:
@@ -413,6 +419,8 @@ class SafeDynamixelDriver(DynamixelDriver):
                 self._groupSyncWrite.clearParam()
 
     def set_torque_mode(self, enable: bool) -> None:
+        if enable and getattr(getattr(self, "_arm_feedback_adapter", None), "active", False):
+            raise RuntimeError("global torque enable forbidden during arm current session")
         if self._is_fake:
             self._torque_enabled = enable
             return
@@ -451,6 +459,12 @@ class SafeDynamixelDriver(DynamixelDriver):
         self._torque_enabled = enable
 
     def close(self) -> None:
+        arm_adapter = getattr(self, "_arm_feedback_adapter", None)
+        if arm_adapter is not None:
+            try:
+                arm_adapter.disable()
+            except Exception:
+                pass  # best effort; super().close() still disables all torque
         if self._gripper_current_mode_enabled or self._gripper_current_transition_active:
             try:
                 self.disable_gripper_current_mode(GRIPPER_DYNAMIXEL_ID)
@@ -524,6 +538,7 @@ class PatchedDynamixelRobotConfig:
     joint_offsets: Sequence[float]
     joint_signs: Sequence[int]
     gripper_config: Optional[Tuple[int, float, float]]
+    arm_timed_reader: bool = False
 
     def __post_init__(self) -> None:
         if len(self.joint_ids) != len(self.joint_offsets):
@@ -539,7 +554,9 @@ class PatchedDynamixelRobotConfig:
         # Upstream DynamixelRobot imports its driver inside __init__. Replace
         # that symbol only while constructing this instance.
         original_driver = driver_module.DynamixelDriver
-        driver_module.DynamixelDriver = SafeDynamixelDriver
+        driver_module.DynamixelDriver = partial(
+            SafeDynamixelDriver, arm_timed_reader=self.arm_timed_reader
+        )
         try:
             return ContinuousDynamixelRobot(
                 joint_ids=self.joint_ids,

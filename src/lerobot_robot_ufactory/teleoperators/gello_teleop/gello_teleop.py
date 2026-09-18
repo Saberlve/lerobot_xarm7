@@ -45,6 +45,7 @@ class GelloTeleop(UFBaseTeleop):
         self._feedback_pending_ma = 0.0
         self._feedback_output_active = False
         self._feedback_output_error = None
+        self._arm_feedback_worker = None
 
         joint_offsets = [0.0] * len(self.config.joint_ids)
         self._align_gripper_to_current = self.config.gripper_open_deg is None
@@ -69,7 +70,8 @@ class GelloTeleop(UFBaseTeleop):
                 "joint_ids": self.config.joint_ids,
                 "joint_signs": self.config.joint_signs,
                 "joint_offsets": joint_offsets,
-                "gripper_config": gripper_config
+                "gripper_config": gripper_config,
+                "arm_timed_reader": self.config.arm_feedback.enabled,
         }
         self._dynamixel_robo_config = PatchedDynamixelRobotConfig(**param_dict)
         self.dof = len(self.config.joint_ids)
@@ -122,6 +124,36 @@ class GelloTeleop(UFBaseTeleop):
     def configure(self) -> None:
         # TODO: Go to sync position slowly? Can not 
         pass
+
+    def start_arm_feedback(self, robot_ip: str) -> None:
+        if not self.config.arm_feedback.enabled:
+            return
+        if not self._is_connected:
+            raise DeviceNotConnectedError("GELLO not connected")
+        if self._arm_feedback_worker is not None:
+            raise RuntimeError("arm feedback already started")
+        from .arm_adapter import GelloArmFeedbackAdapter
+        from ...utils.arm_feedback_runtime import ArmFeedbackWorker, XArmFeedbackSource
+        driver = self.gello_agent._robot._driver
+        adapter = GelloArmFeedbackAdapter(driver, self.config.arm_feedback)
+        driver._arm_feedback_adapter = adapter
+        worker = ArmFeedbackWorker(
+            self.config.arm_feedback,
+            XArmFeedbackSource(robot_ip, self.config.arm_feedback),
+            adapter, driver.arm_state_snapshot, self.config.joint_signs,
+        )
+        self._arm_feedback_worker = worker
+        try:
+            worker.start()
+        except BaseException:
+            self._arm_feedback_worker = None
+            raise
+
+    def stop_arm_feedback(self) -> None:
+        worker = getattr(self, "_arm_feedback_worker", None)
+        if worker is not None:
+            worker.stop()
+            self._arm_feedback_worker = None
 
     def probe_gripper_dynamixel(self) -> GripperDynamixelInfo:
         if not self._is_connected:
@@ -292,6 +324,7 @@ class GelloTeleop(UFBaseTeleop):
 
         self._teleop_enabled = False
         self._safely_disable_gripper_current_mode("reset")
+        self.stop_arm_feedback()
         gello_robot = self.gello_agent._robot
         driver = gello_robot._driver
         gello_robot.set_torque_mode(False)
@@ -338,6 +371,7 @@ class GelloTeleop(UFBaseTeleop):
                 raise ValueError("Robot observation is required to enable GELLO teleoperation")
             self.reset_to_robot_observation(obs)
         if not enabled and self._is_connected and hasattr(self, "gello_agent"):
+            self.stop_arm_feedback()
             self._safely_disable_gripper_current_mode("pause")
             self.gello_agent._robot.set_torque_mode(False)
             self._needs_alignment = True
@@ -451,6 +485,7 @@ class GelloTeleop(UFBaseTeleop):
             return
         gello_robot = self.gello_agent._robot
         try:
+            self.stop_arm_feedback()
             self._safely_disable_gripper_current_mode("disconnect")
             gello_robot.set_torque_mode(False)
         finally:

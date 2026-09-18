@@ -50,6 +50,7 @@ uf-read-tcp-z = "lerobot_robot_ufactory.scripts.uf_read_tcp_z:main"
 uf-read-g2-current = "lerobot_robot_ufactory.scripts.uf_read_g2_current:main"
 uf-test-gello-gripper-current = "lerobot_robot_ufactory.scripts.uf_test_gello_gripper_current:main"
 uf-test-gripper-force-feedback = "lerobot_robot_ufactory.scripts.uf_test_gripper_force_feedback:main"
+uf-test-arm-force-feedback = "lerobot_robot_ufactory.scripts.uf_test_arm_force_feedback:main"
 
 [project.optional-dependencies]
 # GELLO 遥操作

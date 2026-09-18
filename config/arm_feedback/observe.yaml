@@ -1,0 +1,26 @@
+# Diagnostic tool config. For normal teleop nest this mapping under teleop.
+# Copy to calibrated.yaml after free-space/contact comparison.
+arm_feedback:
+  enabled: false
+  observe_only: true
+  source: bias_compensated_joint_effort
+  sampling_hz: 100
+  update_hz: 100
+  stale_timeout_ms: 100
+  # Fixed, same-pose free-space baseline; SDK effort unit is unspecified.
+  baseline: [0, 0, 0, 0, 0, 0, 0]
+  bias: [0, 0, 0, 0, 0, 0, 0]
+  input_limit: [1, 1, 1, 1, 1, 1, 1]
+  deadzone: [0, 0, 0, 0, 0, 0, 0]
+  ema_alpha: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+  # Experimental mA / SDK effort unit; NOT a motor torque constant.
+  gain_ma_per_unit: [5, 5, 5, 5, 5, 5, 5]
+  sign: [1, 1, 1, 1, 1, 1, 1]
+  damping_ma_per_rad_s: [0, 0, 0, 0, 0, 0, 0]
+  slew_rate_ma_s: [5, 5, 5, 5, 5, 5, 5]
+  current_limit_ma: [5, 5, 5, 5, 5, 5, 5]
+  enabled_joints: [false, false, false, false, false, false, true]
+  baseline_verified: false
+  sign_verified: false
+  max_temperature_c: 55
+  log_path: logs/arm_feedback.csv

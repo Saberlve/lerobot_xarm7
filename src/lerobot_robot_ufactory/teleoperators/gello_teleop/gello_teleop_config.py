@@ -1,15 +1,17 @@
 #!/usr/bin/env python
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 from lerobot.teleoperators import TeleoperatorConfig
+from ...utils.arm_feedback import ArmFeedbackConfig
 
 
 @TeleoperatorConfig.register_subclass("uf::gello_teleop")
 @dataclass
 class GelloTeleopConfig(TeleoperatorConfig):
+    arm_feedback: ArmFeedbackConfig = field(default_factory=ArmFeedbackConfig)
     # Frequency of the independent GELLO -> xArm realtime control loop.
     realtime_control_fps: int = 30
     # Port to connect to the gello dummy arm
@@ -56,6 +58,12 @@ class GelloTeleopConfig(TeleoperatorConfig):
     torque_joint_ids: Tuple[int, ...] = None  # deprecated
 
     def __post_init__(self):
+        if isinstance(self.arm_feedback, dict):
+            self.arm_feedback = ArmFeedbackConfig(**self.arm_feedback)
+        if not isinstance(self.arm_feedback, ArmFeedbackConfig):
+            raise ValueError("arm_feedback must be an ArmFeedbackConfig")
+        if self.arm_feedback.enabled and tuple(self.joint_ids) != tuple(range(1, 8)):
+            raise ValueError("arm feedback requires ordered IDs 1--7")
         self.id = 'gello_teleop' if self.id is None else self.id
         if self.realtime_control_fps <= 0:
             raise ValueError("realtime_control_fps must be positive")

@@ -11,6 +11,8 @@ Collected data is stored in the standard LeRobot dataset format and can be used 
 
 ## Features
 
+Experimental arm haptics (disabled by default): [xArm7 → GELLO ID1–7 setup and validation](docs/arm_force_feedback_zh.md). Existing ID8 gripper feedback and TCP height protection remain independent.
+
 - 🤖 UFACTORY xArm7 control
 - 🎮 GELLO joint-space teleoperation (Dynamixel leader arm)
 - ✋ Manual drag recording via xArm teach mode

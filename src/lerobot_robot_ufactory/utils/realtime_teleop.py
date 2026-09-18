@@ -451,6 +451,12 @@ class RealtimeTeleopController:
                 self._gripper_feedback_processor.fail_safe_zero(
                     "output_start_unsupported"
                 )
+        arm_config = getattr(getattr(self.teleop, "config", None), "arm_feedback", None)
+        if arm_config is not None and arm_config.enabled:
+            try:
+                self.teleop.start_arm_feedback(self.robot.config.robot_ip)
+            except Exception:
+                logger.exception("Arm feedback could not start; continuing position/ID8 teleoperation")
         self._thread.start()
         if not self._first_action.wait(timeout=2.0):
             self._stop.set()
@@ -569,6 +575,12 @@ class RealtimeTeleopController:
                 )
 
     def _safe_stop_feedback_output(self) -> None:
+        stop_arm = getattr(self.teleop, "stop_arm_feedback", None)
+        if callable(stop_arm):
+            try:
+                stop_arm()
+            except Exception:
+                logger.exception("Failed to stop arm feedback")
         if not self._gripper_feedback_enabled:
             return
         try:
