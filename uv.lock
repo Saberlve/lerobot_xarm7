@@ -1249,6 +1249,9 @@ gello = [
     { name = "dynamixel-sdk" },
     { name = "gello" },
 ]
+next = [
+    { name = "torch" },
+]
 spacemouse = [
     { name = "spnav" },
 ]
@@ -1269,10 +1272,11 @@ requires-dist = [
     { name = "pyyaml" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "spnav", marker = "extra == 'spacemouse'", git = "https://github.com/kazoo-osaro/spnav" },
+    { name = "torch", marker = "extra == 'next'", specifier = ">=2.0" },
     { name = "websockets" },
     { name = "xarm-python-sdk" },
 ]
-provides-extras = ["gello", "spacemouse", "dev"]
+provides-extras = ["gello", "spacemouse", "dev", "next"]
 
 [[package]]
 name = "librt"

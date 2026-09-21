@@ -46,6 +46,8 @@ class GelloTeleop(UFBaseTeleop):
         self._feedback_output_active = False
         self._feedback_output_error = None
         self._arm_feedback_worker = None
+        self._arm_command_lock = threading.Lock()
+        self._arm_command_snapshot = (0, np.zeros(7), "command_unavailable")
 
         joint_offsets = [0.0] * len(self.config.joint_ids)
         self._align_gripper_to_current = self.config.gripper_open_deg is None
@@ -141,7 +143,10 @@ class GelloTeleop(UFBaseTeleop):
         worker = ArmFeedbackWorker(
             self.config.arm_feedback,
             XArmFeedbackSource(robot_ip, self.config.arm_feedback),
-            adapter, driver.arm_state_snapshot, self.config.joint_signs,
+            adapter,
+            driver.arm_state_snapshot,
+            self.config.joint_signs,
+            command_state=self.arm_feedback_command_snapshot,
         )
         self._arm_feedback_worker = worker
         try:
@@ -155,6 +160,31 @@ class GelloTeleop(UFBaseTeleop):
         if worker is not None:
             worker.stop()
             self._arm_feedback_worker = None
+
+    def update_arm_feedback_command(self, action: dict, timestamp_ns: int | None = None) -> None:
+        """Publish the safety-checked follower joint command to NEXT.
+
+        This is an in-memory handoff only; it does not perform serial or xArm
+        I/O. The command is the effective action returned by ``send_action``.
+        """
+        try:
+            command = np.asarray(
+                [action[f"J{joint}.pos"] for joint in range(1, 8)], dtype=float
+            )
+            if command.shape != (7,) or not np.all(np.isfinite(command)):
+                raise ValueError("command must be a finite seven-joint vector")
+            stamp = time.monotonic_ns() if timestamp_ns is None else int(timestamp_ns)
+            snapshot = (stamp, command.copy(), None)
+        except Exception as exc:
+            snapshot = (time.monotonic_ns(), np.zeros(7), f"invalid_command: {exc}")
+        with self._arm_command_lock:
+            self._arm_command_snapshot = snapshot
+
+    def arm_feedback_command_snapshot(self):
+        """Return an immutable ``(timestamp_ns, q_cmd, error)`` snapshot."""
+        with self._arm_command_lock:
+            timestamp_ns, command, error = self._arm_command_snapshot
+            return timestamp_ns, command.copy(), error
 
     def probe_gripper_dynamixel(self) -> GripperDynamixelInfo:
         if not self._is_connected:

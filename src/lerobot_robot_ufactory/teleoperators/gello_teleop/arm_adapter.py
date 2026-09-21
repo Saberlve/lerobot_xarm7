@@ -42,6 +42,7 @@ class GelloArmFeedbackAdapter:
         self.last_transaction_ms = 0.0
         self.last_lock_wait_ms = 0.0
         self.last_lock_hold_ms = 0.0
+        self.last_raw = np.zeros(7, dtype=int)
 
     def discover(self):
         d = self.driver
@@ -140,6 +141,7 @@ class GelloArmFeedbackAdapter:
                     np.rint(currents / self.units), -self.raw_limits, self.raw_limits
                 ).astype(int)
                 raw *= self.config.enabled_joints
+                self.last_raw = raw.copy()
                 for motor in self.restore:
                     value = int(raw[motor - 1]) & 0xFFFF
                     if not self.writer.addParam(motor, [value & 255, value >> 8]):
@@ -165,6 +167,7 @@ class GelloArmFeedbackAdapter:
         # Continue even when another motor/operation fails. Never touch ID8.
         d = self.driver
         self.active = False
+        self.last_raw = np.zeros(7, dtype=int)
         failures = []
         for motor, mode in list(self.restore.items()):
             for write, address, value, label in (

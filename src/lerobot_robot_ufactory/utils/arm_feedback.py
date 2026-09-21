@@ -18,6 +18,89 @@ def vector7(value, name="vector"):
 
 
 @dataclass
+class ArmEstimatorConfig:
+    """Select the source of the external-torque estimate.
+
+    ``baseline`` preserves the validated Stage A/B behavior. ``next`` enables
+    the learned free-motion model. ``shadow_baseline`` only adds a parallel
+    baseline residual to diagnostics; it never changes the command path.
+    """
+
+    mode: str = "baseline"
+    shadow_baseline: bool = False
+
+    def __post_init__(self):
+        self.mode = str(self.mode).lower()
+        if self.mode not in ("baseline", "next"):
+            raise ValueError("estimator.mode must be 'baseline' or 'next'")
+        if type(self.shadow_baseline) is not bool:
+            raise ValueError("estimator.shadow_baseline must be bool")
+
+
+@dataclass
+class NextEstimatorConfig:
+    """Paths and runtime policy for the NEXT estimator."""
+
+    enabled: bool = False
+    checkpoint: str = ""
+    normalization: str = ""
+    config: str = ""
+    device: str = "cpu"
+    fallback: str = "baseline"
+    inference_timeout_ms: float = 50.0
+    command_stale_timeout_ms: float = 500.0
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError("next.enabled must be bool")
+        self.fallback = str(self.fallback).lower()
+        if self.fallback not in ("baseline", "disable"):
+            raise ValueError("next.fallback must be 'baseline' or 'disable'")
+        for name in ("inference_timeout_ms", "command_stale_timeout_ms"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not np.isfinite(value) or value <= 0:
+                raise ValueError(f"next.{name} must be finite and positive")
+        for name in ("checkpoint", "normalization", "config", "device"):
+            if not isinstance(getattr(self, name), str):
+                raise ValueError(f"next.{name} must be a string")
+
+
+@dataclass
+class ArmContactConfig:
+    """Per-joint contact hysteresis and time-based feedback ramp.
+
+    Thresholds use the estimator output unit. For a NEXT model trained on
+    calibrated N-m telemetry they are N-m; the legacy SDK effort source remains
+    explicitly unit-unspecified.
+    """
+
+    enabled: bool = False
+    threshold_nm: tuple[float, ...] = (1.0,) * 7
+    release_threshold_nm: tuple[float, ...] = (0.5,) * 7
+    debounce_ms: float = 0.0
+    ramp_up_ms: float = 100.0
+    ramp_down_ms: float = 100.0
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError("contact.enabled must be bool")
+        self.threshold_nm = tuple(vector7(self.threshold_nm, "contact.threshold_nm"))
+        self.release_threshold_nm = tuple(
+            vector7(self.release_threshold_nm, "contact.release_threshold_nm")
+        )
+        if np.any(np.asarray(self.threshold_nm) <= 0):
+            raise ValueError("contact.threshold_nm must be positive")
+        if np.any(np.asarray(self.release_threshold_nm) < 0):
+            raise ValueError("contact.release_threshold_nm must be nonnegative")
+        if np.any(np.asarray(self.release_threshold_nm) >= self.threshold_nm):
+            raise ValueError("contact release thresholds must be below enter thresholds")
+        for name in ("debounce_ms", "ramp_up_ms", "ramp_down_ms"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not np.isfinite(value) or value < 0:
+                raise ValueError(f"contact.{name} must be finite and nonnegative")
+
+
+@dataclass
 class ArmFeedbackConfig:
     enabled: bool = False
     observe_only: bool = True
@@ -28,6 +111,7 @@ class ArmFeedbackConfig:
     baseline: tuple[float, ...] = (0.0,) * 7
     bias: tuple[float, ...] = (0.0,) * 7
     input_limit: tuple[float, ...] = (1.0,) * 7
+    spike_limit: tuple[float, ...] | None = None
     deadzone: tuple[float, ...] = (0.0,) * 7
     ema_alpha: tuple[float, ...] = (0.2,) * 7  # weight of NEW sample
     gain_ma_per_unit: tuple[float, ...] = (0.0,) * 7
@@ -58,8 +142,25 @@ class ArmFeedbackConfig:
     # sensor -> flange; translation in mm. User must establish this calibration.
     ft_sensor_to_flange: tuple[float, ...] | None = None  # flattened 4x4
     ft_vertical_only: bool = False
+    estimator: ArmEstimatorConfig = field(default_factory=ArmEstimatorConfig)
+    next: NextEstimatorConfig = field(default_factory=NextEstimatorConfig)
+    contact: ArmContactConfig = field(default_factory=ArmContactConfig)
 
     def __post_init__(self):
+        if isinstance(self.estimator, dict):
+            self.estimator = ArmEstimatorConfig(**self.estimator)
+        if isinstance(self.next, dict):
+            self.next = NextEstimatorConfig(**self.next)
+        if isinstance(self.contact, dict):
+            self.contact = ArmContactConfig(**self.contact)
+        if not isinstance(self.estimator, ArmEstimatorConfig):
+            raise ValueError("estimator must be an ArmEstimatorConfig")
+        if not isinstance(self.next, NextEstimatorConfig):
+            raise ValueError("next must be a NextEstimatorConfig")
+        if not isinstance(self.contact, ArmContactConfig):
+            raise ValueError("contact must be an ArmContactConfig")
+        if self.estimator.mode == "next" and not self.next.enabled:
+            raise ValueError("estimator.mode=next requires next.enabled=true")
         for name in (
             "enabled",
             "observe_only",
@@ -107,6 +208,13 @@ class ArmFeedbackConfig:
             if name not in ("baseline", "bias", "sign") and np.any(a < 0):
                 raise ValueError(f"{name} must be nonnegative")
             setattr(self, name, tuple(a))
+        if self.spike_limit is not None:
+            if any(isinstance(x, (bool, np.bool_)) for x in self.spike_limit):
+                raise ValueError("spike_limit must be numeric, not bool")
+            spike_limit = vector7(self.spike_limit, "spike_limit")
+            if np.any(spike_limit <= 0):
+                raise ValueError("spike_limit must be positive")
+            self.spike_limit = tuple(spike_limit)
         if not np.all(np.isin(self.sign, [-1, 1])):
             raise ValueError("sign must contain +/-1")
         if np.any(np.asarray(self.ema_alpha) > 1):
@@ -157,6 +265,8 @@ class ArmFeedbackSample:
     # dynamic_mode. The processor never reads these.
     position: np.ndarray | None = None
     velocity: np.ndarray | None = None
+    robot_state: int | None = None
+    robot_mode: int | None = None
 
 
 @dataclass
@@ -167,6 +277,59 @@ class ArmFeedbackResult:
     stale: bool = False
     clamped: bool = False
     fault: str | None = None
+    filtered_external_torque: np.ndarray = field(default_factory=lambda: np.zeros(7))
+    contact: np.ndarray = field(default_factory=lambda: np.zeros(7, dtype=bool))
+    contact_gate: np.ndarray = field(default_factory=lambda: np.ones(7))
+
+
+class ContactGate:
+    """Per-joint hysteresis/debounce with a continuous time-based gate."""
+
+    def __init__(self, config: ArmContactConfig):
+        self.config = config
+        self.reset()
+
+    def reset(self):
+        self.contact = np.zeros(7, dtype=bool)
+        self.gate = np.ones(7) if not self.config.enabled else np.zeros(7)
+        self.pending = np.zeros(7, dtype=bool)
+        self.pending_since_ns = np.zeros(7, dtype=np.int64)
+        self.last_ns = None
+
+    def update(self, values, now_ns):
+        values = np.abs(vector7(values, "contact_input"))
+        if not self.config.enabled:
+            self.contact[:] = False
+            self.gate[:] = 1.0
+            self.last_ns = now_ns
+            return self.contact.copy(), self.gate.copy()
+
+        enter = np.asarray(self.config.threshold_nm)
+        release = np.asarray(self.config.release_threshold_nm)
+        desired = np.where(self.contact, values > release, values >= enter)
+        debounce_ns = int(self.config.debounce_ms * 1e6)
+        for joint in range(7):
+            if desired[joint] == self.contact[joint]:
+                self.pending_since_ns[joint] = 0
+                continue
+            if self.pending_since_ns[joint] == 0 or self.pending[joint] != desired[joint]:
+                self.pending[joint] = desired[joint]
+                self.pending_since_ns[joint] = now_ns
+            if debounce_ns == 0 or now_ns - self.pending_since_ns[joint] >= debounce_ns:
+                self.contact[joint] = desired[joint]
+                self.pending_since_ns[joint] = 0
+
+        dt_ms = 0.0 if self.last_ns is None else max(0.0, (now_ns - self.last_ns) / 1e6)
+        self.last_ns = now_ns
+        for joint, active in enumerate(self.contact):
+            duration = self.config.ramp_up_ms if active else self.config.ramp_down_ms
+            target = 1.0 if active else 0.0
+            if duration == 0:
+                self.gate[joint] = target
+            else:
+                step = dt_ms / duration
+                self.gate[joint] += np.clip(target - self.gate[joint], -step, step)
+        return self.contact.copy(), self.gate.copy()
 
 
 class ArmFeedbackProcessor:
@@ -179,6 +342,7 @@ class ArmFeedbackProcessor:
         self.previous = np.zeros(7)
         self.last_ns = None
         self.last_sample_ns = None
+        self.contact_gate = ContactGate(self.config.contact)
 
     def process(self, sample, leader_velocity, now_ns, motor_signs=(1,) * 7):
         result = ArmFeedbackResult()
@@ -208,16 +372,21 @@ class ArmFeedbackProcessor:
                 raise ValueError("out_of_order_sample")
             c = self.config
             corrected = contact - c.bias
+            if c.spike_limit is not None and np.any(
+                np.abs(corrected) > np.asarray(c.spike_limit)
+            ):
+                raise ValueError("torque_spike")
             clipped = np.clip(corrected, -np.asarray(c.input_limit), c.input_limit)
             dead = np.sign(clipped) * np.maximum(np.abs(clipped) - c.deadzone, 0)
             # Do not repeatedly filter the same latest-value sample.
             if sample.timestamp_ns != self.last_sample_ns:
                 alpha = np.asarray(c.ema_alpha)
                 self.filtered += alpha * (dead - self.filtered)
+            contact_state, contact_gate = self.contact_gate.update(self.filtered, now_ns)
             # Feedback signs map to physical motor axes. Damping always opposes
             # physical motor velocity, independently of contact feedback signs.
             target = (
-                self.filtered * c.gain_ma_per_unit * c.sign
+                contact_gate * self.filtered * c.gain_ma_per_unit * c.sign
                 - np.asarray(c.damping_ma_per_rad_s) * velocity * signs
             )
             delta = np.asarray(c.slew_rate_ma_s) * dt
@@ -229,6 +398,9 @@ class ArmFeedbackProcessor:
             result.clamped = bool(np.any(corrected != clipped) or np.any(limited != command))
             result.processed_feedback_ma = target
             result.command_current_ma = command
+            result.filtered_external_torque = self.filtered.copy()
+            result.contact = contact_state
+            result.contact_gate = contact_gate
             self.previous = command.copy()
             self.last_ns = now_ns
             self.last_sample_ns = sample.timestamp_ns

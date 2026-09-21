@@ -615,6 +615,11 @@ class RealtimeTeleopController:
                 send_end_ns = time.perf_counter_ns()
                 effective = sent if isinstance(sent, dict) else command
                 sent_at_s = send_end_ns / 1_000_000_000
+                update_arm_command = getattr(
+                    self.teleop, "update_arm_feedback_command", None
+                )
+                if callable(update_arm_command):
+                    update_arm_command(effective, timestamp_ns=time.monotonic_ns())
                 with self._lock:
                     self._latest_action = dict(effective)
                     self._action_history.append((sent_at_s, dict(effective)))

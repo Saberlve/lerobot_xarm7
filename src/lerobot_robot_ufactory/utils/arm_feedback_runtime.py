@@ -5,14 +5,18 @@ import json
 import logging
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
 
-from .arm_dynamic_feedback import DynamicExternalTorqueEstimator
+from .arm_external_torque import (
+    ExternalTorqueEstimate,
+    make_external_torque_estimator,
+)
 from .arm_feedback import (
     ArmFeedbackProcessor,
+    ArmFeedbackResult,
     ArmFeedbackSample,
     ft_wrench_to_joint_torque,
     vector7,
@@ -138,7 +142,7 @@ class XArmFeedbackSource:
     def read_once(self, sequence=1, previous_ns=None):
         start = time.monotonic_ns()
         qd = None
-        if self.config.dynamic_mode:
+        if self.config.dynamic_mode or self.config.estimator.mode == "next":
             # Dynamic mode: q/qd/tau all come from the SAME report packet, so
             # the gravity model in C2 never evaluates q at a different instant
             # than the torque it compensates. No RPC position read here.
@@ -178,8 +182,14 @@ class XArmFeedbackSource:
             (time.monotonic_ns() - start) / 1e6,
             sequence,
             0.0 if previous_ns is None else (start - previous_ns) / 1e6,
-            position=q if self.config.dynamic_mode else None,
+            position=(
+                q
+                if self.config.dynamic_mode or self.config.estimator.mode == "next"
+                else None
+            ),
             velocity=qd,
+            robot_state=getattr(self.api, "state", None),
+            robot_mode=getattr(self.api, "mode", None),
         )
 
     def _report_effort(self):
@@ -246,10 +256,19 @@ class XArmFeedbackSource:
 
 
 class ArmFeedbackWorker:
-    def __init__(self, config, source, adapter, leader_state, motor_signs=(1,) * 7):
+    def __init__(
+        self,
+        config,
+        source,
+        adapter,
+        leader_state,
+        motor_signs=(1,) * 7,
+        command_state=None,
+    ):
         self.config, self.source, self.adapter = config, source, adapter
         self.leader_state = leader_state
         self.motor_signs = vector7(motor_signs)
+        self.command_state = command_state
         self.processor = ArmFeedbackProcessor(config)
         self.stop_event = threading.Event()
         self.thread = None
@@ -275,13 +294,20 @@ class ArmFeedbackWorker:
         self.leader_age_budget_ms = max(
             config.stale_timeout_ms, self.leader_period_budget_ms
         )
-        # Stage C1: observe-side estimator. Its output is logged, never
-        # written; the processor input is unchanged.
+        # NEXT or Stage-C dynamic mode uses the common estimator interface.
+        # Legacy static operation continues to consume the source estimate so
+        # Stage A/B behavior and log shape remain unchanged.
         self.estimator = (
-            DynamicExternalTorqueEstimator(config.baseline)
-            if config.dynamic_mode
+            make_external_torque_estimator(config)
+            if config.dynamic_mode or config.estimator.mode == "next"
             else None
         )
+        # NEXT consumes the command generated from GELLO even when damping is
+        # zero, so stale leader telemetry must gate NEXT active output.
+        self.needs_leader_freshness = (
+            self.needs_leader_velocity or config.estimator.mode == "next"
+        )
+        self._estimator_ever_ready = False
 
     def start(self):
         if not self.config.enabled:
@@ -310,6 +336,10 @@ class ArmFeedbackWorker:
             if (time.monotonic_ns() - leader[0]) / 1e6 > self.leader_age_budget_ms:
                 raise RuntimeError("leader_stale at startup")
             if not self.config.observe_only:
+                if getattr(self.estimator, "permanently_disabled", False):
+                    raise RuntimeError(
+                        "NEXT unavailable and next.fallback=disable; arm feedback disabled"
+                    )
                 self.adapter.enable()
             else:
                 self.adapter.discover()  # read-only; no current-mode writes
@@ -344,7 +374,7 @@ class ArmFeedbackWorker:
                 motors=self.adapter.infos,
                 source_api=(
                     "report_stream(rich) synchronized q/qd/joints_torque"
-                    if self.config.dynamic_mode
+                    if self.config.dynamic_mode or self.config.estimator.mode == "next"
                     else "report_stream(rich).joints_torque + get_joint_states(num=1)"
                 ),
                 physical_rates="NOT MEASURED until hardware run",
@@ -387,14 +417,74 @@ class ArmFeedbackWorker:
         velocity = vector7(velocity, "leader_velocity") * self.motor_signs
         processing_start = time.monotonic_ns()
         leader_age = (processing_start - leader_ns) / 1e6
-        result = self.processor.process(sample, velocity, processing_start, self.motor_signs)
+        estimate = None
+        command = None
+        command_ns = 0
+        command_error = None
+        if sample is not None and sample.position is not None:
+            if self.command_state is not None:
+                try:
+                    command_snapshot = self.command_state()
+                    command_ns, command, command_error = command_snapshot[:3]
+                except Exception as exc:
+                    command_error = f"command_snapshot_error: {exc}"
+            elif self.config.estimator.mode == "next":
+                command_error = "command_unavailable"
+            else:
+                command_ns, command = sample.timestamp_ns, sample.position
+
+        command_age_ms = None if not command_ns else (processing_start - command_ns) / 1e6
+        command_stale = (
+            command_age_ms is not None
+            and (command_age_ms < 0 or command_age_ms > self.config.next.command_stale_timeout_ms)
+        )
+        can_estimate = (
+            self.estimator is not None
+            and sample is not None
+            and sample.error is None
+            and sample.position is not None
+            and sample.velocity is not None
+            and command is not None
+            and command_error is None
+            and not command_stale
+        )
+        if can_estimate:
+            estimate = self.estimator.update(
+                sample.position,
+                sample.velocity,
+                command,
+                sample.raw_joint_effort,
+                sample.timestamp_ns,
+            )
+            if estimate.ready:
+                self._estimator_ever_ready = True
+                sample = replace(
+                    sample,
+                    estimated_contact_torque=estimate.external_torque.copy(),
+                )
+
+        waiting_for_next = (
+            self.config.estimator.mode == "next"
+            and (estimate is None or not estimate.ready)
+        )
+        if waiting_for_next:
+            # Startup/history warm-up is expected and must never emit current.
+            # Once an estimator has been active, losing q_cmd is a safety fault.
+            result = ArmFeedbackResult()
+            if estimate is not None and estimate.estimator_mode == "next_disabled":
+                result.fault = f"estimator_disabled: {estimate.status}"
+            elif self._estimator_ever_ready and (command_error or command_stale):
+                result.fault = command_error or "command_stale"
+                result.stale = bool(command_stale)
+        else:
+            result = self.processor.process(sample, velocity, processing_start, self.motor_signs)
         processing_ms = (time.monotonic_ns() - processing_start) / 1e6
         # A negative age is a clock/snapshot anomaly and always faults. An aged
         # leader only faults when damping actually consumes its velocity; with
         # damping=0 on every enabled joint the feedback command must not wait
         # on (or fail because of) the throttled leader reader.
         leader_stale = leader_age < 0 or (
-            self.needs_leader_velocity and leader_age > self.leader_age_budget_ms
+            self.needs_leader_freshness and leader_age > self.leader_age_budget_ms
         )
         if leader_error or leader_stale:
             result.fault = leader_error or "leader_stale"
@@ -415,7 +505,7 @@ class ArmFeedbackWorker:
         elif not self.config.observe_only:
             try:
                 expiry_base = sample.timestamp_ns
-                if self.needs_leader_velocity:
+                if self.needs_leader_freshness:
                     expiry_base = min(expiry_base, leader_ns)
                 expiry = expiry_base + int(self.config.stale_timeout_ms * 1e6)
                 actual = self.adapter.write(result.command_current_ma, deadline_ns=expiry)
@@ -426,20 +516,20 @@ class ArmFeedbackWorker:
                 self.stop_event.set()
         end = time.monotonic_ns()
         dt_ms = 0 if previous_ns is None else (start - previous_ns) / 1e6
-        tau_ext = None
-        if (
-            self.estimator is not None
-            and sample is not None
-            and sample.error is None
-            and sample.position is not None
-        ):
-            tau_ext = self.estimator.estimate(
-                sample.position, sample.velocity, sample.raw_joint_effort
+        tau_ext = None if estimate is None or not estimate.ready else estimate.external_torque
+        tau_free = None if estimate is None else estimate.predicted_free_torque
+        tau_baseline = None if estimate is None else estimate.baseline_external_torque
+        if estimate is None:
+            estimate = ExternalTorqueEstimate(
+                ready=self.estimator is None,
+                estimator_mode="source" if self.estimator is None else self.config.estimator.mode,
+                status=command_error or ("command_stale" if command_stale else "not_ready"),
             )
         # Read-side lock timing lives on the driver (reader thread); write-side
         # on the adapter. Both are latest values, matching the leader snapshot.
         driver = getattr(self.adapter, "driver", None)
         row = dict(
+            timestamp=start / 1e9,
             timestamp_ns=start,
             sample_timestamp_ns=None if sample is None else sample.timestamp_ns,
             sample_sequence=0 if sample is None else sample.sequence,
@@ -469,6 +559,28 @@ class ArmFeedbackWorker:
             if write_ms is not None
             else None,
             sample_to_command_ms=None if sample is None else (end - sample.timestamp_ns) / 1e6,
+            command_timestamp_ns=command_ns or None,
+            command_age_ms=command_age_ms,
+            command_valid=command is not None and command_error is None and not command_stale,
+            history_ready=estimate.ready,
+            model_valid=estimate.model_valid,
+            inference_latency_ms=estimate.inference_latency_ms,
+            estimator_mode=estimate.estimator_mode,
+            estimator_status=estimate.status,
+            feedback_enabled=bool(
+                self.config.enabled
+                and not self.config.observe_only
+                and estimate.ready
+                and not result.fault
+            ),
+            xarm_latency_ms=0 if sample is None else sample.read_latency_ms,
+            robot_state=None if sample is None else sample.robot_state,
+            robot_mode=None if sample is None else sample.robot_mode,
+            validity=bool(
+                sample is not None
+                and sample.error is None
+                and (self.config.estimator.mode != "next" or estimate.ready)
+            ),
             observe_only=self.config.observe_only,
             stale=result.stale,
             clamped=result.clamped,
@@ -486,11 +598,26 @@ class ArmFeedbackWorker:
             processed_feedback_ma=result.processed_feedback_ma,
             hypothetical_current_ma=result.command_current_ma,
             command_current_ma=actual,
+            tau_measured=np.zeros(7) if sample is None else sample.raw_joint_effort,
+            tau_free_pred=np.zeros(7) if tau_free is None else tau_free,
+            tau_ext_raw=np.zeros(7) if tau_ext is None else tau_ext,
+            tau_ext_filtered=result.filtered_external_torque,
+            contact=result.contact.astype(float),
+            contact_gate=result.contact_gate,
+            feedback_target=result.processed_feedback_ma,
+            feedback_current_ma=actual,
+            feedback_current_raw=getattr(self.adapter, "last_raw", np.zeros(7)),
+            q=np.zeros(7) if sample is None or sample.position is None else sample.position,
+            qdot=np.zeros(7) if sample is None or sample.velocity is None else sample.velocity,
+            qcmd=np.zeros(7) if command is None else command,
+            qerror=np.zeros(7)
+            if command is None or sample is None or sample.position is None
+            else command - sample.position,
             sign_product=np.zeros(7)
             if sample is None
             else sample.estimated_contact_torque * result.command_current_ma,
         )
-        if self.config.dynamic_mode:
+        if self.config.dynamic_mode or self.config.estimator.mode == "next":
             arrays.update(
                 joint_position=np.zeros(7)
                 if sample is None or sample.position is None
@@ -499,6 +626,10 @@ class ArmFeedbackWorker:
                 if sample is None or sample.velocity is None
                 else sample.velocity,
                 estimated_external_torque=np.zeros(7) if tau_ext is None else tau_ext,
+            )
+        if self.config.estimator.shadow_baseline:
+            arrays["tau_ext_baseline"] = (
+                np.zeros(7) if tau_baseline is None else tau_baseline
             )
         for name, array in arrays.items():
             for j, value in enumerate(array):

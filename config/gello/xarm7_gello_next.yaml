@@ -1,0 +1,91 @@
+# NEXT Stage C observe-only profile. Replace checkpoint before use.
+# This file deliberately leaves every ID1--7 output disabled. Do not enable
+# active feedback until C0--C3 in docs/next_dynamic_arm_feedback_zh.md pass.
+robot:
+  type: uf::robot
+  id: uf_robot
+  robot_dof: 7
+  control_space: joint
+  robot_ip: 192.168.1.245
+  gripper_type: 2
+  gripper_speed: 50
+  gripper_force: 50
+  joint_command_mode: 6
+  max_joint_velocity: 120
+  min_tcp_z_mm: -2.0
+  tcp_z_guard_backend: local_projection
+  tcp_z_soft_margin_mm: 0.5
+  local_kinematics_max_error_mm: 2.0
+  controller_safety_boundary: false
+  gripper_command_interval_s: 0.03334
+  cameras: {}
+
+teleop:
+  type: uf::gello_teleop
+  id: gello_teleop
+  realtime_control_fps: 30
+  port: /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0
+  joint_ids: [1, 2, 3, 4, 5, 6, 7]
+  joint_signs: [1, 1, 1, 1, 1, 1, 1]
+  gripper_id: 8
+  gripper_control_mode: keyboard
+  gripper_keyboard_step_mm: 2.0
+  gripper_keyboard_hold_delay_s: 0.5
+  gripper_open_deg: 198.28125
+  gripper_close_deg: 155.75
+
+  # ID8 remains governed only by the existing gripper feedback fields. They
+  # are intentionally absent/disabled here; NEXT never writes ID8.
+  gripper_current_control_enabled: false
+  gripper_force_feedback_enabled: false
+
+  arm_feedback:
+    enabled: true
+    observe_only: true
+    dynamic_mode: true
+    source: bias_compensated_joint_effort
+    sampling_hz: 20
+    update_hz: 100
+    leader_read_hz: 10
+    stale_timeout_ms: 500
+
+    estimator:
+      mode: next
+      shadow_baseline: true
+    next:
+      enabled: true
+      checkpoint: runs/xarm7_next/model.pt
+      normalization: runs/xarm7_next/normalization.npz
+      config: runs/xarm7_next/config.yaml
+      device: cpu
+      fallback: baseline
+      inference_timeout_ms: 50
+      command_stale_timeout_ms: 500
+    contact:
+      enabled: true
+      # These are conservative placeholders, not validated xArm7 thresholds.
+      # They use the checkpoint target unit (the SDK source is unit-unspecified).
+      threshold_nm: [2, 2, 2, 2, 2, 2, 2]
+      release_threshold_nm: [1, 1, 1, 1, 1, 1, 1]
+      debounce_ms: 30
+      ramp_up_ms: 250
+      ramp_down_ms: 150
+
+    baseline: [0.0, -4.796127, 0.518214, 17.397564, -0.115557, -1.83963, 0.0]
+    bias: [0, 0, 0, 0, 0, 0, 0]
+    input_limit: [8, 50, 50, 50, 50, 8, 50]
+    spike_limit: [16, 100, 100, 100, 100, 16, 100]
+    deadzone: [0.1, 1, 1, 1, 1, 0.1, 1]
+    ema_alpha: [0.35, 0.35, 0.35, 0.35, 0.35, 0.35, 0.35]
+    gain_ma_per_unit: [3, 10, 10, 10, 10, 10, 10]
+    sign: [-1, -1, -1, -1, -1, -1, -1]
+    damping_ma_per_rad_s: [0, 0, 0, 0, 0, 0, 0]
+    slew_rate_ma_s: [60, 300, 300, 300, 300, 300, 300]
+    current_limit_ma: [20, 100, 100, 100, 100, 100, 100]
+    enabled_joints: [false, false, false, false, false, false, false]
+    baseline_verified: true
+    sign_verified: true
+    max_temperature_c: 55
+    log_path: logs/arm_next.csv
+
+fps: 30
