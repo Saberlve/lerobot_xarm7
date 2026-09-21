@@ -1,0 +1,134 @@
+arm_feedback:
+  enabled: true
+  observe_only: false
+
+  source: bias_compensated_joint_effort
+
+  sampling_hz: 20
+  update_hz: 100
+  leader_read_hz: 10
+
+  stale_timeout_ms: 500
+
+
+  baseline:
+  - 0
+  - 0
+  - 0
+  - 17.397564
+  - 0
+  - 0
+  - 0
+
+
+  bias:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+
+
+  input_limit:
+  - 1
+  - 1
+  - 1
+  - 50
+  - 1
+  - 1
+  - 1
+
+
+  deadzone:
+  - 0
+  - 0
+  - 0
+  - 1.0
+  - 0
+  - 0
+  - 0
+
+
+  ema_alpha:
+  - 0.2
+  - 0.2
+  - 0.2
+  - 0.35
+  - 0.2
+  - 0.2
+  - 0.2
+
+
+  gain_ma_per_unit:
+  - 0
+  - 0
+  - 0
+  - 10.0
+  - 0
+  - 0
+  - 0
+
+
+  # J1=-1
+  # J2=-1
+  # J3=+1
+  # J4 初始+1，等待真机确认
+  sign:
+  - 1
+  - 1
+  - 1
+  - -1
+  - 1
+  - 1
+  - 1
+
+
+  damping_ma_per_rad_s:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+
+
+  slew_rate_ma_s:
+  - 5
+  - 5
+  - 5
+  - 300
+  - 5
+  - 5
+  - 5
+
+
+  current_limit_ma:
+  - 5
+  - 5
+  - 5
+  - 100
+  - 5
+  - 5
+  - 5
+
+
+  enabled_joints:
+  - false
+  - false
+  - false
+  - true
+  - false
+  - false
+  - false
+
+
+  baseline_verified: true
+  sign_verified: true
+
+
+  max_temperature_c: 55
+
+  log_path: logs/arm_j4_active.csv

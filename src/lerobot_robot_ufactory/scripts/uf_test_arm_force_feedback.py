@@ -79,8 +79,12 @@ def summarize(path):
         ("leader_read_latency_ms", list(leaders.values()), "leader_read_latency_ms"),
         ("leader_period_ms", list(leaders.values()), "leader_period_ms"),
         ("serial_transaction_ms", rows, "serial_transaction_ms"),
+        ("serial_lock_wait_ms_read", rows, "serial_lock_wait_ms_read"),
+        ("serial_lock_hold_ms_read", rows, "serial_lock_hold_ms_read"),
+        ("serial_lock_wait_ms_write", rows, "serial_lock_wait_ms_write"),
+        ("serial_lock_hold_ms_write", rows, "serial_lock_hold_ms_write"),
     ):
-        stats(name, [float(r[key]) for r in selected if r[key] and float(r[key]) > 0])
+        stats(name, [float(r[key]) for r in selected if r.get(key) and float(r[key]) > 0])
     for label, selected, key in (
         ("xarm_response_mean_hz", samples, "sample_timestamp_ns"),
         ("gello_read_mean_hz", leaders, "leader_timestamp_ns"),
@@ -120,7 +124,11 @@ def parser():
         "--active", action="store_true", help="explicitly permit configured motor current"
     )
     p.add_argument(
-        "--joints", type=int, nargs="+", default=[7], help="physical IDs, active or hypothetical"
+        "--joints",
+        type=int,
+        nargs="+",
+        default=None,
+        help="physical IDs to enable; default: keep enabled_joints from --feedback-config",
     )
     p.add_argument("--summarize", type=Path, help="analyze existing CSV, no hardware")
     p.add_argument("--benchmark", action="store_true", help="CPU-only processor benchmark")
@@ -139,15 +147,16 @@ def main():
         raise ValueError("--config-path and --feedback-config required")
     if not np.isfinite(args.duration) or args.duration <= 0:
         raise ValueError("duration must be finite and positive")
-    if not args.joints or any(j not in range(1, 8) for j in args.joints):
-        raise ValueError("joints must be IDs 1--7")
     base = yaml.safe_load(args.config_path.read_text(encoding="utf-8"))
     values = yaml.safe_load(args.feedback_config.read_text(encoding="utf-8"))["arm_feedback"]
     values.update(
         enabled=True,
         observe_only=not args.active,
-        enabled_joints=tuple(j in args.joints for j in range(1, 8)),
     )
+    if args.joints is not None:
+        if any(j not in range(1, 8) for j in args.joints):
+            raise ValueError("joints must be IDs 1--7")
+        values.update(enabled_joints=tuple(j in args.joints for j in range(1, 8)))
     values["log_path"] = str(args.log_path or Path("logs") / f"arm_feedback_{time.time_ns()}.csv")
     config = ArmFeedbackConfig(**values)  # validation before any hardware access
     from ..teleoperators.gello_teleop.gello_teleop import GelloTeleop
@@ -169,7 +178,11 @@ def main():
         teleop.connect()
         teleop.start_arm_feedback(base["robot"]["robot_ip"])
         worker = teleop._arm_feedback_worker
-        print(f"Arm feedback {'ACTIVE' if args.active else 'OBSERVE ONLY'}; CSV: {worker.log_path}")
+        active_joints = [i + 1 for i, e in enumerate(config.enabled_joints) if e]
+        print(
+            f"Arm feedback {'ACTIVE' if args.active else 'OBSERVE ONLY'}; "
+            f"enabled_joints={active_joints}; CSV: {worker.log_path}"
+        )
         end = time.monotonic() + args.duration
         while time.monotonic() < end:
             if worker.fault:

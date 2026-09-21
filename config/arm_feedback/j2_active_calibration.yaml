@@ -1,0 +1,135 @@
+arm_feedback:
+  enabled: true
+  observe_only: false
+
+  source: bias_compensated_joint_effort
+
+  sampling_hz: 20
+  update_hz: 100
+  leader_read_hz: 10
+
+  stale_timeout_ms: 500
+
+
+  # J2 baseline 已测
+  baseline:
+  - 0
+  - -4.796127
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+
+
+  bias:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+
+
+  input_limit:
+  - 1
+  - 50
+  - 1
+  - 1
+  - 1
+  - 1
+  - 1
+
+
+  deadzone:
+  - 0
+  - 1.0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+
+
+  ema_alpha:
+  - 0.2
+  - 0.35
+  - 0.2
+  - 0.2
+  - 0.2
+  - 0.2
+  - 0.2
+
+
+  # J2 初始 gain
+  gain_ma_per_unit:
+  - 0
+  - 10.0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+
+
+  # J2 已经真机验证方向错误
+  # 所以 J2 = -1
+  sign:
+  - 1
+  - -1
+  - 1
+  - 1
+  - 1
+  - 1
+  - 1
+
+
+  damping_ma_per_rad_s:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+
+
+  slew_rate_ma_s:
+  - 5
+  - 300
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+
+
+  current_limit_ma:
+  - 5
+  - 100
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+
+
+  # 只开启 J2
+  enabled_joints:
+  - false
+  - true
+  - false
+  - false
+  - false
+  - false
+  - false
+
+
+  baseline_verified: true
+  sign_verified: true
+
+
+  max_temperature_c: 55
+
+  log_path: logs/arm_j2_active.csv

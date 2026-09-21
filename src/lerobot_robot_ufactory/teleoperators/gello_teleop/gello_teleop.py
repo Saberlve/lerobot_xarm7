@@ -72,6 +72,7 @@ class GelloTeleop(UFBaseTeleop):
                 "joint_offsets": joint_offsets,
                 "gripper_config": gripper_config,
                 "arm_timed_reader": self.config.arm_feedback.enabled,
+                "arm_leader_read_hz": self.config.arm_feedback.leader_read_hz,
         }
         self._dynamixel_robo_config = PatchedDynamixelRobotConfig(**param_dict)
         self.dof = len(self.config.joint_ids)

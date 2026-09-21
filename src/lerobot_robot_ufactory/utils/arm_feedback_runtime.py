@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .arm_dynamic_feedback import DynamicExternalTorqueEstimator
 from .arm_feedback import (
     ArmFeedbackProcessor,
     ArmFeedbackSample,
@@ -20,13 +21,38 @@ from .arm_feedback import (
 logger = logging.getLogger(__name__)
 
 
+def leader_period_budget_ms(config):
+    """Accepted steady-state leader read period at startup.
+
+    Free-running (leader_read_hz=0) the SyncRead cadence is ~48 ms, so 100 ms
+    bounds the post-enable transient. A throttled reader's steady period IS the
+    configured one; accept up to 1.5x it.
+    """
+    if config.leader_read_hz > 0:
+        return max(100.0, 1500.0 / config.leader_read_hz)
+    return 100.0
+
+
 class XArmFeedbackSource:
     """Dedicated read-only SDK connection: never contend with position RPCs.
+
+    The controller only refreshes the effort/velocity half of GET_JOINT_POS
+    while a report client is attached (observed on hardware: with no report
+    stream the num=3 effort stays bit-frozen for entire sessions while reads
+    still return code 0). This connection therefore enables the report stream
+    and reads effort from the per-packet report cache (joints_torque) with a
+    freshness gate, instead of trusting the RPC effort. Position still comes
+    from the get_joint_states RPC (that half is always live).
 
     Timestamp is REQUEST START, conservatively including RPC latency in age.
     Polling Hz measures responses, not the controller's internal sensor rate.
     Baseline is fixed configuration; no online learning during contact.
     """
+
+    # Report-vs-RPC effort consistency tolerance at startup, in SDK effort
+    # units. Guards against a unit/scale mismatch silently breaking the fixed
+    # baseline; loose enough for quantization noise at a held pose.
+    EFFORT_SCALE_TOLERANCE = 2.0
 
     def __init__(self, robot_ip, config, api=None, kinematics=None):
         self.robot_ip, self.config = robot_ip, config
@@ -34,6 +60,7 @@ class XArmFeedbackSource:
         self.owns_api = api is None
         self.kinematics = kinematics
         self.latest = None
+        self.report_age_ms = None
         self.stop_event = threading.Event()
         self.thread = None
 
@@ -47,9 +74,14 @@ class XArmFeedbackSource:
                 self.api = XArmAPI(
                     self.robot_ip,
                     is_radian=True,
-                    enable_report=False,
+                    # Matches the standalone-proven setup: keep the controller
+                    # report stream alive so joint effort telemetry is fresh.
+                    enable_report=True,
+                    report_type="rich",
                     timeout=self.config.stale_timeout_ms / 1000,
                 )
+            self._wait_report_stream()
+            self._check_effort_scale()
             if self.config.source == "ft_sensor" and self.kinematics is None:
                 from ..robots.uf_robot.local_kinematics import (
                     XArm7Kinematics,
@@ -63,14 +95,61 @@ class XArmFeedbackSource:
             self.stop()
             raise
 
+    def _report_stamp_s(self):
+        inner = getattr(self.api, "_arm", None)
+        return getattr(inner, "_last_update_cmdnum_time", 0) if inner is not None else 0
+
+    def _wait_report_stream(self, timeout_s=3.0):
+        deadline = time.monotonic() + timeout_s
+        while not self._report_stamp_s():
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    "report stream did not start; enable_report=True is required"
+                )
+            time.sleep(0.01)
+
+    def _check_effort_scale(self):
+        """Report tau and GET_JOINT_POS effort must agree at a held pose.
+
+        Both are the controller's joint torque telemetry in the same SDK
+        effort units; a gross mismatch means the fixed baseline (measured via
+        get_joint_states) would not apply to the report-stream values. Retry
+        briefly to ride out the controller cache catching up right after the
+        report stream attaches.
+        """
+        deadline = time.monotonic() + 3.0
+        while True:
+            code, states = self.api.get_joint_states(is_radian=True, num=3)
+            if code == 0 and len(states) == 3:
+                rpc_effort = np.asarray(states[2], dtype=float)
+                diff = float(
+                    np.abs(rpc_effort - np.asarray(self.api.joints_torque, dtype=float)).max()
+                )
+                if diff <= self.EFFORT_SCALE_TOLERANCE:
+                    return
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"report-stream effort disagrees with get_joint_states effort "
+                    f"(max diff {diff:.3f} > {self.EFFORT_SCALE_TOLERANCE:g}); "
+                    "re-verify the baseline before enabling feedback"
+                )
+            time.sleep(0.1)
+
     def read_once(self, sequence=1, previous_ns=None):
         start = time.monotonic_ns()
-        code, states = self.api.get_joint_states(is_radian=True, num=3)
-        if code != 0 or len(states) != 3:
-            raise RuntimeError(f"get_joint_states failed: {code}")
-        q = vector7(states[0], "follower_position")
-        vector7(states[1], "follower_velocity")
-        raw = vector7(states[2], "raw_joint_effort")
+        qd = None
+        if self.config.dynamic_mode:
+            # Dynamic mode: q/qd/tau all come from the SAME report packet, so
+            # the gravity model in C2 never evaluates q at a different instant
+            # than the torque it compensates. No RPC position read here.
+            raw, q, qd, report_age_ms = self._report_snapshot()
+        else:
+            code, states = self.api.get_joint_states(is_radian=True, num=1)
+            if code != 0 or len(states) != 1:
+                raise RuntimeError(f"get_joint_states failed: {code}")
+            q = vector7(states[0], "follower_position")
+            raw, report_age_ms = self._report_effort()
+        self.report_age_ms = report_age_ms
         unit = "sdk_effort_unit"
         if self.config.source == "ft_sensor":
             code, wrench = self.api.get_ft_sensor_data(is_raw=False)
@@ -99,7 +178,45 @@ class XArmFeedbackSource:
             (time.monotonic_ns() - start) / 1e6,
             sequence,
             0.0 if previous_ns is None else (start - previous_ns) / 1e6,
+            position=q if self.config.dynamic_mode else None,
+            velocity=qd,
         )
+
+    def _report_effort(self):
+        """Live joint effort from the report stream cache, freshness-gated.
+
+        The report parser updates joints_torque and _last_update_cmdnum_time
+        on every packet, so a frozen controller cache or dropped stream turns
+        into an explicit fault instead of a silently constant zero contact.
+
+        No report-rate assumption is made here: the rich report is only
+        ~10 Hz (observed ~100 ms period) on this controller, so the gate is
+        purely config.stale_timeout_ms, which must be configured as a
+        multiple of the actual report period (500 ms = 5 x 100 ms).
+        """
+        stamp = self._report_stamp_s()
+        if not stamp:
+            raise RuntimeError("report stream not started (enable_report=True required)")
+        age_ms = (time.monotonic() - stamp) * 1e3
+        if age_ms > self.config.stale_timeout_ms:
+            raise RuntimeError(
+                f"report stream stale: {age_ms:.0f} ms "
+                f"> stale_timeout_ms={self.config.stale_timeout_ms:g}"
+            )
+        return vector7(self.api.joints_torque, "raw_joint_effort"), age_ms
+
+    def _report_snapshot(self):
+        """Freshness-gated synchronized (effort, q, qd) from one report packet.
+
+        The rich-report parser updates joints_torque, angles and
+        realtime_joint_speeds together on every packet, so reading all three
+        after the single stamp/age check in _report_effort yields a
+        same-packet snapshot.
+        """
+        effort, age_ms = self._report_effort()
+        q = vector7(self.api.angles, "joint_position")
+        qd = vector7(self.api.realtime_joint_speeds, "joint_velocity")
+        return effort, q, qd, age_ms
 
     def _run(self):
         sequence, previous_ns = 0, None
@@ -144,6 +261,27 @@ class ArmFeedbackWorker:
         self.log_file = None
         self.log_path = Path(config.log_path)
         self._stop_lock = threading.Lock()
+        # Damping is the only feedback term that consumes leader velocity.
+        # With damping=0 on every enabled joint the leader snapshot only feeds
+        # logging: skip the leader age gate and do not let leader staleness
+        # shrink the write deadline.
+        self.needs_leader_velocity = any(
+            damping > 0 and enabled
+            for damping, enabled in zip(
+                config.damping_ma_per_rad_s, config.enabled_joints, strict=True
+            )
+        )
+        self.leader_period_budget_ms = leader_period_budget_ms(config)
+        self.leader_age_budget_ms = max(
+            config.stale_timeout_ms, self.leader_period_budget_ms
+        )
+        # Stage C1: observe-side estimator. Its output is logged, never
+        # written; the processor input is unchanged.
+        self.estimator = (
+            DynamicExternalTorqueEstimator(config.baseline)
+            if config.dynamic_mode
+            else None
+        )
 
     def start(self):
         if not self.config.enabled:
@@ -169,17 +307,46 @@ class ArmFeedbackWorker:
             )
             if result.fault or leader[3]:
                 raise RuntimeError(result.fault or leader[3])
-            if (time.monotonic_ns() - leader[0]) / 1e6 > self.config.stale_timeout_ms:
+            if (time.monotonic_ns() - leader[0]) / 1e6 > self.leader_age_budget_ms:
                 raise RuntimeError("leader_stale at startup")
             if not self.config.observe_only:
                 self.adapter.enable()
             else:
                 self.adapter.discover()  # read-only; no current-mode writes
+            # enable()/discover() hold the serial lock and starve the timed
+            # leader reader; require a fresh snapshot before the first tick.
+            # Freshness alone is not enough: right after enable() a SyncRead
+            # cycle can take ~400 ms, and its snapshot carries the pre-read
+            # timestamp, so a "fresh-enough" snapshot may still leave almost
+            # no write deadline budget while the reader holds the lock for
+            # another slow cycle. Also require the last measured read period
+            # to be back inside the steady-state budget (the free-running
+            # ~48 ms cadence, or 1.5x the configured throttled period).
+            deadline = time.monotonic() + 3
+            while True:
+                leader = self.leader_state()
+                if leader[3]:
+                    raise RuntimeError(leader[3])
+                leader_age_ms = (time.monotonic_ns() - leader[0]) / 1e6
+                leader_period_ms = leader[6] if len(leader) > 6 else 0
+                if (
+                    leader[0]
+                    and 0 <= leader_age_ms <= self.leader_age_budget_ms
+                    and 0 < leader_period_ms <= self.leader_period_budget_ms
+                ):
+                    break
+                if time.monotonic() > deadline:
+                    raise RuntimeError("leader_stale after adapter init")
+                time.sleep(0.005)
             self.processor.reset()  # first worker output must still be zero
             metadata = dict(
                 config=asdict(self.config),
                 motors=self.adapter.infos,
-                source_api="get_joint_states(num=3)",
+                source_api=(
+                    "report_stream(rich) synchronized q/qd/joints_torque"
+                    if self.config.dynamic_mode
+                    else "report_stream(rich).joints_torque + get_joint_states(num=1)"
+                ),
                 physical_rates="NOT MEASURED until hardware run",
                 effort_unit="SDK unspecified; experimental units",
             )
@@ -222,9 +389,16 @@ class ArmFeedbackWorker:
         leader_age = (processing_start - leader_ns) / 1e6
         result = self.processor.process(sample, velocity, processing_start, self.motor_signs)
         processing_ms = (time.monotonic_ns() - processing_start) / 1e6
-        if leader_error or leader_age < 0 or leader_age > self.config.stale_timeout_ms:
+        # A negative age is a clock/snapshot anomaly and always faults. An aged
+        # leader only faults when damping actually consumes its velocity; with
+        # damping=0 on every enabled joint the feedback command must not wait
+        # on (or fail because of) the throttled leader reader.
+        leader_stale = leader_age < 0 or (
+            self.needs_leader_velocity and leader_age > self.leader_age_budget_ms
+        )
+        if leader_error or leader_stale:
             result.fault = leader_error or "leader_stale"
-            result.stale = result.stale or leader_age > self.config.stale_timeout_ms
+            result.stale = result.stale or leader_stale
             result.command_current_ma = np.zeros(7)
         if self.stop_event.is_set():
             result.fault = self.fault or "stopped"
@@ -240,9 +414,10 @@ class ArmFeedbackWorker:
             self.adapter.disable()
         elif not self.config.observe_only:
             try:
-                expiry = min(sample.timestamp_ns, leader_ns) + int(
-                    self.config.stale_timeout_ms * 1e6
-                )
+                expiry_base = sample.timestamp_ns
+                if self.needs_leader_velocity:
+                    expiry_base = min(expiry_base, leader_ns)
+                expiry = expiry_base + int(self.config.stale_timeout_ms * 1e6)
                 actual = self.adapter.write(result.command_current_ma, deadline_ns=expiry)
                 write_ms = (time.monotonic_ns() - write_start) / 1e6
             except Exception as exc:
@@ -251,6 +426,19 @@ class ArmFeedbackWorker:
                 self.stop_event.set()
         end = time.monotonic_ns()
         dt_ms = 0 if previous_ns is None else (start - previous_ns) / 1e6
+        tau_ext = None
+        if (
+            self.estimator is not None
+            and sample is not None
+            and sample.error is None
+            and sample.position is not None
+        ):
+            tau_ext = self.estimator.estimate(
+                sample.position, sample.velocity, sample.raw_joint_effort
+            )
+        # Read-side lock timing lives on the driver (reader thread); write-side
+        # on the adapter. Both are latest values, matching the leader snapshot.
+        driver = getattr(self.adapter, "driver", None)
         row = dict(
             timestamp_ns=start,
             sample_timestamp_ns=None if sample is None else sample.timestamp_ns,
@@ -259,6 +447,7 @@ class ArmFeedbackWorker:
             source_read_latency_ms=0 if sample is None else sample.read_latency_ms,
             unit="unknown" if sample is None else sample.unit,
             sample_age_ms=result.sample_age_ms,
+            report_age_ms=getattr(self.source, "report_age_ms", None),
             leader_timestamp_ns=leader_ns,
             leader_sequence=leader_snapshot[5] if len(leader_snapshot) > 5 else 0,
             leader_period_ms=leader_snapshot[6] if len(leader_snapshot) > 6 else 0,
@@ -269,6 +458,14 @@ class ArmFeedbackWorker:
             processing_latency_ms=processing_ms,
             write_latency_ms=write_ms,
             serial_transaction_ms=getattr(self.adapter, "last_transaction_ms", None)
+            if write_ms is not None
+            else None,
+            serial_lock_wait_ms_read=getattr(driver, "_arm_reader_lock_wait_ms", None),
+            serial_lock_hold_ms_read=getattr(driver, "_arm_reader_lock_hold_ms", None),
+            serial_lock_wait_ms_write=getattr(self.adapter, "last_lock_wait_ms", None)
+            if write_ms is not None
+            else None,
+            serial_lock_hold_ms_write=getattr(self.adapter, "last_lock_hold_ms", None)
             if write_ms is not None
             else None,
             sample_to_command_ms=None if sample is None else (end - sample.timestamp_ns) / 1e6,
@@ -293,6 +490,16 @@ class ArmFeedbackWorker:
             if sample is None
             else sample.estimated_contact_torque * result.command_current_ma,
         )
+        if self.config.dynamic_mode:
+            arrays.update(
+                joint_position=np.zeros(7)
+                if sample is None or sample.position is None
+                else sample.position,
+                joint_velocity=np.zeros(7)
+                if sample is None or sample.velocity is None
+                else sample.velocity,
+                estimated_external_torque=np.zeros(7) if tau_ext is None else tau_ext,
+            )
         for name, array in arrays.items():
             for j, value in enumerate(array):
                 row[f"{name}_{j + 1}"] = float(value)

@@ -40,6 +40,8 @@ class GelloArmFeedbackAdapter:
         self.cleanup_errors = []
         self.temperature_c = np.zeros(7)
         self.last_transaction_ms = 0.0
+        self.last_lock_wait_ms = 0.0
+        self.last_lock_hold_ms = 0.0
 
     def discover(self):
         d = self.driver
@@ -124,7 +126,10 @@ class GelloArmFeedbackAdapter:
 
     def write(self, current_ma, deadline_ns=None):
         d = self.driver
+        lock_wait_start = time.monotonic_ns()
         with d._lock:
+            lock_acquired_ns = time.monotonic_ns()
+            self.last_lock_wait_ms = (lock_acquired_ns - lock_wait_start) / 1e6
             try:
                 if not self.active:
                     raise RuntimeError("arm current session is not active")
@@ -153,6 +158,7 @@ class GelloArmFeedbackAdapter:
             finally:
                 if self.writer is not None:
                     self.writer.clearParam()
+                self.last_lock_hold_ms = (time.monotonic_ns() - lock_acquired_ns) / 1e6
 
     def _disable_locked(self):
         # Unicast on cleanup intentionally obtains per-motor acknowledgements.
@@ -187,18 +193,25 @@ class TimedArmReaderMixin:
 
     A single reader still owns the existing SyncRead; all port operations share
     driver._lock. Immutable snapshots avoid acquiring the serial lock in haptics.
+    _arm_leader_read_hz > 0 paces the reader so the shared 57600 baud bus keeps
+    free windows for Goal Current writes; 0 keeps the free-running ~20 Hz loop.
+    Pacing uses _stop_thread.wait: no busy-wait and stop stays prompt.
     """
 
     def _read_joint_states(self):
         if not getattr(self, "_arm_timed_reader", False):
             return super()._read_joint_states()
+        rate = getattr(self, "_arm_leader_read_hz", 0.0)
+        period_s = 1.0 / rate if rate and rate > 0 else 0.0
         sequence = 0
         previous_ns = None
-        while not self._stop_thread.wait(0.001):
+        delay = 0.001
+        while not self._stop_thread.wait(delay):
             start = time.monotonic_ns()
             try:
                 with self._lock:
                     measurement_ns = time.monotonic_ns()
+                    self._arm_reader_lock_wait_ms = (measurement_ns - start) / 1e6
                     code = self._groupSyncRead.txRxPacket()
                     if code != COMM_SUCCESS:
                         raise RuntimeError(f"GELLO SyncRead failed: {code}")
@@ -226,6 +239,7 @@ class TimedArmReaderMixin:
                         0 if previous_ns is None else (measurement_ns - previous_ns) / 1e6,
                     )
                     previous_ns = measurement_ns
+                    self._arm_reader_lock_hold_ms = (time.monotonic_ns() - measurement_ns) / 1e6
             except Exception as exc:
                 self._arm_read_fault = str(exc)
                 self._arm_state_snapshot = (
@@ -235,6 +249,9 @@ class TimedArmReaderMixin:
                     str(exc),
                     0.0,
                 )
+            delay = 0.001
+            if period_s > 0:
+                delay = max(period_s - (time.monotonic_ns() - start) / 1e9, 0.001)
 
     def arm_state_snapshot(self):
         fault = getattr(self, "_arm_read_fault", None)

@@ -1,0 +1,126 @@
+# Stage B: ALL seven joints active simultaneously, static first-pass config.
+# Merged from the per-joint calibrated yamls (j1..j7_active_calibration.yaml).
+# Every per-joint value is the hardware-validated one; see each single-joint
+# yaml for its calibration evidence.
+#
+# NOTE: all seven baselines are only valid at the pose where they were
+# measured; this merged vector assumes every joint's baseline was taken at
+# the SAME static pose. Verify residuals ~0 in an observe-only run at that
+# pose before going active.
+arm_feedback:
+  enabled: true
+  observe_only: false
+
+  source: bias_compensated_joint_effort
+
+  sampling_hz: 20
+  update_hz: 100
+  leader_read_hz: 10
+
+  stale_timeout_ms: 500
+
+  baseline:
+  - 0.0
+  - -4.796127
+  - 0.518214
+  - 17.397564
+  - -0.115557
+  - -1.83963
+  - 0
+
+  bias:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+
+  input_limit:
+  - 8.0
+  - 50
+  - 50
+  - 50
+  - 50
+  - 8
+  - 50
+
+  deadzone:
+  - 0.1
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 0.1
+  - 1.0
+
+  ema_alpha:
+  - 0.35
+  - 0.35
+  - 0.35
+  - 0.35
+  - 0.35
+  - 0.35
+  - 0.35
+
+  gain_ma_per_unit:
+  - 3.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+
+  sign:
+  - -1
+  - -1
+  - -1
+  - -1
+  - -1
+  - -1
+  - -1
+
+  damping_ma_per_rad_s:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+
+  slew_rate_ma_s:
+  - 60.0
+  - 300
+  - 300
+  - 300
+  - 300
+  - 300.0
+  - 300
+
+  current_limit_ma:
+  - 20.0
+  - 100
+  - 100
+  - 100
+  - 100
+  - 100.0
+  - 100
+
+  enabled_joints:
+  - true
+  - true
+  - true
+  - true
+  - true
+  - true
+  - true
+
+  baseline_verified: true
+  sign_verified: true
+
+  max_temperature_c: 55
+
+  log_path: logs/arm_all_active.csv

@@ -1,0 +1,53 @@
+# First J6-ONLY active closed-loop calibration config. NOT the 7-DoF config.
+# Fixed-pose protocol: run at the same xArm pose as the sign calibration
+# (q6 ~= +0.95469 rad); baseline is only validated for that pose.
+#
+# Measured calibration evidence:
+#   GELLO ID6: +current -> +leader_q6 (CONFIRMED, encoder test, 20 mA pulses)
+#   xArm J6:   delta_effort6 = -tau_external_J6 (s1 = -1, UFactory GUI
+#              direction + read-only effort test, Phase A/B = +/-4.9/-6.9)
+#   therefore sign[5] = s1 = -1.
+arm_feedback:
+  enabled: true
+  observe_only: false
+  source: bias_compensated_joint_effort
+  sampling_hz: 100
+  update_hz: 100
+  # 200 ms: the 57600-baud leader SyncRead holds driver._lock for ~37-43 ms
+  # per cycle and its snapshot timestamp predates the transaction, so at
+  # 100 ms the write deadline budget (~100 - ~50..80 ms leader age) was
+  # smaller than the worst observed lock wait (69 ms) -> write_error fault.
+  # 200 ms leaves ~120 ms of budget, ~1.7x the worst case.
+  stale_timeout_ms: 500
+  # J6 baseline measured live at the fixed calibration pose across multiple
+  # sessions (-1.83963). J1-5/J7 entries are unused: those joints are disabled
+  # and masked in both the processor and the adapter.
+  baseline: [0, 0, 0, 0, 0, -1.83963, 0]
+  bias: [0, 0, 0, 0, 0, 0, 0]
+  # J6 input clamp at 8 SDK units: above the observed ~7 unit peak, so normal
+  # contact is unclamped but extreme spikes are bounded (clamped flag logged).
+  input_limit: [1, 1, 1, 1, 1, 8, 1]
+  # 0.1 SDK units: baseline std measured ~0, but SDK effort is quantized to
+  # platform values; 0.1 absorbs quantization/platform jitter yet is only
+  # ~2% of a typical 5-unit contact signal.
+  deadzone: [0, 0, 0, 0, 0, 0.1, 0]
+  # alpha is the weight of the NEW sample; 0.2 at 100 Hz ~ 50 ms EMA lag.
+  ema_alpha: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+  # 0.5 mA per SDK effort unit: typical |delta_effort6| ~5 units -> ~2.5 mA
+  # command, below the 5 mA clamp; observed peak ~7 units -> ~3.5 mA.
+  gain_ma_per_unit: [0, 0, 0, 0, 0, 0.5, 0]
+  # sign[5] = -1 per the measured s1 = -1 relation above.
+  sign: [1, 1, 1, 1, 1, -1, 1]
+  # Zero for the first static direction test so damping cannot mask the
+  # primary feedback direction.
+  damping_ma_per_rad_s: [0, 0, 0, 0, 0, 0, 0]
+  # 10 mA/s: 0 -> 5 mA full scale in 0.5 s; 0.1 mA per 100 Hz tick.
+  slew_rate_ma_s: [5, 5, 5, 5, 5, 10, 5]
+  # First closed-loop safety cap: 5 mA. The 20 mA polarity diagnostic value
+  # must NOT be reused here.
+  current_limit_ma: [5, 5, 5, 5, 5, 5, 5]
+  enabled_joints: [false, false, false, false, false, true, false]
+  baseline_verified: true
+  sign_verified: true
+  max_temperature_c: 55
+  log_path: logs/arm_j6_active.csv

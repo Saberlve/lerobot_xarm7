@@ -222,3 +222,69 @@ def test_timed_reader_fault_latched_after_recovery(monkeypatch):
     d._arm_state_snapshot = (1, np.zeros(7), np.zeros(7), None, 0)
     d._arm_read_fault = "earlier read failed"
     assert d.arm_state_snapshot()[3] == "earlier read failed"
+
+
+def test_timed_reader_pacing_respects_leader_read_hz(monkeypatch):
+    adapter, _ = setup(monkeypatch)
+    d = adapter.driver
+    d._arm_timed_reader = True
+    d._arm_leader_read_hz = 20.0  # 50 ms period
+
+    delays = []
+
+    class Stop:
+        calls = 0
+
+        def wait(self, delay):
+            delays.append(delay)
+            self.calls += 1
+            return self.calls > 3
+
+    class Read:
+        def txRxPacket(self):
+            return 0
+
+        def isAvailable(self, *args):
+            return True
+
+        def getData(self, motor, address, size):
+            return 2048
+
+    d._stop_thread = Stop()
+    d._groupSyncRead = Read()
+    d._read_joint_states()
+    assert delays[0] == 0.001
+    np.testing.assert_allclose(delays[1:], 0.05, rtol=0, atol=0.005)
+    assert d.arm_state_snapshot()[5] == 3
+    assert d._arm_reader_lock_wait_ms >= 0 and d._arm_reader_lock_hold_ms >= 0
+
+
+def test_timed_reader_free_running_by_default(monkeypatch):
+    adapter, _ = setup(monkeypatch)
+    d = adapter.driver
+    d._arm_timed_reader = True  # no _arm_leader_read_hz: legacy 1 ms loop
+
+    delays = []
+
+    class Stop:
+        calls = 0
+
+        def wait(self, delay):
+            delays.append(delay)
+            self.calls += 1
+            return self.calls > 1
+
+    class Read:
+        def txRxPacket(self):
+            return 0
+
+        def isAvailable(self, *args):
+            return True
+
+        def getData(self, motor, address, size):
+            return 2048
+
+    d._stop_thread = Stop()
+    d._groupSyncRead = Read()
+    d._read_joint_states()
+    assert delays == [0.001, 0.001]

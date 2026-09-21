@@ -41,6 +41,19 @@ class ArmFeedbackConfig:
     sign_verified: bool = False
     max_temperature_c: float = 55.0
     log_path: str = "logs/arm_feedback.csv"
+    # Arm-feedback-session-only leader read rate on the shared 57600 baud bus.
+    # 0 keeps the reader free-running (~20 Hz, ~90% bus duty). A positive rate
+    # paces the reader so Goal Current writes get free serial-bus windows: one
+    # 8-servo SyncRead holds the bus ~47 ms, so the write rate ceiling is
+    # roughly update_hz * (1 - 0.047 * leader_read_hz).
+    # Damping is the only consumer that needs fresh leader velocity; with
+    # damping=0 on every enabled joint the leader snapshot only feeds logging
+    # and the leader stale gate is skipped (see ArmFeedbackWorker).
+    leader_read_hz: float = 0.0
+    # Stage C1: read q/qd from the same report packet as effort (synchronized)
+    # and log estimated_external_torque. Math is unchanged: external = effort
+    # - baseline. The active write path is untouched.
+    dynamic_mode: bool = False
     # FT wrench is expressed at sensor origin in sensor axes. Transform maps
     # sensor -> flange; translation in mm. User must establish this calibration.
     ft_sensor_to_flange: tuple[float, ...] | None = None  # flattened 4x4
@@ -53,6 +66,7 @@ class ArmFeedbackConfig:
             "baseline_verified",
             "sign_verified",
             "ft_vertical_only",
+            "dynamic_mode",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be bool")
@@ -69,6 +83,10 @@ class ArmFeedbackConfig:
                 raise ValueError(f"{name} must be finite and positive")
         if self.max_temperature_c > 60:
             raise ValueError("experimental arm temperature limit must be <=60 C")
+        if isinstance(self.leader_read_hz, bool) or not np.isfinite(self.leader_read_hz):
+            raise ValueError("leader_read_hz must be finite")
+        if self.leader_read_hz != 0 and not 1 <= self.leader_read_hz <= 100:
+            raise ValueError("leader_read_hz must be 0 (free-running) or within 1--100 Hz")
         names = (
             "baseline",
             "bias",
@@ -135,6 +153,10 @@ class ArmFeedbackSample:
     read_latency_ms: float = 0.0
     sequence: int = 0
     period_ms: float = 0.0
+    # Stage C1: report-synchronized follower state; only populated in
+    # dynamic_mode. The processor never reads these.
+    position: np.ndarray | None = None
+    velocity: np.ndarray | None = None
 
 
 @dataclass

@@ -161,7 +161,11 @@ def test_ft_moment_and_sensor_offset():
 
 
 def test_source_fixed_baseline_and_request_age():
-    api = SimpleNamespace(get_joint_states=lambda **kw: (0, [[0] * 7, [0] * 7, [5] * 7]))
+    api = SimpleNamespace(
+        get_joint_states=lambda **kw: (0, [[0] * 7]),
+        joints_torque=[5] * 7,
+        _arm=SimpleNamespace(_last_update_cmdnum_time=time.monotonic()),
+    )
     source = XArmFeedbackSource("unused", config(baseline=(3,) * 7), api=api)
     a, b = source.read_once(), source.read_once()
     np.testing.assert_allclose(a.raw_joint_effort, 5)

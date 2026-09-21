@@ -19,7 +19,8 @@
 
 | 信号 | 定义与选择 |
 |---|---|
-| `get_joint_states(is_radian=True,num=3)` | 返回 position、velocity、effort。源码 `xarm/x3/base.py` 直接将 `ret[15:22]` 作为 effort，没有外力估计或单位转换。默认选择该请求接口，以便每次成功请求都有保守时间戳。 |
+| 报告流缓存 `joints_torque`（`enable_report=True, report_type='rich'`）| **当前默认 effort 数据源**。真机实测发现：`GET_JOINT_POS`（即 `get_joint_states`）的 velocity/effort 部分只有在控制器报告流有客户端挂着时才被实时任务刷新；无报告客户端时 effort 会整段冻结但读取仍返回 code=0（`logs/arm_feedback_*.csv` 中存在全部 7 关节整会话冻结的记录）。报告流解析器每收到一包就更新 `joints_torque` 与 `_last_update_cmdnum_time`（`xarm/x3/base.py`），因此改用报告缓存并加新鲜度门禁（超过 `stale_timeout_ms` 直接 fault）。注意：rich report 实测只有约 **10 Hz**（周期约 100 ms），不是高频力矩通道；`stale_timeout_ms` 必须按实际报告周期的倍数配置（J2 模板用 500 ms ≈ 5×100 ms），CSV 的 `report_age_ms` 正常应在 0~150 ms，>500 ms 即异常。当前链路（controller → ~10 Hz report → joints_torque → GELLO current）验证的是低频接触反馈闭环；扩展 J1~J7 时应统一使用该数据源，不要混用 `get_joint_states(num=3)`。 |
+| `get_joint_states(is_radian=True,num=1)` | 仅用于 position（该寄存器的 position 部分始终实时）。源码 `xarm/x3/base.py` 直接将 `ret[15:22]` 作为 effort，没有外力估计或单位转换；因其 effort 会冻结，不再用作 effort 源。启动时会对拍报告流 tau 与该接口 effort（容差 2 个 sdk effort unit），不一致则拒绝启动，防止固定 baseline 失配。 |
 | `get_joints_torque()` / `joints_torque` | SDK 叫 joint torque，没有在该接口保证已经去除重力、惯性、摩擦。第一版不据此假定 external torque。 |
 | `currents` | 独立的伺服电流属性，不能直接作为关节外力矩；本版不将其接入 active。 |
 | `get_ft_sensor_data(is_raw=False)` | 官方六维 FT 的滤波、负载/偏置补偿结果；需受支持传感器和固件。可选 `ft_sensor` 源。 |
@@ -46,8 +47,8 @@ FT 接触估计覆盖传感器负载路径上的工具接触，不能代替整�
 ## 3. Architecture
 
 ```text
-独立只读 xArm SDK connection
-  get_joint_states / 可选 get_ft_sensor_data
+独立只读 xArm SDK connection（enable_report=True, report_type='rich'）
+  报告流 joints_torque（effort，新鲜度门禁）/ get_joint_states(num=1)（position）/ 可选 get_ft_sensor_data
           ↓ sampler，单槽 latest sample（无 force queue）
   固定基线 / FT JᵀW
           ↓

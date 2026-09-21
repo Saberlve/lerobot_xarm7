@@ -1,0 +1,99 @@
+arm_feedback:
+  enabled: true
+  observe_only: false
+  source: bias_compensated_joint_effort
+  sampling_hz: 100
+  update_hz: 100
+  stale_timeout_ms: 500
+  baseline:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - -1.83963
+  - 0
+  bias:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  input_limit:
+  - 1
+  - 1
+  - 1
+  - 1
+  - 1
+  - 8
+  - 1
+  deadzone:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0.1
+  - 0
+  ema_alpha:
+  - 0.2
+  - 0.2
+  - 0.2
+  - 0.2
+  - 0.2
+  - 0.2
+  - 0.2
+  gain_ma_per_unit:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 4.0
+  - 0
+  sign:
+  - 1
+  - 1
+  - 1
+  - 1
+  - 1
+  - -1
+  - 1
+  damping_ma_per_rad_s:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  slew_rate_ma_s:
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 40.0
+  - 5
+  current_limit_ma:
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 20.0
+  - 5
+  enabled_joints:
+  - false
+  - false
+  - false
+  - false
+  - false
+  - true
+  - false
+  baseline_verified: true
+  sign_verified: true
+  max_temperature_c: 55
+  log_path: logs/arm_j6_active.csv

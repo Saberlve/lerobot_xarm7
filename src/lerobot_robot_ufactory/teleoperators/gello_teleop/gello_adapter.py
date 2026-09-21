@@ -67,6 +67,7 @@ class SafeDynamixelDriver(TimedArmReaderMixin, DynamixelDriver):
 
     def __init__(self, *args, **kwargs) -> None:
         self._arm_timed_reader = kwargs.pop("arm_timed_reader", False)
+        self._arm_leader_read_hz = kwargs.pop("arm_leader_read_hz", 0.0)
         self._arm_feedback_adapter = None
         self._gripper_current_mode_enabled = False
         self._gripper_current_transition_active = False
@@ -539,6 +540,7 @@ class PatchedDynamixelRobotConfig:
     joint_signs: Sequence[int]
     gripper_config: Optional[Tuple[int, float, float]]
     arm_timed_reader: bool = False
+    arm_leader_read_hz: float = 0.0
 
     def __post_init__(self) -> None:
         if len(self.joint_ids) != len(self.joint_offsets):
@@ -555,7 +557,9 @@ class PatchedDynamixelRobotConfig:
         # that symbol only while constructing this instance.
         original_driver = driver_module.DynamixelDriver
         driver_module.DynamixelDriver = partial(
-            SafeDynamixelDriver, arm_timed_reader=self.arm_timed_reader
+            SafeDynamixelDriver,
+            arm_timed_reader=self.arm_timed_reader,
+            arm_leader_read_hz=self.arm_leader_read_hz,
         )
         try:
             return ContinuousDynamixelRobot(
