@@ -1,3 +1,4 @@
+import threading
 import time
 from types import SimpleNamespace
 
@@ -322,11 +323,14 @@ def test_action_at_never_selects_a_future_command():
     with controller._lock:
         history = list(controller._action_history)
     assert len(history) >= 2
-    sample_time = (history[0][0] + history[1][0]) / 2
-    assert controller.action_at(sample_time) == history[0][1]
+    assert [sample.action_index for sample in history] == sorted(
+        {sample.action_index for sample in history}
+    )
+    sample_time = (history[0].send_start_s + history[1].send_start_s) / 2
+    assert controller.action_at(sample_time) == history[0].command
     action, sent_at = controller.action_sample_at(sample_time)
-    assert action == history[0][1]
-    assert sent_at == history[0][0]
+    assert action == history[0].command
+    assert sent_at == history[0].send_start_s
 
 
 def test_realtime_controller_records_action_timing_when_enabled():
@@ -349,6 +353,34 @@ def test_realtime_controller_records_action_timing_when_enabled():
         assert timing["action_index"] == index
         assert timing["gello_read_start_ns"] <= timing["gello_read_end_ns"]
         assert timing["gello_read_end_ns"] <= timing["command_send_end_ns"]
+        assert timing["action_send_start_ns"] == timing["command_send_start_ns"]
+        assert timing["action_send_end_ns"] == timing["command_send_end_ns"]
+        assert timing["send_latency_ns"] >= 0
+
+
+def test_dataset_action_sample_uses_send_start_as_primary_anchor():
+    controller = RealtimeTeleopController(
+        FakeRobot(),
+        FakeTeleop(),
+        identity_action_processor,
+        identity_action_processor,
+        fps=100,
+        initial_observation={"J1.pos": 0.0},
+    )
+    controller.start()
+    try:
+        sample = controller.latest_action_sample(-1, wait_s=0.2)
+    finally:
+        controller.stop()
+
+    assert sample.send_start_ns <= sample.send_end_ns
+    assert sample.send_start_s == sample.send_start_ns / 1_000_000_000
+    assert sample.sent_at_s == sample.send_end_s
+
+    latest = controller.latest_action_sample(-1)
+    assert latest.action_index >= sample.action_index
+    with pytest.raises(TimeoutError, match="unconsumed"):
+        controller.latest_action_sample(latest.action_index)
 
 
 def test_realtime_controller_propagates_send_failures():
@@ -564,3 +596,127 @@ def test_feedback_start_failure_does_not_break_normal_position_teleop():
     assert robot.actions
     assert teleop.feedback_starts == 1
     assert controller.latest_action() == robot.actions[-1]
+
+
+class BlockingSendRobot(FakeRobot):
+    """Robot whose sends can be delayed/blocked like the episode-start stall."""
+
+    def __init__(self):
+        super().__init__()
+        self.send_delay_s = 0.0
+        self.block_event = None
+
+    def send_action(self, action):
+        if self.block_event is not None:
+            self.block_event.wait(timeout=5.0)
+        if self.send_delay_s:
+            time.sleep(self.send_delay_s)
+        self.actions.append(dict(action))
+        return action
+
+
+def _make_first_tick_controller():
+    controller = RealtimeTeleopController(
+        BlockingSendRobot(),
+        FakeTeleop(),
+        identity_action_processor,
+        identity_action_processor,
+        fps=100,
+        initial_observation={"J1.pos": 0.0},
+    )
+    controller.start()
+    return controller
+
+
+def test_first_tick_tolerates_eligible_action_arriving_after_startup_stall():
+    # Mirrors record_loop's first dataset tick: not_before_s=episode_start,
+    # wait_s=1.0. The first eligible action lands ~0.3-0.6 s after episode
+    # start (delayed sends), far beyond the old ~80 ms budget.
+    controller = _make_first_tick_controller()
+    robot = controller.robot
+    robot.send_delay_s = 0.3
+    time.sleep(0.05)  # let the in-flight warm-up send commit
+    controller.heartbeat()
+    episode_start = time.perf_counter()
+    started = time.perf_counter()
+    try:
+        sample = controller.latest_action_sample(
+            -1, not_before_s=episode_start, wait_s=1.0
+        )
+    finally:
+        controller.stop()
+    elapsed = time.perf_counter() - started
+
+    assert sample.send_start_s >= episode_start
+    assert 0.15 <= elapsed < 1.0
+    assert sample.send_start_s - episode_start < 1.0
+
+
+def test_first_tick_still_times_out_without_eligible_action_within_one_second():
+    # The extended wait does not silently accept stale actions: with sends
+    # blocked, no eligible action can appear and TimeoutError is raised
+    # after the full 1 s budget.
+    controller = _make_first_tick_controller()
+    robot = controller.robot
+    robot.block_event = threading.Event()
+    time.sleep(0.03)  # pump is now stuck inside a blocked send
+    controller.heartbeat()
+    episode_start = time.perf_counter()
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError, match="unconsumed"):
+        controller.latest_action_sample(-1, not_before_s=episode_start, wait_s=1.0)
+    elapsed = time.perf_counter() - started
+
+    controller.heartbeat()
+    robot.block_event.set()
+    controller.stop()
+
+    assert 0.9 <= elapsed < 1.5
+
+
+def test_first_tick_never_selects_pre_episode_warmup_action():
+    # after_action_index=-1 makes every warm-up sample index-eligible; only
+    # the not_before_s=episode_start constraint protects causality.
+    controller = _make_first_tick_controller()
+    robot = controller.robot
+    time.sleep(0.1)  # accumulate warm-up actions at 10 ms cadence
+    robot.block_event = threading.Event()
+    time.sleep(0.03)  # pump is now stuck inside a blocked send
+    controller.heartbeat()
+    episode_start = time.perf_counter()
+    with controller._lock:
+        warmup_samples = list(controller._action_history)
+    assert warmup_samples
+    assert all(sample.send_start_s < episode_start for sample in warmup_samples)
+
+    with pytest.raises(TimeoutError, match="unconsumed"):
+        controller.latest_action_sample(-1, not_before_s=episode_start, wait_s=0.3)
+
+    controller.heartbeat()
+    robot.block_event.set()
+    controller.stop()
+
+
+def test_later_dataset_ticks_keep_the_normal_wait_budget():
+    # record_loop's non-first ticks use wait_s=max(1/fps, period_s*2); that
+    # path must not inherit the extended first-tick budget.
+    controller = _make_first_tick_controller()
+    robot = controller.robot
+    first = controller.latest_action_sample(-1, wait_s=0.2)
+
+    robot.block_event = threading.Event()
+    time.sleep(0.03)
+    controller.heartbeat()
+    wait_s = max(1.0 / 15, controller.period_s * 2)
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError, match="unconsumed"):
+        controller.latest_action_sample(
+            first.action_index, not_before_s=None, wait_s=wait_s
+        )
+    elapsed = time.perf_counter() - started
+
+    controller.heartbeat()
+    robot.block_event.set()
+    controller.stop()
+
+    assert elapsed < 0.5

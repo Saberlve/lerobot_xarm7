@@ -36,7 +36,7 @@ robot:
       serial_number_or_name: "242622070583"
       width: 640
       height: 480
-      # Stream at 30 and jointly select frames around the 25 Hz state anchor.
+      # Select the latest host-received frame at/before each action send-start.
       fps: 15
     third_camera:
       type: intelrealsense

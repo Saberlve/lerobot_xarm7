@@ -12,17 +12,12 @@ robot:
   gripper_type: 2
   gripper_speed: 50
   gripper_command_interval_s: 0.03334
-  # Keyboard release stopping needs the G2's measured position instead of the
-  # last commanded target. This monitor is asynchronous and does not block the
-  # realtime control loop.
-  gripper_current_monitor: true
-  gripper_current_monitor_frequency_hz: 250
   enable_logs: false
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
   joint_command_mode: 6
   max_joint_velocity: 120
   # TCP z floor in the xArm base coordinate system (mm).
-  min_tcp_z_mm: 99
+  min_tcp_z_mm: 10
   # CPU-local FK/Jacobian projection keeps mode-6 commands free of synchronous SDK queries.
   tcp_z_guard_backend: "local_projection"
   tcp_z_soft_margin_mm: 0.5
@@ -41,6 +36,14 @@ robot:
     third_camera:
       type: intelrealsense
       serial_number_or_name: "148522072685"
+      width: 640
+      height: 480
+      fps: 15
+    # Second wrist viewpoint (new hardware, 2026-09). Enumerated via
+    # pyrealsense2 serial 263022073488; view confirmed to cover the xArm7 arm.
+    wrist_camera_2:
+      type: intelrealsense
+      serial_number_or_name: "263022073488"
       width: 640
       height: 480
       fps: 15
@@ -78,6 +81,40 @@ robot:
       marker_rows: 35
       marker_cols: 20
       # config_path: /absolute/path/to/xense/calibrations
+    # Second Photon pair (new hardware, 2026-09). SDK enumerates both;
+    # measured ~57/~61 fps. Left/right below follows the OG00199x wiring
+    # order, NOT a verified physical mapping — swap the serials here if the
+    # physical left/right is the other way around.
+    photon_right_2: # 右边（第二对）
+      type: photon
+      serial_number: "OG001993"
+      width: 400
+      height: 700
+      fps: 60
+      output_type: Rectify
+      color_mode: rgb
+      disable_infer: true
+      save_marker_motion_3d: false
+      motion_3d_output: Mesh3DFlow
+      infer_mode: fast
+      marker_rows: 35
+      marker_cols: 20
+      # config_path: /absolute/path/to/xense/calibrations
+    photon_left_2:  # 左边（第二对）
+      type: photon
+      serial_number: "OG001992"
+      width: 400
+      height: 700
+      fps: 60
+      output_type: Rectify
+      color_mode: rgb
+      disable_infer: true
+      save_marker_motion_3d: false
+      motion_3d_output: Mesh3DFlow
+      infer_mode: fast
+      marker_rows: 35
+      marker_cols: 20
+      # config_path: /absolute/path/to/xense/calibrations
   # Redundant args, indicating the initial pose of xarm7. Set by 192.168.1.245:18333
   # start_joints: [0, -30, 0, 0, 0, 30, 0]
 # make sure to edit with your correct configurations!
@@ -90,7 +127,7 @@ teleop:
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
   gripper_id: 8
-  gripper_control_mode: keyboard
+  gripper_control_mode: gello
   gripper_keyboard_hold_delay_s: 0.0
   gripper_keyboard_step_mm: 1.0
   gripper_open_deg: 198.28125
@@ -112,9 +149,10 @@ offline_mesh3dflow: true
 
 dataset:
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_hand_sanitiser"
-  repo_id: "ufactory/xarm7_gello_hand_sanitiser"
-  single_task: "Squeeze the hand sanitiser into the cup"
+  # TODO: confirm the task and dataset name before the first real recording.
+  root: "datasets/xarm7_gello_xense_4stream"
+  repo_id: "ufactory/xarm7_gello_xense_4stream"
+  single_task: "TODO_EDIT_TASK"
   fps: 15
   episode_time_s: 960  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes

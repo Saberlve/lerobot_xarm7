@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition, Event, Thread
-from time import perf_counter
+from time import perf_counter, perf_counter_ns
 from typing import Any
 
 import cv2
@@ -38,6 +38,38 @@ class XensePhotonSample:
     marker_motion_3d: NDArray[Any] | None
     sensor_timestamp_s: float | None
     capture_monotonic_s: float
+    capture_monotonic_ns: int | None = None
+
+
+class _TrackedXenseHistory(deque):
+    """Bounded history that records actual evictions, including test appends."""
+
+    def __init__(self, maxlen: int):
+        super().__init__(maxlen=maxlen)
+        self.total_appended = 0
+        self.eviction_count = 0
+        self.first_seen_timestamp: float | None = None
+        self.newest_evicted_timestamp: float | None = None
+
+    def append(self, sample: XensePhotonSample) -> None:
+        if self.first_seen_timestamp is None:
+            self.first_seen_timestamp = sample.capture_monotonic_s
+        if self.maxlen is not None and len(self) == self.maxlen:
+            self.eviction_count += 1
+            self.newest_evicted_timestamp = self[0].capture_monotonic_s
+        super().append(sample)
+        self.total_appended += 1
+
+    def extend(self, samples) -> None:
+        for sample in samples:
+            self.append(sample)
+
+    def clear(self) -> None:
+        super().clear()
+        self.total_appended = 0
+        self.eviction_count = 0
+        self.first_seen_timestamp = None
+        self.newest_evicted_timestamp = None
 
 
 class XensePhotonCamera(TactileCamera):
@@ -50,7 +82,7 @@ class XensePhotonCamera(TactileCamera):
         self._stop = Event()
         self._frame = None
         self._sample = None
-        self._sample_history = deque(maxlen=self.config.sync_history_size)
+        self._sample_history = _TrackedXenseHistory(self.config.sync_history_size)
         self._frame_time = 0.0
         self._error = None
         # Set by the recorder before connect; export before the reader starts.
@@ -183,7 +215,8 @@ class XensePhotonCamera(TactileCamera):
                         output, self._sensor.OutputType.TimeStamp
                     )
                     marker_motion_3d = None
-                captured_at = perf_counter()
+                captured_at_ns = perf_counter_ns()
+                captured_at = captured_at_ns / 1_000_000_000
                 if frame is not None:
                     timestamp_values = np.asarray(sensor_timestamp)
                     if timestamp_values.size != 1:
@@ -209,6 +242,7 @@ class XensePhotonCamera(TactileCamera):
                     if clock_offset is None or current_offset < clock_offset:
                         clock_offset = current_offset
                     mapped_monotonic_s = sensor_timestamp + clock_offset
+                    mapped_monotonic_ns = round(mapped_monotonic_s * 1_000_000_000)
                     if (
                         last_mapped_monotonic_s is not None
                         and mapped_monotonic_s <= last_mapped_monotonic_s
@@ -247,6 +281,7 @@ class XensePhotonCamera(TactileCamera):
                             ),
                             sensor_timestamp_s=sensor_timestamp,
                             capture_monotonic_s=mapped_monotonic_s,
+                            capture_monotonic_ns=mapped_monotonic_ns,
                         )
                         self._sample_history.append(self._sample)
                         self._frame_time = captured_at
@@ -275,7 +310,13 @@ class XensePhotonCamera(TactileCamera):
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         timing = {
             "capture_monotonic_s": sample.capture_monotonic_s,
+            "capture_monotonic_ns": sample.capture_monotonic_ns,
             "sensor_timestamp_s": sample.sensor_timestamp_s,
+            "device_to_host_offset_s": (
+                None
+                if sample.sensor_timestamp_s is None
+                else sample.capture_monotonic_s - sample.sensor_timestamp_s
+            ),
         }
         if self.saves_marker_motion_3d:
             timing[self.motion_3d_feature_key] = sample.marker_motion_3d
@@ -290,7 +331,21 @@ class XensePhotonCamera(TactileCamera):
             ),
             sensor_timestamp_s=sample.sensor_timestamp_s,
             capture_monotonic_s=sample.capture_monotonic_s,
+            capture_monotonic_ns=sample.capture_monotonic_ns,
         )
+
+    def history_status(self) -> dict[str, int | float | None]:
+        with self._condition:
+            oldest = (
+                None if not self._sample_history else self._sample_history[0].capture_monotonic_s
+            )
+            return {
+                "history_first_seen_timestamp": self._sample_history.first_seen_timestamp,
+                "history_total_appended": self._sample_history.total_appended,
+                "history_eviction_count": self._sample_history.eviction_count,
+                "oldest_retained_timestamp": oldest,
+                "newest_evicted_timestamp": self._sample_history.newest_evicted_timestamp,
+            }
 
     def _latest_sample(self, timeout_ms: float) -> XensePhotonSample:
         if timeout_ms < 0 or not np.isfinite(timeout_ms):
@@ -315,56 +370,112 @@ class XensePhotonCamera(TactileCamera):
                     raise TimeoutError(f"No recent Xense frame from {self.config.serial_number}")
                 self._condition.wait(remaining)
 
-    def _nearest_sample(
+    def latest_before_sample(
         self,
         target_monotonic_s: float,
         max_skew_ms: float,
-        wait_ms: float,
+        wait_ms: float = 0.0,
     ) -> tuple[XensePhotonSample, float]:
-        """Select a buffered sample nearest to one host-clock time anchor.
+        """Select the latest buffered Photon sample at/before an anchor.
 
-        The call waits for a sample at or after the anchor before selecting, so
-        a later frame cannot silently be closer than the returned one. A sample
-        outside the explicit time budget is rejected instead of being recorded.
+        The mapped timestamp is in the recorder's ``perf_counter`` domain.
+        ``wait_ms`` remains accepted for API compatibility; post-anchor samples
+        are never eligible and are not awaited.
         """
         if not all(
             np.isfinite(value) and value >= 0
             for value in (target_monotonic_s, max_skew_ms, wait_ms)
         ):
             raise ValueError("Xense synchronization values must be finite and non-negative")
-        deadline = perf_counter() + wait_ms / 1000
         with self._condition:
-            while True:
+            if not self.is_connected or self._stop.is_set():
+                raise DeviceNotConnectedError()
+            if self._error is not None:
+                raise RuntimeError(
+                    f"Xense capture failed for {self.config.serial_number}"
+                ) from self._error
+            samples = tuple(
+                sample
+                for sample in self._sample_history
+                if sample.capture_monotonic_s <= target_monotonic_s
+            )
+            if not samples:
+                raise TimeoutError(
+                    f"No causal Xense frame at or before the synchronization anchor for "
+                    f"{self.config.serial_number}"
+                )
+            sample = max(samples, key=lambda item: item.capture_monotonic_s)
+            age_ms = (target_monotonic_s - sample.capture_monotonic_s) * 1000
+            if age_ms > max_skew_ms:
+                raise TimeoutError(
+                    f"Latest causal Xense frame for {self.config.serial_number} is "
+                    f"{age_ms:.3f} ms old; limit is {max_skew_ms:.3f} ms"
+                )
+            return self._copy_sample(sample), age_ms
+
+    def samples_between(
+        self,
+        start_monotonic_s: float,
+        end_monotonic_s: float,
+        wait_ms: float = 0.0,
+    ) -> tuple[XensePhotonSample, ...]:
+        """Return all buffered samples in ``(start_monotonic_s, end_monotonic_s]``.
+
+        A positive ``wait_ms`` waits only for a timestamp beyond ``end`` to
+        watermark the ordered stream. That future sample is never returned.
+        """
+        if not all(
+            np.isfinite(value)
+            for value in (start_monotonic_s, end_monotonic_s, wait_ms)
+        ):
+            raise ValueError("Xense window bounds must be finite")
+        if end_monotonic_s < start_monotonic_s or wait_ms < 0:
+            raise ValueError("Xense window end must be at or after its start")
+        deadline = perf_counter() + wait_ms / 1_000
+        with self._condition:
+            while wait_ms > 0 and not any(
+                sample.capture_monotonic_s > end_monotonic_s
+                for sample in self._sample_history
+            ):
                 if not self.is_connected or self._stop.is_set():
                     raise DeviceNotConnectedError()
                 if self._error is not None:
                     raise RuntimeError(
                         f"Xense capture failed for {self.config.serial_number}"
                     ) from self._error
-                samples = tuple(self._sample_history)
-                has_sample_at_or_after_anchor = any(
-                    sample.capture_monotonic_s >= target_monotonic_s for sample in samples
-                )
-                if samples and has_sample_at_or_after_anchor:
-                    sample = min(
-                        samples,
-                        key=lambda item: abs(item.capture_monotonic_s - target_monotonic_s),
-                    )
-                    skew_ms = abs(sample.capture_monotonic_s - target_monotonic_s) * 1000
-                    if skew_ms <= max_skew_ms:
-                        return self._copy_sample(sample), skew_ms
-                    raise TimeoutError(
-                        f"Nearest Xense frame for {self.config.serial_number} is "
-                        f"{skew_ms:.3f} ms from the synchronization anchor; "
-                        f"limit is {max_skew_ms:.3f} ms"
-                    )
                 remaining = deadline - perf_counter()
                 if remaining <= 0:
                     raise TimeoutError(
-                        f"No Xense frame at or after the synchronization anchor for "
-                        f"{self.config.serial_number} within {wait_ms:.3f} ms"
+                        f"Xense stream {self.config.serial_number} did not advance "
+                        f"past tactile window end within {wait_ms:.3f} ms"
                     )
                 self._condition.wait(remaining)
+            if not self.is_connected or self._stop.is_set():
+                raise DeviceNotConnectedError()
+            if self._error is not None:
+                raise RuntimeError(
+                    f"Xense capture failed for {self.config.serial_number}"
+                ) from self._error
+            history = tuple(self._sample_history)
+            first_seen = self._sample_history.first_seen_timestamp
+            newest_evicted = self._sample_history.newest_evicted_timestamp
+            if (
+                self._sample_history.eviction_count > 0
+                and first_seen is not None
+                and newest_evicted is not None
+                and first_seen <= end_monotonic_s
+                and newest_evicted > start_monotonic_s
+            ):
+                raise RuntimeError(
+                    f"Xense history for {self.config.serial_number} no longer covers "
+                    f"tactile window start {start_monotonic_s:.9f}; increase "
+                    "sync_history_size or reduce recorder stalls"
+                )
+            return tuple(
+                self._copy_sample(sample)
+                for sample in history
+                if start_monotonic_s < sample.capture_monotonic_s <= end_monotonic_s
+            )
 
     def read(self, color_mode: ColorMode | None = None) -> NDArray[Any]:
         """Read the latest image; SDK access stays on the capture thread."""
@@ -396,18 +507,22 @@ class XensePhotonCamera(TactileCamera):
             self.motion_3d_feature_key: sample.marker_motion_3d,
             "sensor_timestamp_s": sample.sensor_timestamp_s,
             "capture_monotonic_s": sample.capture_monotonic_s,
+            "capture_monotonic_ns": sample.capture_monotonic_ns,
+            "device_to_host_offset_s": (
+                sample.capture_monotonic_s - sample.sensor_timestamp_s
+            ),
         }
 
-    def async_read_with_marker_motion_3d_nearest(
+    def async_read_with_marker_motion_3d_latest_before(
         self,
         target_monotonic_s: float,
         max_skew_ms: float,
         wait_ms: float,
     ) -> tuple[NDArray[Any], dict[str, Any]]:
-        """Return a marker sample within a configured host-clock error bound."""
+        """Return the latest causal marker sample within the age bound."""
         if not self.saves_marker_motion_3d:
             raise RuntimeError("Marker3DFlow saving is disabled for this Xense camera")
-        sample, sync_offset_ms = self._nearest_sample(
+        sample, sync_offset_ms = self.latest_before_sample(
             target_monotonic_s,
             max_skew_ms,
             wait_ms,
@@ -421,9 +536,26 @@ class XensePhotonCamera(TactileCamera):
             self.motion_3d_feature_key: sample.marker_motion_3d,
             "sensor_timestamp_s": sample.sensor_timestamp_s,
             "capture_monotonic_s": sample.capture_monotonic_s,
+            "capture_monotonic_ns": sample.capture_monotonic_ns,
+            "device_to_host_offset_s": (
+                sample.capture_monotonic_s - sample.sensor_timestamp_s
+            ),
             "sync_target_monotonic_s": target_monotonic_s,
             "sync_offset_ms": sync_offset_ms,
         }
+
+    def async_read_with_marker_motion_3d_nearest(
+        self,
+        target_monotonic_s: float,
+        max_skew_ms: float,
+        wait_ms: float,
+    ) -> tuple[NDArray[Any], dict[str, Any]]:
+        """Backward-compatible alias with causal latest-before semantics."""
+        return self.async_read_with_marker_motion_3d_latest_before(
+            target_monotonic_s,
+            max_skew_ms,
+            wait_ms,
+        )
 
     def disconnect(self) -> None:
         if not self.is_connected:

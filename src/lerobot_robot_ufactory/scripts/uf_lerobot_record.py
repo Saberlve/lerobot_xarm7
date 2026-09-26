@@ -174,91 +174,304 @@ def _diagnostic_logs_enabled(robot) -> bool:
 class EpisodeSynchronization:
     """Per-episode timing sidecar, intentionally outside LeRobot features."""
 
-    def __init__(self, controller: RealtimeTeleopController | None, fps: int):
+    def __init__(
+        self,
+        controller: RealtimeTeleopController | None,
+        fps: int,
+        *,
+        dataset_root: Path | None = None,
+        episode_index: int | None = None,
+        tactile_stream_names: tuple[str, ...] = (),
+    ):
         self.controller = controller
         self.fps = fps
         self.frames: list[dict] = []
+        self.action_rows: list[dict] = []
+        self.tactile_recorder = None
+        if tactile_stream_names:
+            if dataset_root is None or episode_index is None:
+                raise ValueError(
+                    "dataset_root and episode_index are required for tactile streams"
+                )
+            from lerobot_robot_ufactory.tactile.persistence import TactileStreamRecorder
+
+            self.tactile_recorder = TactileStreamRecorder(
+                dataset_root,
+                episode_index,
+                tactile_stream_names,
+            )
 
     def add_frame(
         self,
         frame_index: int,
         state_sample_s: float,
         state_rt_receive_s: float | None,
-        action_sent_s: float,
-        camera_timing: dict,
+        action_sent_s: float | None = None,
+        camera_timing: dict | None = None,
         state_age_ms: float | None = None,
+        *,
+        action_send_start_s: float | None = None,
+        action_send_end_s: float | None = None,
+        action_index: int | None = None,
+        state_sample_ns: int | None = None,
+        state_rt_receive_ns: int | None = None,
+        action_send_start_ns: int | None = None,
+        action_send_end_ns: int | None = None,
+        tactile_window_start_s: float | None = None,
+        tactile_window_start_ns: int | None = None,
+        tactile_samples: dict[str, tuple] | None = None,
     ) -> None:
-        anchor_s = state_rt_receive_s if state_rt_receive_s is not None else state_sample_s
+        # ``action_sent_s`` was the historical send-end field. Accept it for
+        # callers outside this repository while making send-start primary.
+        if action_send_start_s is None:
+            if action_sent_s is None:
+                raise ValueError("action_send_start_s is required")
+            action_send_start_s = action_sent_s
+        if action_send_end_s is None:
+            action_send_end_s = (
+                action_send_start_s if action_sent_s is None else action_sent_s
+            )
+        if not all(
+            np.isfinite(value)
+            for value in (state_sample_s, action_send_start_s, action_send_end_s)
+        ):
+            raise ValueError("state/action timestamps must be finite")
+        if action_send_end_s < action_send_start_s:
+            raise ValueError("action send-end cannot precede send-start")
+        action_send_start_ns = int(
+            action_send_start_ns
+            if action_send_start_ns is not None
+            else round(action_send_start_s * 1_000_000_000)
+        )
+        action_send_end_ns = int(
+            action_send_end_ns
+            if action_send_end_ns is not None
+            else round(action_send_end_s * 1_000_000_000)
+        )
+        state_sample_ns = int(
+            state_sample_ns
+            if state_sample_ns is not None
+            else round(state_sample_s * 1_000_000_000)
+        )
+        state_timestamp_s = (
+            state_rt_receive_s if state_rt_receive_s is not None else state_sample_s
+        )
+        state_timestamp_ns = int(
+            state_rt_receive_ns
+            if state_rt_receive_ns is not None
+            else (
+                state_sample_ns
+                if state_rt_receive_s is None
+                else round(state_rt_receive_s * 1_000_000_000)
+            )
+        )
+        if state_timestamp_s > action_send_start_s:
+            raise AssertionError(
+                f"Future state selected: {state_timestamp_s:.9f} > "
+                f"action {action_send_start_s:.9f}"
+            )
+
+        camera_timing = camera_timing or {}
         camera_timestamps = {}
         for key, timing in camera_timing.items():
             camera_timestamp = {
                 "frame_index": timing.get("frame_index"),
-                "read_start_ns": round(timing["read_start_s"] * 1_000_000_000),
-                "read_end_ns": round(timing["read_end_s"] * 1_000_000_000),
+                "read_start_ns": (
+                    None
+                    if timing.get("read_start_s") is None
+                    else round(timing["read_start_s"] * 1_000_000_000)
+                ),
+                "read_end_ns": (
+                    None
+                    if timing.get("read_end_s") is None
+                    else round(timing["read_end_s"] * 1_000_000_000)
+                ),
             }
             if "capture_monotonic_s" in timing:
-                camera_timestamp["capture_monotonic_ns"] = round(
-                    timing["capture_monotonic_s"] * 1_000_000_000
+                capture_s = timing["capture_monotonic_s"]
+                if capture_s > action_send_start_s:
+                    raise AssertionError(
+                        f"Future camera sample selected for {key}: "
+                        f"{capture_s:.9f} > action {action_send_start_s:.9f}"
+                    )
+                camera_timestamp["capture_monotonic_ns"] = int(
+                    timing.get("capture_monotonic_ns")
+                    if timing.get("capture_monotonic_ns") is not None
+                    else round(capture_s * 1_000_000_000)
                 )
+                camera_timestamp["age_to_action_ms"] = (
+                    action_send_start_s - capture_s
+                ) * 1_000
             if "sensor_timestamp_s" in timing:
                 camera_timestamp["sensor_timestamp_s"] = timing["sensor_timestamp_s"]
+            if "device_to_host_offset_s" in timing:
+                camera_timestamp["device_to_host_offset_s"] = timing[
+                    "device_to_host_offset_s"
+                ]
             if "sync_offset_ms" in timing:
-                camera_timestamp["sync_target_monotonic_ns"] = round(
-                    timing["sync_target_monotonic_s"] * 1_000_000_000
+                camera_timestamp["sync_target_monotonic_ns"] = int(
+                    timing.get("sync_target_monotonic_ns")
+                    if timing.get("sync_target_monotonic_ns") is not None
+                    else round(timing["sync_target_monotonic_s"] * 1_000_000_000)
                 )
                 camera_timestamp["sync_offset_ms"] = timing["sync_offset_ms"]
                 camera_timestamp["sync_signed_offset_ms"] = timing.get("sync_signed_offset_ms")
                 camera_timestamp["pair_skew_ms"] = timing.get("pair_skew_ms")
             camera_timestamps[key] = camera_timestamp
+
+        tactile_timestamps = {}
+        tactile_samples = tactile_samples or {}
+        if self.tactile_recorder is not None:
+            if tactile_window_start_s is None:
+                raise ValueError("tactile_window_start_s is required for tactile streams")
+            for name in self.tactile_recorder.stream_names:
+                tactile_timestamps[name] = self.tactile_recorder.add_window(
+                    name,
+                    tactile_samples.get(name, ()),
+                    tactile_window_start_s,
+                    action_send_start_s,
+                    start_monotonic_ns=tactile_window_start_ns,
+                    end_monotonic_ns=action_send_start_ns,
+                )
+            for camera_name, timing in camera_timing.items():
+                stream_name = timing.get("tactile_stream_name")
+                if stream_name not in tactile_timestamps:
+                    continue
+                capture_s = timing.get("capture_monotonic_s")
+                if capture_s is None:
+                    continue
+                capture_ns = int(
+                    timing.get("capture_monotonic_ns")
+                    if timing.get("capture_monotonic_ns") is not None
+                    else round(capture_s * 1_000_000_000)
+                )
+                tactile_timestamps[stream_name][
+                    "representative_capture_monotonic_ns"
+                ] = capture_ns
+                tactile_timestamps[stream_name][
+                    "representative_tactile_index"
+                ] = self.tactile_recorder.representative_index(stream_name, capture_ns)
+
+        state_age_to_action_ms = (
+            action_send_start_s - state_timestamp_s
+        ) * 1_000
         self.frames.append(
             {
                 "frame_index": frame_index,
-                "state_sample_ns": round(state_sample_s * 1_000_000_000),
+                "action_index": action_index,
+                "state_sample_ns": state_sample_ns,
                 "state_rt_receive_ns": (
                     None
                     if state_rt_receive_s is None
-                    else round(state_rt_receive_s * 1_000_000_000)
+                    else state_timestamp_ns
                 ),
-                "action_send_end_ns": round(action_sent_s * 1_000_000_000),
-                "action_state_age_ms": (anchor_s - action_sent_s) * 1000,
-                "state_age_ms": state_age_ms,
+                "state_timestamp_ns": state_timestamp_ns,
+                "action_send_start_ns": action_send_start_ns,
+                "action_send_end_ns": action_send_end_ns,
+                "action_send_latency_ms": (
+                    action_send_end_s - action_send_start_s
+                ) * 1_000,
+                # Kept for readers of the older sidecar; now positive age of
+                # the selected state relative to action send-start.
+                "action_state_age_ms": state_age_to_action_ms,
+                "state_age_ms": state_age_to_action_ms,
+                "state_read_age_ms": state_age_ms,
                 "camera_timing_json": json.dumps(camera_timestamps, sort_keys=True),
+                "tactile_timing_json": json.dumps(tactile_timestamps, sort_keys=True),
             }
         )
+        if self.controller is None:
+            self.action_rows.append(
+                {
+                    "action_index": action_index,
+                    "action_send_start_ns": action_send_start_ns,
+                    "action_send_end_ns": action_send_end_ns,
+                    "command_send_start_ns": action_send_start_ns,
+                    "command_send_end_ns": action_send_end_ns,
+                    "sent_at_ns": action_send_end_ns,
+                    "send_latency_ns": action_send_end_ns - action_send_start_ns,
+                }
+            )
 
-    def write(self, dataset_root: Path, episode_index: int) -> None:
-        """Atomically publish sidecars only after the dataset episode is saved."""
+    def write(
+        self,
+        dataset_root: Path,
+        episode_index: int,
+        *,
+        defer_commit: bool = False,
+    ) -> None:
+        """Prepare then transactionally publish tactile streams and their sidecars."""
         import pyarrow as pa
         import pyarrow.parquet as pq
 
         output_dir = dataset_root / "timestamps"
-        output_dir.mkdir(parents=True, exist_ok=True)
         base = f"episode_{episode_index:06d}"
-        action_rows = self.controller.action_timings() if self.controller is not None else []
-        files = (
-            (output_dir / f"{base}.parquet", self.frames),
-            (output_dir / f"{base}_actions.parquet", action_rows),
+        action_rows = (
+            self.controller.action_timings()
+            if self.controller is not None
+            else self.action_rows
         )
-        for path, rows in files:
-            # Episodes with no action/frame are not saveable, but preserve a
-            # valid empty table if a future recorder permits one.
-            table = pa.Table.from_pylist(rows)
-            temporary = path.with_suffix(path.suffix + ".tmp")
-            pq.write_table(table, temporary)
-            os.replace(temporary, path)
+        if self.tactile_recorder is not None:
+            self.tactile_recorder.prepare(episode_index)
+            staging_dir = self.tactile_recorder.staging_root / "timestamps"
+        else:
+            staging_dir = output_dir / f".staging_{base}_{uuid4().hex}"
+        staging_dir.mkdir(parents=True, exist_ok=False)
 
-        summary_path = output_dir / f"{base}_summary.json"
-        temporary = summary_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(self.statistics(), indent=2) + "\n")
-        os.replace(temporary, summary_path)
-        csv_path = output_dir / f"{base}.csv"
-        temporary = csv_path.with_suffix(".csv.tmp")
-        with temporary.open("w", newline="") as handle:
+        frame_path = staging_dir / f"{base}.parquet"
+        action_path = staging_dir / f"{base}_actions.parquet"
+        pq.write_table(pa.Table.from_pylist(self.frames), frame_path)
+        pq.write_table(pa.Table.from_pylist(action_rows), action_path)
+        summary_path = staging_dir / f"{base}_summary.json"
+        summary_path.write_text(json.dumps(self.statistics(), indent=2) + "\n")
+        csv_path = staging_dir / f"{base}.csv"
+        with csv_path.open("w", newline="") as handle:
             if self.frames:
                 writer = csv.DictWriter(handle, fieldnames=list(self.frames[0]))
                 writer.writeheader()
                 writer.writerows(self.frames)
-        os.replace(temporary, csv_path)
+        sidecar_paths = (frame_path, action_path, summary_path, csv_path)
+
+        if self.tactile_recorder is None:
+            if defer_commit:
+                raise ValueError("Deferred synchronization commit requires tactile streams")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                for path in sidecar_paths:
+                    os.replace(path, output_dir / path.name)
+            finally:
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir)
+            return
+
+        commit_path = staging_dir / f"{base}_commit.json"
+        commit_path.write_text(
+            json.dumps(
+                {
+                    "transaction_id": self.tactile_recorder.transaction_id,
+                    "episode_index": episode_index,
+                    "tactile_streams": list(self.tactile_recorder.stream_names),
+                    "timestamp_files": [path.name for path in sidecar_paths],
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        self.tactile_recorder.publish_episode(
+            episode_index,
+            [(path, output_dir / path.name) for path in sidecar_paths],
+            commit_marker=(commit_path, output_dir / commit_path.name),
+            defer_commit_marker=defer_commit,
+        )
+
+    def commit(self) -> None:
+        if self.tactile_recorder is not None:
+            self.tactile_recorder.confirm_publish(dataset_saved=True)
+
+    def discard(self) -> None:
+        """Discard staged auxiliary data for an episode that will not be saved."""
+        if self.tactile_recorder is not None:
+            self.tactile_recorder.discard()
 
     def statistics(self) -> dict:
         def stats(values):
@@ -270,38 +483,64 @@ class EpisodeSynchronization:
 
         cameras = {}
         pairs = []
+        tactile_counts = {}
+        tactile_spans = {}
         for row in self.frames:
             timings = json.loads(row["camera_timing_json"])
             for name, timing in timings.items():
-                cameras.setdefault(name, []).append(timing.get("sync_offset_ms"))
+                cameras.setdefault(name, []).append(timing.get("age_to_action_ms"))
             pair_values = [t["pair_skew_ms"] for t in timings.values() if t.get("pair_skew_ms") is not None]
             if pair_values:
                 pairs.append(max(pair_values))
+            for name, timing in json.loads(row["tactile_timing_json"]).items():
+                tactile_counts.setdefault(name, []).append(timing["frame_count"])
+                tactile_spans.setdefault(name, []).append(timing["span_ms"])
         return {
             "frames": len(self.frames),
-            "timing_basis": "host receipt, not exposure; gripper feedback is separately sampled/cached",
+            "timing_basis": (
+                "action send-start anchor; ordinary camera and xArm times are host receipt, "
+                "not exposure; Photon device time is mapped into the host monotonic domain; "
+                "GELLO raw history is not a synchronized dataset observation"
+            ),
             "action_state_age_ms": stats([r["action_state_age_ms"] for r in self.frames]),
             "state_age_ms": stats([r["state_age_ms"] for r in self.frames]),
+            "camera_action_age_ms": {name: stats(values) for name, values in cameras.items()},
+            # Backward-compatible key; values now have causal action-age semantics.
             "camera_state_abs_offset_ms": {name: stats(values) for name, values in cameras.items()},
             "camera_pair_skew_ms": stats(pairs),
+            "tactile_frame_count": {name: stats(values) for name, values in tactile_counts.items()},
+            "tactile_span_ms": {name: stats(values) for name, values in tactile_spans.items()},
+            "camera_future_violation_count": 0,
+            "state_future_violation_count": 0,
+            "tactile_writer": (
+                None
+                if self.tactile_recorder is None
+                else self.tactile_recorder.status()
+            ),
         }
 
     def summary(self) -> str:
         if not self.frames:
             return "synchronization: no recorded frames"
-        action_ages = [row["action_state_age_ms"] for row in self.frames]
+        state_ages = [row["state_age_ms"] for row in self.frames]
         camera_ages: list[float] = []
+        tactile_counts = []
         for row in self.frames:
-            anchor_ns = row["state_rt_receive_ns"] or row["state_sample_ns"]
             for timing in json.loads(row["camera_timing_json"]).values():
-                camera_ages.append((timing["read_end_ns"] - anchor_ns) / 1e6)
-        action_ages.sort()
-        p95 = action_ages[min(len(action_ages) - 1, int(len(action_ages) * 0.95))]
-        camera_text = "n/a" if not camera_ages else f"{max(camera_ages):.1f} ms max"
+                if timing.get("age_to_action_ms") is not None:
+                    camera_ages.append(timing["age_to_action_ms"])
+            tactile_counts.extend(
+                timing["frame_count"]
+                for timing in json.loads(row["tactile_timing_json"]).values()
+            )
+        state_ages.sort()
+        p95 = state_ages[min(len(state_ages) - 1, int(len(state_ages) * 0.95))]
+        camera_text = "n/a" if not camera_ages else f"{max(camera_ages):.1f} ms max age"
+        tactile_text = "n/a" if not tactile_counts else f"{sum(tactile_counts)} raw frames"
         return (
             f"synchronization: {len(self.frames)} frames, "
-            f"action-state p95={p95:.1f} ms, camera-after-state={camera_text}; "
-            f"capture errors={json.dumps(self.statistics()['camera_state_abs_offset_ms'])}, "
+            f"state age p95={p95:.1f} ms, camera={camera_text}, tactile={tactile_text}; "
+            f"camera ages={json.dumps(self.statistics()['camera_action_age_ms'])}, "
             f"pair errors={json.dumps(self.statistics()['camera_pair_skew_ms'])}"
         )
 
@@ -421,6 +660,16 @@ class AsyncEpisodeSaver:
                 print(f'[Async] saving episode {episode_index}')
                 try:
                     validate_episode_images(self.dataset, episode_buffer)
+                    has_tactile_transaction = (
+                        synchronization is not None
+                        and synchronization.tactile_recorder is not None
+                    )
+                    if has_tactile_transaction:
+                        synchronization.write(
+                            Path(self.dataset.root),
+                            episode_index,
+                            defer_commit=True,
+                        )
                     self.dataset.save_episode(episode_data=episode_buffer)
                 except TypeError as exc:
                     if "episode_data" in str(exc):
@@ -428,13 +677,21 @@ class AsyncEpisodeSaver:
                             "--async-save requires LeRobotDataset.save_episode(episode_data=...)."
                         ) from exc
                     raise
+                if has_tactile_transaction:
+                    synchronization.commit()
                 self._delete_saved_image_dirs(episode_index)
-                if synchronization is not None:
+                if synchronization is not None and not has_tactile_transaction:
                     synchronization.write(Path(self.dataset.root), episode_index)
+                if synchronization is not None:
                     print(f"[Async] {synchronization.summary()}")
                 print(f'[Async] save episode {episode_index} finish')
             except BaseException as exc:
                 self._exception = exc
+                if item is not self._STOP and synchronization is not None:
+                    try:
+                        synchronization.discard()
+                    except BaseException:
+                        logging.exception("Failed to discard tactile staging after save failure")
                 print(f'[Async] episode {episode_index} save failed, {exc}')
             finally:
                 self._queue.task_done()
@@ -455,6 +712,51 @@ class AsyncEpisodeSaver:
     def _raise_if_failed(self):
         if self._exception is not None:
             raise RuntimeError("Async episode save failed.") from self._exception
+
+
+class _EpisodeSynchronizationOwner:
+    """Own every uncommitted sidecar until save code explicitly transfers it."""
+
+    def __init__(self):
+        self._owned: dict[int, EpisodeSynchronization] = {}
+
+    def __enter__(self):
+        return self
+
+    def track(self, synchronization: EpisodeSynchronization | None):
+        if synchronization is not None:
+            self._owned[id(synchronization)] = synchronization
+        return synchronization
+
+    def release(self, synchronization: EpisodeSynchronization | None) -> None:
+        if synchronization is not None:
+            self._owned.pop(id(synchronization), None)
+
+    def discard(self, synchronization: EpisodeSynchronization | None) -> None:
+        if synchronization is None:
+            return
+        try:
+            synchronization.discard()
+        finally:
+            self.release(synchronization)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        errors = []
+        for synchronization in tuple(self._owned.values()):
+            try:
+                synchronization.discard()
+            except BaseException as exc:
+                errors.append(exc)
+        self._owned.clear()
+        if errors and exc_type is None:
+            raise errors[0]
+        if errors:
+            error = errors[0]
+            logging.error(
+                "Failed to discard uncommitted tactile staging during exception cleanup",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+        return False
 
 
 def _disconnect_recording_resources(robot, teleop, listener):
@@ -524,6 +826,7 @@ def record_loop(
     manual_gripper_speed: float = 0.5,
     web_preview: RecordingWebPreview | None = None,
     synchronize: bool = True,
+    synchronization_owner: _EpisodeSynchronizationOwner | None = None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -569,10 +872,17 @@ def record_loop(
 
     realtime_controller = None
     episode_synchronization = None
+    tactile_stream_names = ()
+    if dataset is not None:
+        get_tactile_stream_names = getattr(robot, "tactile_stream_names", None)
+        if callable(get_tactile_stream_names):
+            tactile_stream_names = tuple(get_tactile_stream_names())
+    record_auxiliary_timing = synchronize or bool(tactile_stream_names)
     diagnostic_logs_enabled = _diagnostic_logs_enabled(robot)
     sync_log_file = None
     sync_log_writer = None
     sync_frame_index = 0
+    record_loop_succeeded = False
     try:
         if (
             policy is None
@@ -587,11 +897,9 @@ def record_loop(
                 robot_action_processor=robot_action_processor,
                 fps=int(teleop.config.realtime_control_fps),
                 initial_observation=last_robot_cmd,
-                record_timing=synchronize,
+                record_timing=record_auxiliary_timing,
             )
             realtime_controller.start()
-            if synchronize:
-                episode_synchronization = EpisodeSynchronization(realtime_controller, fps)
             if diagnostic_logs_enabled:
                 sync_log_dir = Path("logs")
                 sync_log_dir.mkdir(parents=True, exist_ok=True)
@@ -604,9 +912,15 @@ def record_loop(
                     sync_log_file,
                     fieldnames=[
                         "frame",
+                        "action_index",
                         "state_sample_s",
                         "action_sent_s",
+                        "action_send_start_s",
+                        "action_send_end_s",
+                        "action_send_latency_ms",
                         "action_age_ms",
+                        "state_age_ms",
+                        "tactile_counts",
                         "observation_end_s",
                         "state_to_observation_end_ms",
                         "camera_timings",
@@ -625,11 +939,23 @@ def record_loop(
                 sync_log_writer.writeheader()
                 logging.info("Realtime dataset synchronization log: %s", sync_log_path)
 
-        if synchronize and episode_synchronization is None:
-            episode_synchronization = EpisodeSynchronization(None, fps)
+        if record_auxiliary_timing:
+            episode_synchronization = EpisodeSynchronization(
+                realtime_controller,
+                fps,
+                dataset_root=(None if dataset is None else Path(dataset.root)),
+                episode_index=(
+                    None if dataset is None else _current_episode_index(dataset)
+                ),
+                tactile_stream_names=tactile_stream_names,
+            )
 
         timestamp = 0
-        start_episode_t = time.perf_counter()
+        start_episode_ns = time.perf_counter_ns()
+        start_episode_t = start_episode_ns / 1_000_000_000
+        previous_tactile_anchor_s = start_episode_t
+        previous_tactile_anchor_ns = start_episode_ns
+        last_consumed_action_index = -1
         previous_loop_start_t = None
         while timestamp < control_time_s:
             start_loop_t = time.perf_counter()
@@ -646,27 +972,89 @@ def record_loop(
 
             # Get robot observation
             if realtime_controller is not None:
-                obs = robot.get_realtime_observation()
+                first_tick = last_consumed_action_index < 0
+                action_sample = realtime_controller.latest_action_sample(
+                    last_consumed_action_index,
+                    not_before_s=(
+                        start_episode_t
+                        if first_tick
+                        else None
+                    ),
+                    # The first tick tolerates the episode-start stall (blocking
+                    # first arm move, video encoder spin-up); the causal
+                    # constraint above is unchanged, so a TimeoutError here
+                    # still means no post-episode-start action existed.
+                    wait_s=(
+                        1.0
+                        if first_tick
+                        else max(1.0 / fps, realtime_controller.period_s * 2)
+                    ),
+                )
+                if first_tick:
+                    # The first command's send-start is stamped before a
+                    # blocking first move (mode/state switch plus the initial
+                    # wait=True servo command), so the sample only becomes
+                    # visible once that move finishes — long after its anchor.
+                    # State and tactile pairing enforce ~70 ms max ages, so
+                    # such a stale anchor is unusable. The staleness only
+                    # materializes while waiting above, so re-check here and
+                    # skip stale first commands like any other intermediate
+                    # action until a fresh anchor appears.
+                    first_tick_deadline = time.perf_counter() + 1.0
+                    while (
+                        action_sample.send_start_s
+                        < time.perf_counter() - realtime_controller.period_s
+                    ):
+                        remaining_s = first_tick_deadline - time.perf_counter()
+                        if remaining_s <= 0:
+                            raise TimeoutError(
+                                "No fresh action anchor within the first-tick budget"
+                            )
+                        action_sample = realtime_controller.latest_action_sample(
+                            action_sample.action_index,
+                            not_before_s=(
+                                time.perf_counter() - realtime_controller.period_s
+                            ),
+                            wait_s=remaining_s,
+                        )
+                last_consumed_action_index = action_sample.action_index
+                matched_action = dict(action_sample.command)
+                action_index = action_sample.action_index
+                action_send_start_s = action_sample.send_start_s
+                action_send_end_s = action_sample.send_end_s
+                action_send_start_ns = getattr(
+                    action_sample,
+                    "send_start_ns",
+                    round(action_send_start_s * 1_000_000_000),
+                )
+                action_send_end_ns = getattr(
+                    action_sample,
+                    "send_end_ns",
+                    round(action_send_end_s * 1_000_000_000),
+                )
+                # Action send-start, not the observation call time, drives all
+                # realtime state/camera selection.
+                obs = robot.get_realtime_observation(action_send_start_s)
                 observation_monotonic_s = getattr(robot, "_last_realtime_observation_monotonic_s", None)
                 if observation_monotonic_s is None:
-                    observation_monotonic_s = time.perf_counter()
+                    raise RuntimeError(
+                        "Realtime robot did not expose its selected state timestamp"
+                    )
                 sync_timing = getattr(robot, "_last_realtime_sync_timing", {})
+                state_sample_ns = sync_timing.get("state_sample_ns")
                 state_rt_receive_s = sync_timing.get("state_rt_receive_s")
+                state_rt_receive_ns = sync_timing.get("state_rt_receive_ns")
                 state_anchor_s = state_rt_receive_s or observation_monotonic_s
                 realtime_controller.update_observation(obs)
-                if diagnostic_logs_enabled:
-                    matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
-                        state_anchor_s
-                    )
-                else:
-                    matched_action, matched_action_sent_s = realtime_controller.action_sample_at(
-                        state_anchor_s
-                    )
             else:
+                action_sample = None
                 obs = robot.get_observation()
                 sync_timing = getattr(robot, "_last_observation_sync_timing", {})
                 observation_monotonic_s = sync_timing.get("state_sample_s", time.perf_counter())
+                state_sample_ns = sync_timing.get("state_sample_ns")
                 state_rt_receive_s = sync_timing.get("state_rt_receive_s")
+                state_rt_receive_ns = sync_timing.get("state_rt_receive_ns")
+                state_anchor_s = state_rt_receive_s or observation_monotonic_s
 
             # Applies a pipeline to the raw robot observation, default is IdentityProcessor
             obs_processed = robot_observation_processor(obs)
@@ -770,8 +1158,12 @@ def record_loop(
             # so action actually sent is saved in the dataset. action = postprocessor.process(action)
             # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
             if realtime_controller is None:
+                action_send_start_ns = time.perf_counter_ns()
                 _sent_action = robot.send_action(robot_action_to_send)
-                matched_action_sent_s = time.perf_counter()
+                action_send_end_ns = time.perf_counter_ns()
+                action_send_start_s = action_send_start_ns / 1_000_000_000
+                action_send_end_s = action_send_end_ns / 1_000_000_000
+                action_index = sync_frame_index
             else:
                 _sent_action = matched_action
             # Robots may clamp or otherwise sanitize a command before sending it.
@@ -782,6 +1174,14 @@ def record_loop(
             convert_action = getattr(robot, "convert_action_for_recording", None)
             if convert_action is not None:
                 action_values = convert_action(action_values)
+
+            tactile_samples = {}
+            get_tactile_window = getattr(robot, "get_tactile_samples_between", None)
+            if tactile_stream_names and callable(get_tactile_window):
+                tactile_samples = get_tactile_window(
+                    previous_tactile_anchor_s,
+                    action_send_start_s,
+                )
 
             # Write to dataset
             if dataset is not None:
@@ -796,10 +1196,22 @@ def record_loop(
                     frame_index=sync_frame_index,
                     state_sample_s=observation_monotonic_s,
                     state_rt_receive_s=state_rt_receive_s,
-                    action_sent_s=matched_action_sent_s,
                     camera_timing=sync_timing.get("camera", {}),
                     state_age_ms=sync_timing.get("state_age_ms"),
+                    action_send_start_s=action_send_start_s,
+                    action_send_end_s=action_send_end_s,
+                    action_index=action_index,
+                    state_sample_ns=state_sample_ns,
+                    state_rt_receive_ns=state_rt_receive_ns,
+                    action_send_start_ns=action_send_start_ns,
+                    action_send_end_ns=action_send_end_ns,
+                    tactile_window_start_s=previous_tactile_anchor_s,
+                    tactile_window_start_ns=previous_tactile_anchor_ns,
+                    tactile_samples=tactile_samples,
                 )
+
+            previous_tactile_anchor_s = action_send_start_s
+            previous_tactile_anchor_ns = action_send_start_ns
 
             if sync_log_writer is not None:
                 observation_end_s = getattr(
@@ -812,9 +1224,18 @@ def record_loop(
                 sync_log_writer.writerow(
                     {
                         "frame": sync_frame_index,
+                        "action_index": action_index,
                         "state_sample_s": f"{observation_monotonic_s:.9f}",
-                        "action_sent_s": f"{matched_action_sent_s:.9f}",
-                        "action_age_ms": f"{(state_anchor_s - matched_action_sent_s) * 1000:.3f}",
+                        # Legacy column now follows the primary send-start anchor.
+                        "action_sent_s": f"{action_send_start_s:.9f}",
+                        "action_send_start_s": f"{action_send_start_s:.9f}",
+                        "action_send_end_s": f"{action_send_end_s:.9f}",
+                        "action_send_latency_ms": f"{(action_send_end_s - action_send_start_s) * 1000:.3f}",
+                        "action_age_ms": f"{(action_send_start_s - state_anchor_s) * 1000:.3f}",
+                        "state_age_ms": f"{(action_send_start_s - state_anchor_s) * 1000:.3f}",
+                        "tactile_counts": repr(
+                            {name: len(samples) for name, samples in tactile_samples.items()}
+                        ),
                         "observation_end_s": f"{observation_end_s:.9f}",
                         "state_to_observation_end_ms": f"{(observation_end_s - observation_monotonic_s) * 1000:.3f}",
                         "camera_timings": repr(camera_timings),
@@ -845,6 +1266,9 @@ def record_loop(
 
             timestamp = time.perf_counter() - start_episode_t
 
+        record_loop_succeeded = True
+        if synchronization_owner is not None:
+            synchronization_owner.track(episode_synchronization)
     finally:
         try:
             if realtime_controller is not None:
@@ -852,6 +1276,8 @@ def record_loop(
         finally:
             if sync_log_file is not None:
                 sync_log_file.close()
+            if not record_loop_succeeded and episode_synchronization is not None:
+                episode_synchronization.discard()
     return episode_synchronization
 
 
@@ -1058,6 +1484,11 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
         )
 
     dataset._offline_mesh_fields = offline_mesh_fields
+    # A previous crash may leave only private transaction directories. Recover
+    # an interrupted publish when a journal exists, then remove stale staging.
+    from lerobot_robot_ufactory.tactile.persistence import cleanup_stale_tactile_staging
+
+    cleanup_stale_tactile_staging(Path(dataset.root))
 
     # Load pretrained policy
     policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
@@ -1189,9 +1620,10 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     if async_episode_saver is not None:
         print('Async episode saving is enabled.')
 
+    episode_owner = _EpisodeSynchronizationOwner()
     with _RecordingCleanup(
         robot, teleop, listener, async_episode_saver, web_preview
-    ), VideoEncodingManager(dataset):
+    ), VideoEncodingManager(dataset), episode_owner:
         # num_episodes is a dataset-wide limit.  Count existing episodes so a
         # resumed recording cannot exceed it by recording another full batch.
         recorded_episodes = dataset.num_episodes
@@ -1246,10 +1678,13 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                     manual_gripper_speed=getattr(cfg.robot, "manual_gripper_speed", 0.5),
                     web_preview=web_preview,
                     synchronize=cfg.synchronize,
+                    synchronization_owner=episode_owner,
                 )
+                episode_owner.track(episode_synchronization)
             else:
                 continue
             if events['stop_recording']:
+                episode_owner.discard(episode_synchronization)
                 break
             if events["rerecord_episode"]:
                 log_say("Re-record episode", cfg.play_sounds)
@@ -1257,6 +1692,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                 events["exit_early"] = False
                 if is_uf_teleop:
                     teleop.set_teleop_enabled(False)
+                episode_owner.discard(episode_synchronization)
                 episode_buffer = _get_episode_buffer(dataset)
                 if _episode_buffer_size(episode_buffer) > 0:
                     if async_episode_saver is not None:
@@ -1279,30 +1715,49 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                 if is_uf_teleop:
                     teleop.set_teleop_enabled(False)
                 if async_episode_saver is None:
-                    validate_episode_images(dataset, _get_episode_buffer(dataset))
-                    if cfg.offline_mesh3dflow:
-                        episode_buffer = _get_episode_buffer(dataset)
-                        next_episode_buffer = _create_next_episode_buffer(
-                            dataset, episode_buffer
-                        )
-                        _set_episode_buffer(dataset, next_episode_buffer)
-                        deferred_offline_episodes.append(
-                            (episode_index, episode_buffer, episode_synchronization)
-                        )
-                        log_say(
-                            f"[Deferred] Save episode {episode_index} after recording",
-                            cfg.play_sounds,
-                        )
-                    else:
-                        dataset.save_episode()
-                        if episode_synchronization is not None:
-                            episode_synchronization.write(Path(dataset.root), episode_index)
-                            log_say(episode_synchronization.summary(), cfg.play_sounds)
-                        log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
+                    try:
+                        validate_episode_images(dataset, _get_episode_buffer(dataset))
+                        if cfg.offline_mesh3dflow:
+                            episode_buffer = _get_episode_buffer(dataset)
+                            next_episode_buffer = _create_next_episode_buffer(
+                                dataset, episode_buffer
+                            )
+                            _set_episode_buffer(dataset, next_episode_buffer)
+                            deferred_offline_episodes.append(
+                                (episode_index, episode_buffer, episode_synchronization)
+                            )
+                            log_say(
+                                f"[Deferred] Save episode {episode_index} after recording",
+                                cfg.play_sounds,
+                            )
+                        else:
+                            has_tactile_transaction = (
+                                episode_synchronization is not None
+                                and episode_synchronization.tactile_recorder is not None
+                            )
+                            if has_tactile_transaction:
+                                episode_synchronization.write(
+                                    Path(dataset.root),
+                                    episode_index,
+                                    defer_commit=True,
+                                )
+                            dataset.save_episode()
+                            if has_tactile_transaction:
+                                episode_synchronization.commit()
+                            elif episode_synchronization is not None:
+                                episode_synchronization.write(Path(dataset.root), episode_index)
+                            if episode_synchronization is not None:
+                                log_say(episode_synchronization.summary(), cfg.play_sounds)
+                                episode_owner.release(episode_synchronization)
+                            log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
+                    except BaseException:
+                        episode_owner.discard(episode_synchronization)
+                        raise
                 else:
                     queued_episode_index = async_episode_saver.submit_current_episode(
                         episode_synchronization
                     )
+                    episode_owner.release(episode_synchronization)
                     if queued_episode_index is not None:
                         log_say(f"[Queued] Save episode {queued_episode_index}", cfg.play_sounds)
 
@@ -1339,19 +1794,37 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                     ordinal,
                     total,
                 )
-                compute_episode_mesh(
-                    dataset,
-                    tactile_cameras,
-                    runtime_dir,
-                    episode_index,
-                    episode_buffer=episode_buffer,
-                )
-                dataset.save_episode(episode_data=episode_buffer)
-                discard_episode_images(dataset, episode_index)
-                if synchronization is not None:
-                    synchronization.write(Path(dataset.root), episode_index)
-                    log_say(synchronization.summary(), cfg.play_sounds)
-                log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
+                try:
+                    compute_episode_mesh(
+                        dataset,
+                        tactile_cameras,
+                        runtime_dir,
+                        episode_index,
+                        episode_buffer=episode_buffer,
+                    )
+                    has_tactile_transaction = (
+                        synchronization is not None
+                        and synchronization.tactile_recorder is not None
+                    )
+                    if has_tactile_transaction:
+                        synchronization.write(
+                            Path(dataset.root),
+                            episode_index,
+                            defer_commit=True,
+                        )
+                    dataset.save_episode(episode_data=episode_buffer)
+                    if has_tactile_transaction:
+                        synchronization.commit()
+                    discard_episode_images(dataset, episode_index)
+                    if synchronization is not None and not has_tactile_transaction:
+                        synchronization.write(Path(dataset.root), episode_index)
+                    if synchronization is not None:
+                        log_say(synchronization.summary(), cfg.play_sounds)
+                        episode_owner.release(synchronization)
+                    log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
+                except BaseException:
+                    episode_owner.discard(synchronization)
+                    raise
 
     print("\n********** Episode Record Loop Exit **********")
 

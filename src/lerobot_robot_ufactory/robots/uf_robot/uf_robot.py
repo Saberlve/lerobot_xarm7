@@ -5,6 +5,7 @@ import math
 import logging
 import struct
 import numpy as np
+from collections import deque
 from datetime import datetime
 from enum import IntEnum
 from dataclasses import dataclass
@@ -55,6 +56,14 @@ G2_EXTERNAL_REPORT_SIZE = struct.calcsize(G2_EXTERNAL_REPORT_FORMAT)
 G2_EXTERNAL_REPORT_END = G2_EXTERNAL_REPORT_OFFSET + G2_EXTERNAL_REPORT_SIZE
 G2_MONITOR_STARTUP_DELAY_S = 1.0
 
+
+def _perf_counter_ns() -> int:
+    """Use the integer clock, with a fallback for deterministic test clocks."""
+    clock = getattr(time, "perf_counter_ns", None)
+    if callable(clock):
+        return clock()
+    return round(time.perf_counter() * 1_000_000_000)
+
 CARTESIAN_OBS_KEYS = [
     "pose.x", "pose.y", "pose.z", "pose.rx", "pose.ry", "pose.rz",
     # un-comment if you need more features below:
@@ -104,6 +113,19 @@ class G2CurrentSample:
     stale: bool
     reason: str | None
     error: str | None
+
+
+@dataclass(frozen=True)
+class TimestampedStateSample:
+    """One decoded xArm RT report in the host ``perf_counter`` domain."""
+
+    capture_monotonic_s: float
+    joint_positions: tuple[float, ...]
+    joint_velocities: tuple[float, ...]
+    tcp_pose: tuple[float, ...]
+    tcp_velocity: tuple[float, ...]
+    gripper_position: float | None
+    capture_monotonic_ns: int | None = None
 
 
 def _decode_g2_external_device_report(data: bytes) -> G2ExternalDeviceReport | None:
@@ -184,6 +206,7 @@ class UFRobot(Robot, Thread):
 
         self._cmd_cnt = 0
         self._last_gripper_command = None
+        self._gripper_command_history = deque(maxlen=self.config.sync_history_size)
         self._last_gripper_command_attempt_s = float("-inf")
         self._last_logged_controller_error = 0
 
@@ -211,6 +234,8 @@ class UFRobot(Robot, Thread):
         self._rt_report_normal = False
         self._update_lock = Lock()
         self._last_rt_report_monotonic_s = None
+        self._last_rt_report_monotonic_ns = None
+        self._rt_state_history = deque(maxlen=self.config.sync_history_size)
         self._last_realtime_sync_timing = {}
         self._realtime_camera_frame_index = {key: 0 for key in self.cameras}
         self._gripper_current_monitor_requested = bool(config.gripper_current_monitor)
@@ -478,15 +503,36 @@ class UFRobot(Robot, Thread):
             key: camera if hasattr(camera, "sync_samples") else self._rgb_sync_buffers[key]
             for key, camera in self.cameras.items()
         }
+        # Photon has an independent action-interval API and is not fed through
+        # the ordinary RGB joint selector. Its single dataset image remains a
+        # causal compatibility view; the full interval is saved separately.
+        rgb_sources = {
+            key: source for key, source in sources.items()
+            if not hasattr(source, "samples_between")
+        }
         selected = select_synchronized_samples(
-            sources,
+            rgb_sources,
             target_monotonic_s,
             self.config.sync_max_skew_ms,
             self.config.sync_pair_max_skew_ms,
             self.config.sync_wait_ms,
         )
+        for key, source in sources.items():
+            if not hasattr(source, "samples_between"):
+                continue
+            sample, _age_ms = source.latest_before_sample(
+                target_monotonic_s,
+                self.config.sync_max_skew_ms,
+                self.config.sync_wait_ms,
+            )
+            selected[key] = sample
         result = {}
         for key, sample in selected.items():
+            if sample.capture_monotonic_s > target_monotonic_s:
+                raise AssertionError(
+                    f"Future camera sample selected for {key}: "
+                    f"{sample.capture_monotonic_s:.9f} > {target_monotonic_s:.9f}"
+                )
             frame, timing = sources[key].export_sync_sample(sample)
             signed_offset_ms = (sample.capture_monotonic_s - target_monotonic_s) * 1_000
             timing.update(
@@ -494,8 +540,66 @@ class UFRobot(Robot, Thread):
                 sync_offset_ms=abs(signed_offset_ms),
                 sync_signed_offset_ms=signed_offset_ms,
             )
+            if hasattr(sources[key], "samples_between"):
+                timing["tactile_stream_name"] = f"{self.prefix}{key}"
             result[key] = frame, timing
         return result
+
+    def tactile_stream_names(self) -> tuple[str, ...]:
+        """Return raw tactile sidecar names, including a multi-arm prefix."""
+        return tuple(
+            f"{self.prefix}{key}"
+            for key, camera in self.cameras.items()
+            if hasattr(camera, "samples_between")
+        )
+
+    def get_tactile_samples_between(
+        self,
+        start_monotonic_s: float,
+        end_monotonic_s: float,
+    ) -> dict[str, tuple]:
+        """Return each tactile sensor's independent ``(start, end]`` window."""
+        result = {}
+        for key, camera in self.cameras.items():
+            if hasattr(camera, "samples_between"):
+                result[f"{self.prefix}{key}"] = camera.samples_between(
+                    start_monotonic_s,
+                    end_monotonic_s,
+                    self.config.sync_wait_ms,
+                )
+        return result
+
+    def latest_state_before(
+        self,
+        target_monotonic_s: float,
+        max_age_ms: float | None = None,
+    ) -> TimestampedStateSample:
+        """Return the latest xArm RT state at/before a host-clock anchor."""
+        limit_ms = self.config.sync_max_skew_ms if max_age_ms is None else max_age_ms
+        if not math.isfinite(target_monotonic_s) or target_monotonic_s < 0:
+            raise ValueError("state target timestamp must be finite and non-negative")
+        if not math.isfinite(limit_ms) or limit_ms < 0:
+            raise ValueError("state max age must be finite and non-negative")
+        with self._update_lock:
+            sample = next(
+                (
+                    item
+                    for item in reversed(self._rt_state_history)
+                    if item.capture_monotonic_s <= target_monotonic_s
+                ),
+                None,
+            )
+        if sample is None:
+            raise TimeoutError("No causal xArm RT state at or before the action anchor")
+        age_ms = (target_monotonic_s - sample.capture_monotonic_s) * 1_000
+        if age_ms > limit_ms:
+            raise TimeoutError(
+                f"Latest causal xArm RT state is {age_ms:.3f} ms old; "
+                f"limit is {limit_ms:.3f} ms"
+            )
+        if sample.capture_monotonic_s > target_monotonic_s:
+            raise AssertionError("Future xArm RT state selected")
+        return sample
 
     def _camera_read_worker(self) -> None:
         """Prefetch synchronized camera frames and resize them off the control loop."""
@@ -1145,7 +1249,9 @@ class UFRobot(Robot, Thread):
         if move_to_open:
             self._gripper_param.grippos = self._gripper_param.open_pos
             self._gripper_param.gripper_norm = 0.0
-            self._last_gripper_command = 0.0
+            with self._update_lock:
+                self._last_gripper_command = 0.0
+                self._gripper_command_history.append((time.perf_counter(), 0.0))
 
     def calibrate(self) -> None:
         self._is_calibrated = True
@@ -1160,8 +1266,10 @@ class UFRobot(Robot, Thread):
         before_read_t = time.perf_counter() if logs_enabled else None
         if self._control_space == "joint":
             code, states = self.real_arm.get_joint_states(is_radian=True, num=3)
-            state_sample_s = time.perf_counter()
+            state_sample_ns = _perf_counter_ns()
+            state_sample_s = state_sample_ns / 1_000_000_000
             state_rt_receive_s = None
+            state_rt_receive_ns = None
             pos_list = states[0].copy()
             obs_dict = {f"{self.prefix}J{k+1}.pos": pos_list[k] for k in range(self._dof)}
             if self._jnt_obs_has_vel:
@@ -1174,8 +1282,10 @@ class UFRobot(Robot, Thread):
             with self._update_lock:
                 pos_list = self.rt_actual_tcp_pose.copy()
                 vel_list = self.rt_actual_tcp_speed.copy()
-                state_sample_s = time.perf_counter()
+                state_sample_ns = _perf_counter_ns()
+                state_sample_s = state_sample_ns / 1_000_000_000
                 state_rt_receive_s = self._last_rt_report_monotonic_s
+                state_rt_receive_ns = self._last_rt_report_monotonic_ns
                 # pos_cmd_list = self.rt_cmd_tcp_pose.copy()
                 # vel_cmd_list = self.rt_cmd_tcp_vel.copy()
                 # jpos_fbk_list = self.rt_actual_joint_pos.copy()
@@ -1253,18 +1363,26 @@ class UFRobot(Robot, Thread):
         self._validate_camera_pair_skew(camera_timing)
         self._last_observation_sync_timing = {
             "state_sample_s": state_sample_s,
+            "state_sample_ns": state_sample_ns,
             "state_rt_receive_s": state_rt_receive_s,
+            "state_rt_receive_ns": state_rt_receive_ns,
             "state_age_ms": (before_cameras_s - sync_anchor_s) * 1_000,
             "camera": camera_timing,
         }
 
         return obs_dict
 
-    def get_realtime_observation(self) -> dict[str, np.ndarray]:
+    def get_realtime_observation(
+        self,
+        target_monotonic_s: float | None = None,
+        target_monotonic_ns: int | None = None,
+    ) -> dict[str, np.ndarray]:
         """Build a recording observation without controller command-channel reads.
 
         Joint feedback comes from the asynchronous RT report, while gripper
-        feedback uses the latest commanded/cached value. Camera reads remain
+        feedback is snapshotted with that report. When ``target_monotonic_s``
+        is supplied it is the action send-start anchor, and both state and
+        cameras are selected strictly at or before it. Camera reads remain
         outside the realtime joint control thread.
         """
         if self._control_space != "joint":
@@ -1272,29 +1390,41 @@ class UFRobot(Robot, Thread):
         if not self._rt_report_normal:
             raise ConnectionError("RT Report for target robot NOT READY!")
         logs_enabled = bool(getattr(self, "enable_logs", True))
-        with self._update_lock:
-            positions = self.rt_actual_joint_pos.copy()
-            velocities = self.rt_actual_joint_speed.copy()
-            # Timestamp the state snapshot before the slower camera reads.
-            self._last_realtime_observation_monotonic_s = time.perf_counter()
-            state_rt_receive_s = self._last_rt_report_monotonic_s
-            camera_timing = {}
-        # All RGB and Photon streams select their sample against this exact
-        # anchor. The RT report time is the best available host timestamp of
-        # robot state; use the local snapshot only while it is unavailable.
+        if target_monotonic_s is None:
+            selection_request_ns = _perf_counter_ns()
+            selection_request_s = selection_request_ns / 1_000_000_000
+        else:
+            selection_request_s = float(target_monotonic_s)
+            selection_request_ns = (
+                round(selection_request_s * 1_000_000_000)
+                if target_monotonic_ns is None
+                else int(target_monotonic_ns)
+            )
+        state_sample = self.latest_state_before(selection_request_s)
+        positions = state_sample.joint_positions
+        velocities = state_sample.joint_velocities
+        state_rt_receive_s = state_sample.capture_monotonic_s
+        state_rt_receive_ns = (
+            round(state_rt_receive_s * 1_000_000_000)
+            if state_sample.capture_monotonic_ns is None
+            else state_sample.capture_monotonic_ns
+        )
+        self._last_realtime_observation_monotonic_s = state_rt_receive_s
+        self._last_realtime_observation_monotonic_ns = state_rt_receive_ns
+        camera_timing = {}
+        # In teleop-only mode retain the older state-centered camera view. In
+        # recording, the explicit action anchor drives all observation lookup.
         sync_anchor_s = (
             state_rt_receive_s
-            if state_rt_receive_s is not None
-            else self._last_realtime_observation_monotonic_s
+            if target_monotonic_s is None
+            else selection_request_s
         )
-        state_age_ms = (
-            self._last_realtime_observation_monotonic_s - sync_anchor_s
-        ) * 1_000
-        if state_age_ms > self.config.sync_max_skew_ms:
-            raise TimeoutError(
-                "Robot RT state is "
-                f"{state_age_ms:.3f} ms old; limit is {self.config.sync_max_skew_ms:.3f} ms"
-            )
+        sync_anchor_ns = (
+            state_rt_receive_ns
+            if target_monotonic_s is None
+            else selection_request_ns
+        )
+        state_age_ms = (selection_request_s - state_rt_receive_s) * 1_000
         obs_dict = {
             f"{self.prefix}J{index + 1}.pos": positions[index]
             for index in range(self._dof)
@@ -1307,15 +1437,9 @@ class UFRobot(Robot, Thread):
                 }
             )
         if self._gripper_type > GripperType.NoGripper:
-            # 如果开启了 RT 实时监控，且成功拿到了 G2 夹爪的真实物理位置
-            if getattr(self, "_gripper_current_monitor_active", False) and getattr(self, "_gripper_actual_pos_mm", None) is not None:
-                # 传入真实的毫米级位置，转换为 0.0-1.0 的归一化 state
-                gripper = self._gripper_param.get_gripper_norm(self._gripper_actual_pos_mm)
-            else:
-                # 兼容旧版本或非 G2 夹爪的回退逻辑
-                gripper = self._last_gripper_command
-                if gripper is None:
-                    gripper = self._gripper_param.gripper_norm
+            gripper = state_sample.gripper_position
+            if gripper is None:
+                gripper = self._gripper_param.gripper_norm
             obs_dict[f"{self.prefix}gripper.pos"] = float(gripper)
 
         before_cameras_s = time.perf_counter()
@@ -1365,8 +1489,12 @@ class UFRobot(Robot, Thread):
         self._last_realtime_observation_end_monotonic_s = time.perf_counter()
         self._last_realtime_sync_timing = {
             "state_sample_s": self._last_realtime_observation_monotonic_s,
+            "state_sample_ns": self._last_realtime_observation_monotonic_ns,
             "state_rt_receive_s": state_rt_receive_s,
+            "state_rt_receive_ns": state_rt_receive_ns,
             "state_age_ms": state_age_ms,
+            "sync_target_monotonic_s": sync_anchor_s,
+            "sync_target_monotonic_ns": sync_anchor_ns,
             "camera": camera_timing,
         }
         return obs_dict
@@ -1497,7 +1625,12 @@ class UFRobot(Robot, Thread):
             return
         if logs_enabled:
             self._log_gripper_command(gripper_norm, grippos, command_dt_ms)
-        self._last_gripper_command = gripper_norm
+        command_recorded_s = time.perf_counter()
+        with self._update_lock:
+            self._last_gripper_command = gripper_norm
+            self._gripper_command_history.append(
+                (command_recorded_s, gripper_norm)
+            )
 
     def get_gripper_motion_parameters(self) -> tuple[float, float]:
         """Return effective gripper speed and open/close stroke in mm."""
@@ -1808,6 +1941,9 @@ class UFRobot(Robot, Thread):
             if getattr(cam, "is_connected", False):
                 cam.disconnect()
 
+        with self._update_lock:
+            self._rt_state_history.clear()
+            self._gripper_command_history.clear()
         self._is_connected = False
 
     @property
@@ -1870,7 +2006,8 @@ class UFRobot(Robot, Thread):
 
                 data = buffer[:size]
                 buffer = buffer[size:]
-                sample_monotonic_s = time.perf_counter()
+                sample_monotonic_ns = _perf_counter_ns()
+                sample_monotonic_s = sample_monotonic_ns / 1_000_000_000
                 external_report = None
                 monitor_error = None
                 if self._gripper_current_monitor_requested:
@@ -1886,15 +2023,22 @@ class UFRobot(Robot, Thread):
                             f"type={data[G2_EXTERNAL_REPORT_OFFSET]}"
                         )
 
+                actual_joint_pos = convert.bytes_to_fp32s(data[116:144], 7)
+                actual_joint_speed = convert.bytes_to_fp32s(data[144:172], 7)
+                cmd_tcp_pose = convert.bytes_to_fp32s(data[424:448], 6)
+                cmd_tcp_vel = convert.bytes_to_fp32s(data[448:472], 6)
+                actual_tcp_pose = convert.bytes_to_fp32s(data[472:496], 6)
+                actual_tcp_speed = convert.bytes_to_fp32s(data[496:520], 6)
                 with self._update_lock:
-                    self.rt_actual_joint_pos = convert.bytes_to_fp32s(data[116:144], 7)
-                    self.rt_actual_joint_speed = convert.bytes_to_fp32s(data[144:172], 7)
-                    self.rt_cmd_tcp_pose = convert.bytes_to_fp32s(data[424:448], 6)
-                    self.rt_cmd_tcp_vel = convert.bytes_to_fp32s(data[448:472], 6)
-                    self.rt_actual_tcp_pose = convert.bytes_to_fp32s(data[472:496], 6)
-                    self.rt_actual_tcp_speed = convert.bytes_to_fp32s(data[496:520], 6)
+                    self.rt_actual_joint_pos = actual_joint_pos
+                    self.rt_actual_joint_speed = actual_joint_speed
+                    self.rt_cmd_tcp_pose = cmd_tcp_pose
+                    self.rt_cmd_tcp_vel = cmd_tcp_vel
+                    self.rt_actual_tcp_pose = actual_tcp_pose
+                    self.rt_actual_tcp_speed = actual_tcp_speed
                     # Host arrival/decode time, in the recorder's monotonic clock domain.
                     self._last_rt_report_monotonic_s = sample_monotonic_s
+                    self._last_rt_report_monotonic_ns = sample_monotonic_ns
                     if external_report is not None:
                         self._gripper_current_ma = external_report.current_ma
                         self._gripper_current_sample_monotonic_s = sample_monotonic_s
@@ -1903,6 +2047,39 @@ class UFRobot(Robot, Thread):
                         self._gripper_current_monitor_error = None
                     elif monitor_error is not None:
                         self._gripper_current_monitor_error = monitor_error
+                    if external_report is not None:
+                        gripper_position = float(
+                            self._gripper_param.get_gripper_norm(
+                                external_report.position_mm
+                            )
+                        )
+                    else:
+                        gripper_position = next(
+                            (
+                                command
+                                for command_time, command in reversed(
+                                    self._gripper_command_history
+                                )
+                                if command_time <= sample_monotonic_s
+                            ),
+                            None,
+                        )
+                        if (
+                            gripper_position is None
+                            and self._gripper_type > GripperType.NoGripper
+                        ):
+                            gripper_position = float(self._gripper_param.gripper_norm)
+                    self._rt_state_history.append(
+                        TimestampedStateSample(
+                            capture_monotonic_s=sample_monotonic_s,
+                            joint_positions=tuple(float(value) for value in actual_joint_pos),
+                            joint_velocities=tuple(float(value) for value in actual_joint_speed),
+                            tcp_pose=tuple(float(value) for value in actual_tcp_pose),
+                            tcp_velocity=tuple(float(value) for value in actual_tcp_speed),
+                            gripper_position=gripper_position,
+                            capture_monotonic_ns=sample_monotonic_ns,
+                        )
+                    )
                 self._rt_report_normal = True
         except Exception as exc:
             if not self.report_stop_event.is_set():

@@ -14,7 +14,7 @@ not the sensor's exposure time.
 from collections import deque
 from dataclasses import dataclass
 from threading import Condition, Event, Thread
-from time import perf_counter, sleep
+from time import perf_counter, perf_counter_ns
 from typing import Any
 
 import numpy as np
@@ -27,6 +27,7 @@ class TimestampedRGBSample:
 
     frame: NDArray[Any]
     capture_monotonic_s: float
+    capture_monotonic_ns: int | None = None
 
 
 def select_synchronized_samples(
@@ -36,63 +37,61 @@ def select_synchronized_samples(
     pair_max_skew_ms: float,
     wait_ms: float,
 ) -> dict[str, Any]:
-    """Select a feasible combination from immutable camera histories.
+    """Select the latest causal sample from every ordinary RGB stream.
 
-    All streams share one wait budget. Search time windows, rather than taking
-    each stream's nearest frame independently: those minima can lie on opposite
-    sides of the state anchor. Keep waiting for alternatives if necessary.
+    ``max_skew_ms`` is the maximum age relative to the target and
+    ``pair_max_skew_ms`` bounds the spread among the selected host-receipt
+    timestamps.  ``wait_ms`` remains in the signature for configuration/API
+    compatibility, but selection deliberately does not wait for a future
+    frame: a frame received after the target cannot be part of that sample.
     """
     if not all(np.isfinite(v) and v >= 0 for v in
                (target_monotonic_s, max_skew_ms, pair_max_skew_ms, wait_ms)):
         raise ValueError("camera synchronization values must be finite and non-negative")
     if not sources:
         return {}
-    deadline = perf_counter() + wait_ms / 1_000
     bound = max_skew_ms / 1_000
     pair_bound = pair_max_skew_ms / 1_000
-    while True:
-        histories = {name: source.sync_samples() for name, source in sources.items()}
-        candidates = {
-            name: tuple(s for s in samples
-                        if abs(s.capture_monotonic_s - target_monotonic_s) <= bound)
-            for name, samples in histories.items()
-        }
-        best, best_score = None, None
-        for left in sorted({s.capture_monotonic_s for ss in candidates.values() for s in ss}):
-            chosen = {}
-            for name, samples in candidates.items():
-                window = [s for s in samples if left <= s.capture_monotonic_s <= left + pair_bound]
-                if not window:
-                    break
-                chosen[name] = min(window, key=lambda s: abs(s.capture_monotonic_s - target_monotonic_s))
-            if len(chosen) == len(sources):
-                offsets = [abs(s.capture_monotonic_s - target_monotonic_s) for s in chosen.values()]
-                score = (max(offsets), sum(offsets))
-                if best_score is None or score < best_score:
-                    best, best_score = chosen, score
-        remaining = deadline - perf_counter()
-        bracketed = all(any(s.capture_monotonic_s >= target_monotonic_s for s in ss)
-                        for ss in histories.values())
-        if best is not None and (bracketed or remaining <= 0):
-            return best
-        if remaining <= 0:
-            offsets = {name: [round((s.capture_monotonic_s - target_monotonic_s) * 1_000, 3)
-                              for s in ss] for name, ss in candidates.items()}
+    histories = {name: source.sync_samples() for name, source in sources.items()}
+    chosen = {}
+    ages_ms = {}
+    for name, samples in histories.items():
+        causal = tuple(
+            sample
+            for sample in samples
+            if sample.capture_monotonic_s <= target_monotonic_s
+        )
+        if not causal:
             raise TimeoutError(
-                f"No synchronized camera combination within {wait_ms:.3f} ms "
-                f"(state limit={max_skew_ms}, pair limit={pair_max_skew_ms} ms; "
-                f"candidate offsets ms={offsets})"
+                f"No causal RGB frame for {name} at or before "
+                f"{target_monotonic_s:.9f}"
             )
-        sleep(min(0.001, remaining))
+        sample = max(causal, key=lambda item: item.capture_monotonic_s)
+        age_s = target_monotonic_s - sample.capture_monotonic_s
+        if age_s > bound:
+            raise TimeoutError(
+                f"Latest causal RGB frame for {name} is {age_s * 1_000:.3f} ms old; "
+                f"limit is {max_skew_ms:.3f} ms"
+            )
+        chosen[name] = sample
+        ages_ms[name] = age_s * 1_000
+
+    capture_times = [sample.capture_monotonic_s for sample in chosen.values()]
+    pair_skew_s = max(capture_times) - min(capture_times)
+    if pair_skew_s > pair_bound:
+        raise TimeoutError(
+            "Causal RGB frame pair skew is "
+            f"{pair_skew_s * 1_000:.3f} ms; limit is "
+            f"{pair_max_skew_ms:.3f} ms (ages ms={ages_ms})"
+        )
+    return chosen
 
 
 class TimestampedCameraBuffer:
     """Continuously timestamp a camera's fresh asynchronous frames.
 
-    The queue can pair a frame to a robot-state time anchor.  It always waits
-    for at least one frame at or after the anchor, then chooses the closest
-    queued frame.  If that frame exceeds ``max_skew_ms``, it raises instead of
-    returning mismatched data.
+    The queue pairs a frame to a host monotonic action anchor. Only a frame at
+    or before the anchor is eligible; stale frames are rejected.
     """
 
     def __init__(
@@ -148,7 +147,8 @@ class TimestampedCameraBuffer:
                 except TimeoutError:
                     # A transient camera wait timeout is not a capture failure.
                     continue
-                received_at = perf_counter()
+                received_at_ns = perf_counter_ns()
+                received_at = received_at_ns / 1_000_000_000
                 # Some cache-only readers return the same array until a new
                 # frame arrives. Never give that cached frame a fresh timestamp.
                 if frame is previous_frame and frame is not None:
@@ -163,7 +163,11 @@ class TimestampedCameraBuffer:
                     raise ValueError(
                         f"Camera {self.camera} returned shape {frame.shape}, expected HxWx3"
                     )
-                sample = TimestampedRGBSample(frame=frame.copy(), capture_monotonic_s=received_at)
+                sample = TimestampedRGBSample(
+                    frame=frame.copy(),
+                    capture_monotonic_s=received_at,
+                    capture_monotonic_ns=received_at_ns,
+                )
                 previous_frame = frame
                 with self._condition:
                     self._history.append(sample)
@@ -188,14 +192,64 @@ class TimestampedCameraBuffer:
 
     @staticmethod
     def export_sync_sample(sample: TimestampedRGBSample) -> tuple[NDArray[Any], dict]:
-        return sample.frame.copy(), {"capture_monotonic_s": sample.capture_monotonic_s}
+        return sample.frame.copy(), {
+            "capture_monotonic_s": sample.capture_monotonic_s,
+            "capture_monotonic_ns": sample.capture_monotonic_ns,
+        }
 
     @staticmethod
     def _copy_sample(sample: TimestampedRGBSample) -> TimestampedRGBSample:
         return TimestampedRGBSample(
             frame=sample.frame.copy(),
             capture_monotonic_s=sample.capture_monotonic_s,
+            capture_monotonic_ns=sample.capture_monotonic_ns,
         )
+
+    def latest_before(
+        self,
+        target_monotonic_s: float,
+        max_skew_ms: float,
+        wait_ms: float = 0.0,
+    ) -> tuple[NDArray[Any], dict[str, float]]:
+        """Return the latest frame at/before ``target_monotonic_s``.
+
+        ``wait_ms`` is accepted for compatibility but is intentionally not
+        used to wait for post-anchor frames.
+        """
+        if not all(
+            np.isfinite(value) and value >= 0
+            for value in (target_monotonic_s, max_skew_ms, wait_ms)
+        ):
+            raise ValueError("camera synchronization values must be finite and non-negative")
+        with self._condition:
+            if self._error is not None:
+                raise RuntimeError(
+                    f"RGB camera capture failed for {self.camera}"
+                ) from self._error
+            samples = tuple(
+                sample
+                for sample in self._history
+                if sample.capture_monotonic_s <= target_monotonic_s
+            )
+            if not samples:
+                raise TimeoutError(
+                    f"No causal RGB frame at or before the synchronization anchor "
+                    f"for {self.camera}"
+                )
+            sample = max(samples, key=lambda item: item.capture_monotonic_s)
+            age_ms = (target_monotonic_s - sample.capture_monotonic_s) * 1_000
+            if age_ms > max_skew_ms:
+                raise TimeoutError(
+                    f"Latest causal RGB frame for {self.camera} is {age_ms:.3f} ms old; "
+                    f"limit is {max_skew_ms:.3f} ms"
+                )
+            copied = self._copy_sample(sample)
+            return copied.frame, {
+                "capture_monotonic_s": copied.capture_monotonic_s,
+                "sync_target_monotonic_s": float(target_monotonic_s),
+                "sync_offset_ms": float(age_ms),
+                "sync_signed_offset_ms": float(-age_ms),
+            }
 
     def nearest(
         self,
@@ -203,46 +257,8 @@ class TimestampedCameraBuffer:
         max_skew_ms: float,
         wait_ms: float,
     ) -> tuple[NDArray[Any], dict[str, float]]:
-        """Return the closest captured RGB frame within the configured budget."""
-        if not all(
-            np.isfinite(value) and value >= 0
-            for value in (target_monotonic_s, max_skew_ms, wait_ms)
-        ):
-            raise ValueError("camera synchronization values must be finite and non-negative")
-        deadline = perf_counter() + wait_ms / 1_000
-        with self._condition:
-            while True:
-                if self._error is not None:
-                    raise RuntimeError(
-                        f"RGB camera capture failed for {self.camera}"
-                    ) from self._error
-                samples = tuple(self._history)
-                if samples and any(
-                    sample.capture_monotonic_s >= target_monotonic_s for sample in samples
-                ):
-                    sample = min(
-                        samples,
-                        key=lambda item: abs(item.capture_monotonic_s - target_monotonic_s),
-                    )
-                    skew_ms = abs(sample.capture_monotonic_s - target_monotonic_s) * 1_000
-                    if skew_ms > max_skew_ms:
-                        raise TimeoutError(
-                            f"Nearest RGB frame for {self.camera} is {skew_ms:.3f} ms from "
-                            f"the synchronization anchor; limit is {max_skew_ms:.3f} ms"
-                        )
-                    copied = self._copy_sample(sample)
-                    return copied.frame, {
-                        "capture_monotonic_s": copied.capture_monotonic_s,
-                        "sync_target_monotonic_s": float(target_monotonic_s),
-                        "sync_offset_ms": float(skew_ms),
-                    }
-                remaining = deadline - perf_counter()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"No RGB frame at or after the synchronization anchor for {self.camera} "
-                        f"within {wait_ms:.3f} ms"
-                    )
-                self._condition.wait(remaining)
+        """Backward-compatible alias with causal ``latest_before`` semantics."""
+        return self.latest_before(target_monotonic_s, max_skew_ms, wait_ms)
 
     def stop(self) -> None:
         self._stop.set()

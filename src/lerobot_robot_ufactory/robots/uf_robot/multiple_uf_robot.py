@@ -135,6 +135,25 @@ class MultipleUFRobot(Robot):
             observations.update(robot.get_observation())
         return observations
 
+    def tactile_stream_names(self) -> tuple[str, ...]:
+        return tuple(
+            name
+            for robot in self.robots.values()
+            for name in robot.tactile_stream_names()
+        )
+
+    def get_tactile_samples_between(
+        self, start_monotonic_s: float, end_monotonic_s: float
+    ) -> dict[str, tuple]:
+        samples = {}
+        for robot in self.robots.values():
+            samples.update(
+                robot.get_tactile_samples_between(
+                    start_monotonic_s, end_monotonic_s
+                )
+            )
+        return samples
+
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         if self._is_async_action:
             for key, robot in self.robots.items():

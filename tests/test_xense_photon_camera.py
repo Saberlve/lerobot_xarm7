@@ -154,6 +154,34 @@ def test_registration_and_yaml():
     assert raw['offline_mesh3dflow']
 
 
+def test_registration_and_yaml_four_tactile_streams():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "config/gello/xarm7_gello_record_xense_photon_4stream_config.yaml"
+    )
+    raw = yaml.safe_load(path.read_text())
+    camera_entries = raw["robot"]["cameras"]
+    configs = {
+        key: draccus.decode(CameraConfig, value)
+        for key, value in camera_entries.items()
+        if value["type"] == "photon"
+    }
+    cameras = make_cameras_from_configs(configs)
+    assert set(cameras) == {
+        "photon_right",
+        "photon_left",
+        "photon_right_2",
+        "photon_left_2",
+    }
+    assert all(isinstance(cam, XensePhotonCamera) for cam in cameras.values())
+    assert len({cam.config.serial_number for cam in cameras.values()}) == 4
+    rgb_keys = {
+        key for key, value in camera_entries.items() if value["type"] == "intelrealsense"
+    }
+    assert rgb_keys == {"wrist_camera", "third_camera", "wrist_camera_2"}
+    assert raw["offline_mesh3dflow"]
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -227,34 +255,130 @@ def test_marker_motion_3d_and_rgb_share_one_sdk_sample(sdk):
         camera.disconnect()
 
 
-def test_nearest_marker_sample_enforces_the_time_budget(sdk):
+def test_latest_marker_sample_is_causal_and_enforces_age(sdk):
     camera = XensePhotonCamera(config(disable_infer=False, save_marker_motion_3d=True))
     # Exercise the time-pairing queue directly; no SDK thread is needed.
     camera._sensor = object()
     target = camera_xense_photon.perf_counter()
-    sample = XensePhotonSample(
-        frame_bgr=np.zeros((12, 8, 3), dtype=np.uint8),
-        marker_motion_3d=np.ones((35, 20, 3), dtype=np.float32),
-        sensor_timestamp_s=1.0,
-        capture_monotonic_s=target + 0.001,
-    )
     with camera._condition:
-        camera._sample_history.append(sample)
+        for offset_s in (-0.010, -0.001, 0.001):
+            camera._sample_history.append(XensePhotonSample(
+                frame_bgr=np.zeros((12, 8, 3), dtype=np.uint8),
+                marker_motion_3d=np.ones((35, 20, 3), dtype=np.float32),
+                sensor_timestamp_s=1.0 + offset_s,
+                capture_monotonic_s=target + offset_s,
+            ))
 
-    frame, tactile = camera.async_read_with_marker_motion_3d_nearest(
+    frame, tactile = camera.async_read_with_marker_motion_3d_latest_before(
         target_monotonic_s=target,
         max_skew_ms=2,
         wait_ms=0,
     )
     assert frame.shape == (12, 8, 3)
     assert tactile["sync_offset_ms"] == pytest.approx(1.0, abs=0.5)
+    assert tactile["capture_monotonic_s"] <= target
 
-    with pytest.raises(TimeoutError, match="Nearest Xense frame"):
-        camera.async_read_with_marker_motion_3d_nearest(
+    with pytest.raises(TimeoutError, match="Latest causal Xense frame"):
+        camera.async_read_with_marker_motion_3d_latest_before(
             target_monotonic_s=target,
             max_skew_ms=0.1,
             wait_ms=0,
         )
+
+
+def _window_sample(timestamp):
+    return XensePhotonSample(
+        frame_bgr=np.zeros((12, 8, 3), dtype=np.uint8),
+        marker_motion_3d=None,
+        sensor_timestamp_s=1_700_000_000.0 + timestamp,
+        capture_monotonic_s=timestamp,
+    )
+
+
+def test_tactile_window_is_open_closed_and_excludes_future(sdk):
+    camera = XensePhotonCamera(config(disable_infer=True, save_marker_motion_3d=False))
+    camera._sensor = object()
+    with camera._condition:
+        camera._sample_history.extend(
+            _window_sample(timestamp)
+            for timestamp in (9.999, 10.010, 10.027, 10.044, 10.061, 10.067)
+        )
+
+    samples = camera.samples_between(10.000, 10.066)
+    assert [sample.capture_monotonic_s for sample in samples] == [
+        10.010,
+        10.027,
+        10.044,
+        10.061,
+    ]
+    assert all(10.000 < sample.capture_monotonic_s <= 10.066 for sample in samples)
+
+
+@pytest.mark.parametrize("count", [3, 4, 5])
+def test_tactile_window_allows_variable_frame_counts(sdk, count):
+    camera = XensePhotonCamera(config(disable_infer=True, save_marker_motion_3d=False))
+    camera._sensor = object()
+    with camera._condition:
+        camera._sample_history.extend(
+            _window_sample(10.01 + index * 0.01) for index in range(count)
+        )
+    assert len(camera.samples_between(10.0, 10.1)) == count
+
+
+def test_exactly_full_tactile_history_is_not_an_eviction(sdk):
+    camera = XensePhotonCamera(
+        config(disable_infer=True, save_marker_motion_3d=False, sync_history_size=3)
+    )
+    camera._sensor = object()
+    with camera._condition:
+        camera._sample_history.extend(
+            _window_sample(timestamp) for timestamp in (10.01, 10.02, 10.03)
+        )
+
+    assert camera.history_status()["history_eviction_count"] == 0
+    assert len(camera.samples_between(10.0, 10.04)) == 3
+
+
+def test_tactile_history_reports_only_proven_eviction(sdk):
+    camera = XensePhotonCamera(
+        config(disable_infer=True, save_marker_motion_3d=False, sync_history_size=3)
+    )
+    camera._sensor = object()
+    with camera._condition:
+        camera._sample_history.extend(
+            _window_sample(timestamp) for timestamp in (10.01, 10.02, 10.03, 10.04)
+        )
+
+    assert camera.history_status()["history_eviction_count"] == 1
+    with pytest.raises(RuntimeError, match="no longer covers"):
+        camera.samples_between(10.0, 10.05)
+
+
+def test_sensor_start_after_episode_start_is_not_history_loss(sdk):
+    camera = XensePhotonCamera(
+        config(disable_infer=True, save_marker_motion_3d=False, sync_history_size=3)
+    )
+    camera._sensor = object()
+    with camera._condition:
+        camera._sample_history.extend(
+            _window_sample(timestamp) for timestamp in (10.10, 10.11, 10.12, 10.13)
+        )
+
+    assert camera.history_status()["history_eviction_count"] == 1
+    assert camera.samples_between(10.0, 10.05) == ()
+
+
+def test_tactile_window_can_be_normally_empty_after_retained_history(sdk):
+    camera = XensePhotonCamera(
+        config(disable_infer=True, save_marker_motion_3d=False, sync_history_size=3)
+    )
+    camera._sensor = object()
+    with camera._condition:
+        camera._sample_history.extend(
+            _window_sample(timestamp) for timestamp in (10.01, 10.02, 10.03, 10.04)
+        )
+
+    assert camera.samples_between(10.05, 10.06) == ()
 
 
 def test_empty_warmup_releases(sdk, monkeypatch):

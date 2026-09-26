@@ -72,7 +72,9 @@ def test_episode_synchronization_writes_training_schema_sidecars(tmp_path):
         frame_index=0,
         state_sample_s=1.001,
         state_rt_receive_s=1.0,
-        action_sent_s=0.999,
+        action_send_start_s=1.002,
+        action_send_end_s=1.003,
+        action_index=0,
         camera_timing={"camera": {"frame_index": 0, "read_start_s": 1.0, "read_end_s": 1.002}},
     )
     synchronization.write(tmp_path, episode_index=3)
@@ -84,7 +86,9 @@ def test_episode_synchronization_writes_training_schema_sidecars(tmp_path):
         tmp_path / "timestamps" / "episode_000003_actions.parquet"
     ).to_pylist()
     assert frame_rows[0]["frame_index"] == 0
-    assert frame_rows[0]["action_state_age_ms"] == pytest.approx(1.0)
+    assert frame_rows[0]["action_send_start_ns"] == 1_002_000_000
+    assert frame_rows[0]["action_send_end_ns"] == 1_003_000_000
+    assert frame_rows[0]["action_state_age_ms"] == pytest.approx(2.0)
     assert action_rows[0]["action_index"] == 0
 
 
@@ -119,16 +123,116 @@ def test_tactile_tensor_and_unix_timestamp_survive_dataset_save(tmp_path):
 def test_sync_summary_uses_capture_error_not_read_duration(tmp_path):
     import json
     sync = EpisodeSynchronization(None, fps=25)
-    sync.add_frame(0, 100.0, 99.999, 99.998, {
+    sync.add_frame(0, 100.0, 99.999, camera_timing={
         "photon": {"read_start_s": 100.0, "read_end_s": 100.2,
                    "capture_monotonic_s": 99.997, "sync_target_monotonic_s": 99.999,
                    "sync_offset_ms": 2.0, "sync_signed_offset_ms": -2.0, "pair_skew_ms": 3.0},
-    }, state_age_ms=1.0)
+    }, state_age_ms=1.0, action_send_start_s=100.0, action_send_end_s=100.001)
     sync.write(tmp_path, 0)
     stats = json.loads((tmp_path / "timestamps/episode_000000_summary.json").read_text())
-    assert stats["camera_state_abs_offset_ms"]["photon"]["max"] == 2.0
+    assert stats["camera_action_age_ms"]["photon"]["max"] == pytest.approx(3.0)
     assert stats["camera_pair_skew_ms"]["max"] == 3.0
     assert (tmp_path / "timestamps/episode_000000.csv").is_file()
+
+
+def test_sidecar_rejects_future_state_and_camera_samples():
+    sync = EpisodeSynchronization(None, fps=15)
+    with pytest.raises(AssertionError, match="Future state"):
+        sync.add_frame(
+            0,
+            10.001,
+            10.001,
+            action_send_start_s=10.0,
+            action_send_end_s=10.002,
+        )
+
+    with pytest.raises(AssertionError, match="Future camera"):
+        sync.add_frame(
+            0,
+            9.999,
+            9.999,
+            camera_timing={
+                "wrist": {
+                    "capture_monotonic_s": 10.001,
+                    "read_start_s": 10.001,
+                    "read_end_s": 10.002,
+                }
+            },
+            action_send_start_s=10.0,
+            action_send_end_s=10.002,
+        )
+
+
+def test_raw_tactile_stream_maps_variable_windows_to_lossless_frames(tmp_path):
+    import json
+    import pyarrow.parquet as pq
+    from lerobot_robot_ufactory.tactile.photon.camera import XensePhotonSample
+
+    def sample(timestamp, value):
+        return XensePhotonSample(
+            frame_bgr=np.full((3, 4, 3), value, dtype=np.uint8),
+            marker_motion_3d=None,
+            sensor_timestamp_s=1_700_000_000.0 + timestamp,
+            capture_monotonic_s=timestamp,
+        )
+
+    sync = EpisodeSynchronization(
+        None,
+        fps=15,
+        dataset_root=tmp_path,
+        episode_index=0,
+        tactile_stream_names=("photon_left", "photon_right"),
+    )
+    sync.add_frame(
+        0,
+        10.05,
+        10.05,
+        camera_timing={},
+        action_send_start_s=10.066,
+        action_send_end_s=10.067,
+        action_index=0,
+        tactile_window_start_s=10.0,
+        tactile_samples={
+            "photon_left": tuple(sample(t, i) for i, t in enumerate((10.010, 10.027, 10.044, 10.061), 1)),
+            "photon_right": tuple(sample(t, i) for i, t in enumerate((10.015, 10.035, 10.055), 10)),
+        },
+    )
+    sync.write(tmp_path, 0)
+
+    frame_row = pq.read_table(
+        tmp_path / "timestamps/episode_000000.parquet"
+    ).to_pylist()[0]
+    mapping = json.loads(frame_row["tactile_timing_json"])
+    assert mapping["photon_left"]["start_index"] == 0
+    assert mapping["photon_left"]["end_index"] == 4
+    assert mapping["photon_left"]["frame_count"] == 4
+    assert mapping["photon_right"]["end_index"] == 3
+
+    left_index = pq.read_table(
+        tmp_path / "tactile_streams/photon_left/episode_000000/samples.parquet"
+    ).to_pylist()
+    assert len(left_index) == 4
+    assert [row["capture_monotonic_s"] for row in left_index] == [
+        10.010,
+        10.027,
+        10.044,
+        10.061,
+    ]
+    assert all((tmp_path / row["frame_path"]).is_file() for row in left_index)
+
+
+def test_discarded_episode_removes_staged_tactile_streams(tmp_path):
+    sync = EpisodeSynchronization(
+        None,
+        fps=15,
+        dataset_root=tmp_path,
+        episode_index=4,
+        tactile_stream_names=("photon_left", "photon_right"),
+    )
+    sync.discard()
+    staging = tmp_path / "tactile_streams/.staging"
+    assert not staging.exists() or not any(staging.iterdir())
+    assert not (tmp_path / "tactile_streams/photon_left/episode_000004").exists()
 
 
 def test_recording_sync_timeout_stops_realtime_controller(monkeypatch):
@@ -138,6 +242,8 @@ def test_recording_sync_timeout_stops_realtime_controller(monkeypatch):
         config = SimpleNamespace(realtime_control_fps=25)
 
     class Controller:
+        period_s = 1 / 25
+
         def __init__(self, **kwargs):
             pass
 
@@ -147,7 +253,16 @@ def test_recording_sync_timeout_stops_realtime_controller(monkeypatch):
         def stop(self):
             calls.append("stop")
 
-    def fail():
+        def latest_action_sample(self, *args, **kwargs):
+            now = record_module.time.perf_counter()
+            return SimpleNamespace(
+                action_index=0,
+                command={"J1.pos": 0.0},
+                send_start_s=now,
+                send_end_s=now,
+            )
+
+    def fail(_target_monotonic_s=None):
         raise TimeoutError("synchronization failed")
 
     robot = SimpleNamespace(
@@ -163,6 +278,178 @@ def test_recording_sync_timeout_stops_realtime_controller(monkeypatch):
             teleop=Teleop(), control_time_s=1,
         )
     assert calls == ["start", "stop"]
+
+
+def test_first_tick_skips_stale_first_action_anchor(monkeypatch):
+    # The first command's send-start is stamped before a blocking first move
+    # (mode/state switch plus the initial wait=True servo command). The sample
+    # only becomes visible after that move, so the newest eligible action at
+    # the first record tick can be hundreds of ms old — far beyond the ~70 ms
+    # max ages enforced by state/tactile pairing. The first tick must reject
+    # anchors older than one control period and wait for a fresh command.
+    import threading
+
+    calls = []
+    period_s = 1 / 25
+    # The blocking first move: sample 0's send-start is stamped at
+    # +first_send_start_s, but the sample only becomes visible at
+    # +first_sample_visible_s, and the controller stays quiet (still
+    # blocked) until +controller_quiet_end_s afterwards.
+    first_send_start_s = 0.02
+    first_sample_visible_s = 0.45
+    controller_quiet_end_s = 0.75
+
+    class Teleop:
+        config = SimpleNamespace(realtime_control_fps=25)
+
+    class Producer:
+        """Mimics the realtime controller around a blocking first move."""
+
+        def __init__(self):
+            self._lock = threading.Lock()
+            self._samples = []
+            self._stop_event = threading.Event()
+            self._next_index = 0
+            self._started_s = record_module.time.perf_counter()
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+        def _append(self, send_start_s):
+            with self._lock:
+                self._samples.append(
+                    SimpleNamespace(
+                        action_index=self._next_index,
+                        command={"J1.pos": 0.0},
+                        send_start_s=send_start_s,
+                        send_end_s=send_start_s + 0.001,
+                        send_start_ns=int(send_start_s * 1_000_000_000),
+                        send_end_ns=int((send_start_s + 0.001) * 1_000_000_000),
+                    )
+                )
+                self._next_index += 1
+
+        def _elapsed(self):
+            return record_module.time.perf_counter() - self._started_s
+
+        def _run(self):
+            # The first command's send-start is stamped before the blocking
+            # first move; the sample only becomes visible once the move
+            # finishes, and further commands stay blocked for a while after.
+            first_send_start = self._started_s + first_send_start_s
+            while (
+                self._elapsed() < first_sample_visible_s
+                and not self._stop_event.is_set()
+            ):
+                self._stop_event.wait(0.005)
+            if self._stop_event.is_set():
+                return
+            self._append(first_send_start)
+            while (
+                self._elapsed() < controller_quiet_end_s
+                and not self._stop_event.is_set()
+            ):
+                self._stop_event.wait(0.005)
+            while not self._stop_event.is_set():
+                self._append(record_module.time.perf_counter())
+                self._stop_event.wait(period_s)
+
+        def stop(self):
+            self._stop_event.set()
+            self._thread.join(timeout=1.0)
+
+        def latest_action_sample(self, after_action_index, *, not_before_s, wait_s):
+            deadline = record_module.time.perf_counter() + wait_s
+            while True:
+                with self._lock:
+                    eligible = [
+                        sample
+                        for sample in self._samples
+                        if sample.action_index > after_action_index
+                        and (not_before_s is None or sample.send_start_s >= not_before_s)
+                    ]
+                if eligible:
+                    sample = eligible[-1]
+                    calls.append(
+                        {
+                            "after": after_action_index,
+                            "not_before_s": not_before_s,
+                            "wait_s": wait_s,
+                            "returned_send_start_s": sample.send_start_s,
+                            "returned_at": record_module.time.perf_counter(),
+                        }
+                    )
+                    return sample
+                if record_module.time.perf_counter() >= deadline:
+                    raise TimeoutError("no eligible action within wait_s")
+                record_module.time.sleep(0.001)
+
+    producer = Producer()
+
+    class Controller:
+        period_s = 1 / 25
+
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            producer.stop()
+
+        def update_observation(self, obs):
+            pass
+
+        def latest_action_sample(self, *args, **kwargs):
+            return producer.latest_action_sample(*args, **kwargs)
+
+    robot = SimpleNamespace(
+        _control_space="joint",
+        enable_logs=False,
+        action_features={"J1.pos": float},
+        get_observation=lambda: {"J1.pos": 0.0},
+    )
+    observed_anchors = []
+
+    def observe(anchor_s=None, target_monotonic_ns=None):
+        observed_anchors.append(anchor_s)
+        robot._last_realtime_observation_monotonic_s = anchor_s
+        return {"J1.pos": 0.0}
+
+    robot.get_realtime_observation = observe
+    monkeypatch.setattr(record_module, "UFBaseTeleop", Teleop)
+    monkeypatch.setattr(record_module, "Teleoperator", Teleop)
+    monkeypatch.setattr(record_module, "RealtimeTeleopController", Controller)
+    pipelines = record_module.make_default_processors()
+    try:
+        record_module.record_loop(
+            robot, {"exit_early": False}, 25, *pipelines,
+            teleop=Teleop(), control_time_s=controller_quiet_end_s + 0.2,
+        )
+    finally:
+        producer.stop()
+
+    assert calls, "record loop never consumed a realtime action"
+    first = calls[0]
+    assert first["after"] == -1
+    assert first["wait_s"] == 1.0
+    assert first["not_before_s"] is not None
+    # The scenario reproduced: the first wait returned the stale pre-move
+    # sample whose anchor was stamped before the blocking first move.
+    assert first["returned_send_start_s"] < producer._started_s + 0.1
+    # Frame 0 skipped that stale anchor and is anchored on a command issued
+    # after the controller resumed, fresh at consumption time.
+    assert observed_anchors[0] > producer._started_s + controller_quiet_end_s - 0.05
+    returned = [call["returned_send_start_s"] for call in calls]
+    frame0_call = next(
+        call for call, anchor in zip(calls, returned) if anchor == observed_anchors[0]
+    )
+    assert calls.index(frame0_call) >= 1, "stale first anchor was not skipped"
+    # After frame 0, ticks consume the newest action without a causal bound.
+    start_later = calls[calls.index(frame0_call) + 1:]
+    assert start_later, "expected steady-state ticks after the first frame"
+    for call in start_later:
+        assert call["not_before_s"] is None
 
 
 class FakeXArm:

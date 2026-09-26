@@ -11,7 +11,6 @@ from dataclasses import dataclass
 
 from lerobot.utils.robot_utils import precise_sleep
 
-
 logger = logging.getLogger(__name__)
 
 GRIPPER_CURRENT_FEEDBACK_KEY = "gripper.current_ma"
@@ -79,6 +78,31 @@ class GripperFeedbackDiagnostic:
     feedback_enabled: bool
     feedback_active: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class RealtimeActionSample:
+    """One effective command and the host interval used to send it."""
+
+    action_index: int
+    command: dict
+    send_start_ns: int
+    send_end_ns: int
+    gello_read_start_ns: int
+    gello_read_end_ns: int
+
+    @property
+    def send_start_s(self) -> float:
+        return self.send_start_ns / 1_000_000_000
+
+    @property
+    def send_end_s(self) -> float:
+        return self.send_end_ns / 1_000_000_000
+
+    @property
+    def sent_at_s(self) -> float:
+        """Legacy send-completion timestamp retained for diagnostics."""
+        return self.send_end_s
 
 
 class GripperFeedbackProcessor:
@@ -384,12 +408,14 @@ class RealtimeTeleopController:
         self._observation = initial_observation
         self._latest_action = None
         self._action_history = deque(maxlen=max(16, fps * 2))
+        self._next_action_index = 0
         # Keep episode timing separately from the bounded lookup history.
         self._record_timing = record_timing
         self._action_timings = []
         self._exception = None
         self._heartbeat = time.perf_counter()
         self._lock = threading.Lock()
+        self._action_condition = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._first_action = threading.Event()
         self._thread = threading.Thread(target=self._run, name="uf-servoj-control", daemon=True)
@@ -462,6 +488,8 @@ class RealtimeTeleopController:
 
     def stop(self) -> None:
         self._stop.set()
+        with self._action_condition:
+            self._action_condition.notify_all()
         if self._thread.is_alive():
             self._thread.join(timeout=2.0)
         self._safe_stop_feedback_output()
@@ -489,18 +517,65 @@ class RealtimeTeleopController:
         return action
 
     def action_sample_at(self, monotonic_s: float) -> tuple[dict, float]:
-        """Return the command and send timestamp active at observation time."""
+        """Return the latest command whose send started by ``monotonic_s``."""
         self.raise_if_failed()
         with self._lock:
             if not self._action_history:
                 raise RuntimeError("Realtime controller has not sent an action")
-            selected_time, selected = self._action_history[0]
-            for sent_at_s, action in reversed(self._action_history):
-                if sent_at_s <= monotonic_s:
-                    selected_time = sent_at_s
-                    selected = action
-                    break
-            return dict(selected), selected_time
+            selected = next(
+                (
+                    sample
+                    for sample in reversed(self._action_history)
+                    if sample.send_start_s <= monotonic_s
+                ),
+                None,
+            )
+            if selected is None:
+                raise LookupError("No action send started at or before the requested time")
+            return dict(selected.command), selected.send_start_s
+
+    def latest_action_sample(
+        self,
+        after_action_index: int,
+        *,
+        not_before_s: float | None = None,
+        wait_s: float = 0.0,
+    ) -> RealtimeActionSample:
+        """Return the newest unconsumed command, waiting only for a new action.
+
+        When control runs faster than dataset recording, intermediate actions
+        are deterministically skipped at the dataset tick. Sequence ids ensure
+        a selected action can never be emitted twice.
+        """
+        if wait_s < 0 or not math.isfinite(wait_s):
+            raise ValueError("wait_s must be finite and non-negative")
+        if not_before_s is not None and not math.isfinite(not_before_s):
+            raise ValueError("not_before_s must be finite")
+        deadline = time.perf_counter() + wait_s
+        with self._action_condition:
+            while True:
+                eligible = [
+                    sample
+                    for sample in self._action_history
+                    if sample.action_index > after_action_index
+                    and (not_before_s is None or sample.send_start_s >= not_before_s)
+                ]
+                if eligible:
+                    sample = eligible[-1]
+                    return RealtimeActionSample(
+                        action_index=sample.action_index,
+                        command=dict(sample.command),
+                        send_start_ns=sample.send_start_ns,
+                        send_end_ns=sample.send_end_ns,
+                        gello_read_start_ns=sample.gello_read_start_ns,
+                        gello_read_end_ns=sample.gello_read_end_ns,
+                    )
+                if self._exception is not None:
+                    raise RuntimeError("Realtime joint control thread failed") from self._exception
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for an unconsumed realtime action")
+                self._action_condition.wait(remaining)
 
     def action_timings(self) -> list[dict[str, int]]:
         """Return a stable copy of the full command timeline for an episode."""
@@ -616,20 +691,33 @@ class RealtimeTeleopController:
                 sent = self.robot.send_action(command)
                 send_end_ns = time.perf_counter_ns()
                 effective = sent if isinstance(sent, dict) else command
-                sent_at_s = send_end_ns / 1_000_000_000
-                with self._lock:
+                with self._action_condition:
+                    action_sample = RealtimeActionSample(
+                        action_index=self._next_action_index,
+                        command=dict(effective),
+                        send_start_ns=send_start_ns,
+                        send_end_ns=send_end_ns,
+                        gello_read_start_ns=read_start_ns,
+                        gello_read_end_ns=read_end_ns,
+                    )
+                    self._next_action_index += 1
                     self._latest_action = dict(effective)
-                    self._action_history.append((sent_at_s, dict(effective)))
+                    self._action_history.append(action_sample)
                     if self._record_timing:
                         self._action_timings.append(
                             {
-                                "action_index": len(self._action_timings),
+                                "action_index": action_sample.action_index,
                                 "gello_read_start_ns": read_start_ns,
                                 "gello_read_end_ns": read_end_ns,
+                                "action_send_start_ns": send_start_ns,
+                                "action_send_end_ns": send_end_ns,
                                 "command_send_start_ns": send_start_ns,
                                 "command_send_end_ns": send_end_ns,
+                                "sent_at_ns": send_end_ns,
+                                "send_latency_ns": send_end_ns - send_start_ns,
                             }
                         )
+                    self._action_condition.notify_all()
                 self._update_gripper_feedback()
                 self._first_action.set()
 
