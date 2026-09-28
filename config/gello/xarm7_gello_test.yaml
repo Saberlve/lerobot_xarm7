@@ -65,7 +65,7 @@ teleop:
 # JPEG encoding and network I/O run in the background; preview frames are
 # dropped instead of delaying the 30 Hz recorder or GELLO control loop.
 web_preview:
-  enabled: false
+  enabled: true
   host: "0.0.0.0"
   port: 8765
   fps: 8

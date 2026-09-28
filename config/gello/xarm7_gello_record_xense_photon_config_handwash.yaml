@@ -44,11 +44,11 @@ robot:
       width: 640
       height: 480
       fps: 15
-    # Probed hardware. Physical left/right mapping is not yet identified.
+    # Physical left/right mapping verified by pressing the left sensor: OG001932.
     # These dimensions are saved image sizes, not a Photon hardware mode.
     photon_right: # 右边
       type: photon
-      serial_number: "OG001932"
+      serial_number: "OG001931"
       width: 400
       height: 700
       fps: 60  # 最终按60hz采触觉
@@ -64,7 +64,7 @@ robot:
       # config_path: /absolute/path/to/xense/calibrations
     photon_left:  # 左边
       type: photon
-      serial_number: "OG001931"
+      serial_number: "OG001932"
       width: 400
       height: 700
       fps: 60
