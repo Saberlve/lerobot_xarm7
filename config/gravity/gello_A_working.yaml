@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "name": "gello_A",
+  "usb_serial": "FTB9HYVD",
+  "baudrate": 1000000,
+  "joint_ids": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "gripper_id": 8,
+  "model_numbers": [
+    1200,
+    1200,
+    1200,
+    1200,
+    1200,
+    1200,
+    1200,
+    1190
+  ],
+  "joint_names": [
+    "joint1",
+    "joint2",
+    "joint3",
+    "joint4",
+    "joint5",
+    "joint6",
+    "joint7"
+  ],
+  "urdf": "model/xarm7_gello.urdf",
+  "urdf_sha256": "635b0466b54c287439fb30b257b102993ffb7092c9581cf65e8859781822bf5d",
+  "encoder_zero_rad": [
+    -0.0659611738790824,
+    3.160000423044421,
+    0.0,
+    2.0325245439484747,
+    1.538582730249298,
+    4.678641403051206,
+    3.167670326983849
+  ],
+  "model_signs": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "nm_per_amp": [
+    0.35,
+    0.35,
+    0.35,
+    0.35,
+    0.35,
+    0.35,
+    0.35
+  ],
+  "current_limit_a": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "current_slew_a_s": [
+    0.05,
+    0.05,
+    0.05,
+    0.05,
+    0.05,
+    0.05,
+    0.05
+  ],
+  "damping_nm_s_rad": [
+    0.001,
+    0.001,
+    0.001,
+    0.001,
+    0.001,
+    0.001,
+    0.001
+  ],
+  "gravity_m_s2": [
+    0,
+    0,
+    -9.81
+  ],
+  "rate_hz": 100,
+  "gain": 0.1,
+  "ramp_s": 2.0,
+  "state_timeout_s": 0.05,
+  "watchdog_ms": 100,
+  "temperature_limit_c": 50,
+  "commissioning": {
+    "geometry_verified": false,
+    "mass_com_verified": false,
+    "encoder_verified": false,
+    "current_calibrated": false,
+    "rubber_bands_removed": false,
+    "thermal_limits_verified": false
+  },
+  "direction_verification": {
+    "model_signs_verified": true,
+    "model_signs": [1, 1, 1, 1, 1, 1, 1],
+    "urdf_sha256": "635b0466b54c287439fb30b257b102993ffb7092c9581cf65e8859781822bf5d",
+    "source": "User confirmed J1-J7 positive directions all map to +1 after checking the revised model.",
+    "encoder_zero_verified": false
+  },
+  "encoder_offsets_source": "User-confirmed candidate offsets adopted on 2026-10-05, with J3 zero set to 0; temporary candidate files are not included in the repository.",
+  "alignment_user_accepted": true,
+  "communication_verification": {
+    "all_ids_1_to_8_baud_raw": 3,
+    "baudrate_verified": 1000000,
+    "all_torque_disabled_at_probe": true,
+    "log": "Temporary 10-second read-only observation log; summary metrics retained below, raw samples not included in the repository.",
+    "samples": 996,
+    "actual_mean_hz": 99.99551416766641,
+    "interval_p99_ms": 10.33659684471786,
+    "max_interval_ms": 11.70046697370708,
+    "max_work_ms": 10.325432987883687,
+    "missed_deadlines": 1,
+    "usb_latency_ms": 1,
+    "target_100hz_verified": true,
+    "scope": "10-second read-only observation; occasional single-period overrun observed. Live output timing is not yet tested."
+  },
+  "note": "OFFICIAL STL ESTIMATE / NOT COMMISSIONED. Candidate encoder offsets adopted; J3 zero is 0 per user confirmation. All signs +1. All eight motor baud rates verified at 1 Mbps; 10-second read-only observation achieved approximately 100 Hz with FTDI USB latency 1 ms and one single-period overrun. Live output is untested. Mass and current constants remain estimates."
+}

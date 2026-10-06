@@ -2,6 +2,7 @@
 # Python
 # ============================
 **/logs/**
+/config/gravity/*.jsonl
 __pycache__/
 *.py[cod]
 *$py.class
@@ -84,6 +85,8 @@ checkpoints/
 runs/
 wandb/
 models/
+# Source code for URDF/STL tools, rather than generated model artifacts.
+!src/lerobot_robot_ufactory/gravity_compensation/models/
 *.onnx
 *.engine
 *.trt

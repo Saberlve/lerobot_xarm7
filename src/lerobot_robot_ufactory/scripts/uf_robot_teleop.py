@@ -182,12 +182,18 @@ def teleop_loop(cfg: TeleopConfig):
     teleop_connected = False
     listener = None
     cleanup_done = False
+    realtime_controller = None
 
     def cleanup_connections():
         nonlocal cleanup_done
         if cleanup_done:
             return
         cleanup_done = True
+        if realtime_controller is not None:
+            try:
+                realtime_controller.stop()
+            except Exception:
+                logging.exception("Failed to stop follower before disconnect")
         if teleop_connected:
             try:
                 teleop.disconnect()
@@ -205,234 +211,242 @@ def teleop_loop(cfg: TeleopConfig):
                 logging.exception("Failed to stop keyboard listener cleanly")
 
     atexit.register(cleanup_connections)
-    robot.connect()
-    robot_connected = True
-    teleop.connect()
-    teleop_connected = True
-    if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
-        speed, stroke = robot.get_gripper_motion_parameters()
-        teleop.set_gripper_motion_parameters(speed, stroke)
+    try:
+        robot.connect()
+        robot_connected = True
+        teleop.connect()
+        teleop_connected = True
+        if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
+            speed, stroke = robot.get_gripper_motion_parameters()
+            teleop.set_gripper_motion_parameters(speed, stroke)
 
-    sleep_time_s = 1 / cfg.fps
+        sleep_time_s = 1 / cfg.fps
 
-    is_evt = not is_headless()
-    is_uf_teleop = isinstance(teleop, UFBaseTeleop)
+        is_evt = not is_headless()
+        is_uf_teleop = isinstance(teleop, UFBaseTeleop)
 
-    def reset_uf_control():
-        if is_uf_teleop:
-            # Stop teleop output before handing control to the xArm reset motion.
-            teleop.set_teleop_enabled(False)
-        reset = getattr(robot, "reset_to_initial", None)
-        if reset is None:
-            reset = robot.configure
-        reset()
-        if is_uf_teleop:
-            obs = robot.get_observation()
-            teleop.set_teleop_enabled(True, obs)
+        def reset_uf_control():
+            if is_uf_teleop:
+                # Stop teleop output before handing control to the xArm reset motion.
+                teleop.set_teleop_enabled(False)
+            reset = getattr(robot, "reset_to_initial", None)
+            if reset is None:
+                reset = robot.configure
+            reset()
+            if is_uf_teleop:
+                obs = robot.get_observation()
+                teleop.set_teleop_enabled(True, obs)
 
-    is_reset = is_uf_teleop
-    is_paused = True
-    events = {"exit": False}
-    key_dict = {}
-
-    if is_evt:
-        from pynput import keyboard
-
-        key_dict = {
-            keyboard.Key.esc: 0,    # exit
-            keyboard.Key.left: 0,   # reset and pause
-            keyboard.Key.space: 0,  # start/pause
-            keyboard.Key.enter: 0,  # help
-        }
-        gripper_keys = {"close": False, "open": False}
-
-        def on_press(key):
-            char = getattr(key, "char", None)
-            if char in ("c", "C"):
-                gripper_keys["close"] = True
-            elif char in ("o", "O"):
-                gripper_keys["open"] = True
-            teleop.set_gripper_keyboard_state(**gripper_keys)
-            if key_dict.get(key, 1) == 0:
-                try:
-                    if key == keyboard.Key.esc:
-                        events["exit"] = True
-                        print("\nEscape key pressed. Stopping ...")
-                except Exception as e:
-                    print(f"Error handling key press: {e}")
-            if key in key_dict:
-                key_dict[key] = True
-
-        def on_release(key):
-            char = getattr(key, "char", None)
-            if char in ("c", "C"):
-                gripper_keys["close"] = False
-            elif char in ("o", "O"):
-                gripper_keys["open"] = False
-            teleop.set_gripper_keyboard_state(**gripper_keys)
-            try:
-                if key == keyboard.Key.enter:
-                    if is_paused:
-                        if is_reset:
-                            print('⌨   [ESC] Exit  [Space] Reset / Start  [←] Reset')
-                        else:
-                            print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
-                    else:
-                        print('⌨   [ESC] Exit  [Space] Pause  [←] Pause / Reset')
-            except Exception as e:
-                print(f"Error handling key release: {e}")
-            if key in key_dict:
-                key_dict[key] = False
-
-        listener, events = init_keyboard_listener(events=events, on_press=on_press, on_release=on_release)
-        print("\n********** Teleop Control Loop Start **********")
-        if is_uf_teleop:
-            controls = '[ESC] Exit  [Space] Reset / Start  [←] Reset'
-            if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
-                controls += '  [C] Close  [O] Open'
-            print(f'⌨   {controls}')
-        else:
-            print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
-    else:
-        input('⌨   Press Enter to start teleop >>> ')
-        if is_uf_teleop:
-            reset_uf_control()
-        is_paused = False
-        is_reset = False
-        print("\n********** Teleop Control Loop Start **********")
-
-    key_space_pressed = False
-    key_left_pressed = False
-    latency_samples: list[GuardLatencyTiming] = []
-    experiment_start_t = None
-    previous_command_t = None
-    realtime_controller = None
-    realtime_control_fps = int(teleop.config.realtime_control_fps)
-    def start_realtime_controller():
-        nonlocal realtime_controller
-        if (
-            cfg.guard_latency_experiment
-            or not is_uf_teleop
-            or getattr(robot, "_control_space", None) != "joint"
-        ):
-            return
-        obs = robot.get_realtime_observation()
-        realtime_controller = RealtimeTeleopController(
-            robot,
-            teleop,
-            teleop_action_processor,
-            robot_action_processor,
-            realtime_control_fps,
-            obs,
-        )
-        realtime_controller.start()
-
-    def stop_realtime_controller():
-        nonlocal realtime_controller
-        if realtime_controller is not None:
-            realtime_controller.stop()
-            realtime_controller = None
-
-    if not is_evt and not is_paused:
-        start_realtime_controller()
-
-    while not events["exit"]:
-        start_loop_t = time.perf_counter()
+        is_reset = is_uf_teleop
+        is_paused = True
+        events = {"exit": False}
+        key_dict = {}
 
         if is_evt:
-            if key_dict[keyboard.Key.left] and not key_left_pressed:
-                key_left_pressed = True
-                is_reset = True
-                if not is_paused:
-                    is_paused = True
-                    stop_realtime_controller()
-                    if is_uf_teleop:
-                        teleop.set_teleop_enabled(False)
-                print('⌨   [ESC] Exit  [Space] Reset / Start  [←] Reset')
-            elif not key_dict[keyboard.Key.left] and key_left_pressed:
-                key_left_pressed = False
+            from pynput import keyboard
 
-            if key_dict[keyboard.Key.space] and not key_space_pressed:
-                key_space_pressed = True
-                is_paused = not is_paused
-                if is_paused:
-                    stop_realtime_controller()
-                    if is_uf_teleop:
-                        teleop.set_teleop_enabled(False)
-                    print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
-                else:
-                    if is_reset:
-                        reset_uf_control()
-                        is_reset = False
-                    elif is_uf_teleop:
-                        obs = robot.get_observation()
-                        teleop.set_teleop_enabled(True, obs)
-                    start_realtime_controller()
-                    print('⌨   [ESC] Exit  [Space] Pause  [←] Reset')
-                continue
-            elif not key_dict[keyboard.Key.space] and key_space_pressed:
-                key_space_pressed = False
+            key_dict = {
+                keyboard.Key.esc: 0,    # exit
+                keyboard.Key.left: 0,   # reset and pause
+                keyboard.Key.space: 0,  # start/pause
+                keyboard.Key.enter: 0,  # help
+            }
+            gripper_keys = {"close": False, "open": False}
 
-            if is_reset or is_paused:
-                continue
+            def on_press(key):
+                char = getattr(key, "char", None)
+                if char in ("c", "C"):
+                    gripper_keys["close"] = True
+                elif char in ("o", "O"):
+                    gripper_keys["open"] = True
+                teleop.set_gripper_keyboard_state(**gripper_keys)
+                if key_dict.get(key, 1) == 0:
+                    try:
+                        if key == keyboard.Key.esc:
+                            events["exit"] = True
+                            print("\nEscape key pressed. Stopping ...")
+                    except Exception as e:
+                        print(f"Error handling key press: {e}")
+                if key in key_dict:
+                    key_dict[key] = True
 
-        if cfg.guard_latency_experiment:
-            if experiment_start_t is None:
-                experiment_start_t = start_loop_t
-            period_ms = None
-            if previous_command_t is not None:
-                period_ms = (start_loop_t - previous_command_t) * 1e3
-            previous_command_t = start_loop_t
+            def on_release(key):
+                char = getattr(key, "char", None)
+                if char in ("c", "C"):
+                    gripper_keys["close"] = False
+                elif char in ("o", "O"):
+                    gripper_keys["open"] = False
+                teleop.set_gripper_keyboard_state(**gripper_keys)
+                try:
+                    if key == keyboard.Key.enter:
+                        if is_paused:
+                            if is_reset:
+                                print('⌨   [ESC] Exit  [Space] Reset / Start  [←] Reset')
+                            else:
+                                print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
+                        else:
+                            print('⌨   [ESC] Exit  [Space] Pause  [←] Pause / Reset')
+                except Exception as e:
+                    print(f"Error handling key release: {e}")
+                if key in key_dict:
+                    key_dict[key] = False
 
-            read_start_t = time.perf_counter()
-            act = teleop.get_action()
-            read_end_t = time.perf_counter()
-            robot.send_action(act)
-            send_end_t = time.perf_counter()
-            robot_logs = getattr(robot, "logs", {})
-            work_s = send_end_t - start_loop_t
-            precise_sleep(max(sleep_time_s - work_s, 0.0))
-            cycle_end_t = time.perf_counter()
-            latency_samples.append(
-                GuardLatencyTiming(
-                    iteration=len(latency_samples),
-                    elapsed_s=start_loop_t - experiment_start_t,
-                    period_ms=period_ms,
-                    gello_read_ms=(read_end_t - read_start_t) * 1e3,
-                    safety_guard_ms=float(robot_logs.get("safety_guard_dt_s", float("nan"))) * 1e3,
-                    guard_path=str(robot_logs.get("safety_guard_path", "unknown")),
-                    servo_j_ms=float(robot_logs.get("servo_j_dt_s", float("nan"))) * 1e3,
-                    send_action_ms=(send_end_t - read_end_t) * 1e3,
-                    work_ms=work_s * 1e3,
-                    cycle_ms=(cycle_end_t - start_loop_t) * 1e3,
-                )
-            )
-            if cycle_end_t - experiment_start_t >= cfg.experiment_duration_s:
-                events["exit"] = True
-        else:
-            if realtime_controller is not None:
-                realtime_controller.heartbeat()
-                realtime_controller.raise_if_failed()
-                precise_sleep(sleep_time_s)
+            listener, events = init_keyboard_listener(events=events, on_press=on_press, on_release=on_release)
+            print("\n********** Teleop Control Loop Start **********")
+            if is_uf_teleop:
+                controls = '[ESC] Exit  [Space] Reset / Start  [←] Reset'
+                if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
+                    controls += '  [C] Close  [O] Open'
+                print(f'⌨   {controls}')
             else:
-                # Generic non-UFACTORY teleoperators retain the standard loop.
-                obs = robot.get_observation()
+                print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
+        else:
+            input('⌨   Press Enter to start teleop >>> ')
+            if is_uf_teleop:
+                reset_uf_control()
+            is_paused = False
+            is_reset = False
+            print("\n********** Teleop Control Loop Start **********")
+
+        key_space_pressed = False
+        key_left_pressed = False
+        latency_samples: list[GuardLatencyTiming] = []
+        experiment_start_t = None
+        previous_command_t = None
+        realtime_controller = None
+        realtime_control_fps = int(teleop.config.realtime_control_fps)
+        def start_realtime_controller():
+            nonlocal realtime_controller
+            if (
+                cfg.guard_latency_experiment
+                or not is_uf_teleop
+                or getattr(robot, "_control_space", None) != "joint"
+            ):
+                return
+            obs = robot.get_realtime_observation()
+            realtime_controller = RealtimeTeleopController(
+                robot,
+                teleop,
+                teleop_action_processor,
+                robot_action_processor,
+                realtime_control_fps,
+                obs,
+            )
+            realtime_controller.start()
+
+        def stop_realtime_controller():
+            nonlocal realtime_controller
+            if realtime_controller is not None:
+                realtime_controller.stop()
+                realtime_controller = None
+
+        if not is_evt and not is_paused:
+            start_realtime_controller()
+
+        while not events["exit"]:
+            start_loop_t = time.perf_counter()
+            check_gravity = getattr(teleop, "check_gravity_compensation", None)
+            if check_gravity is not None:
+                check_gravity()
+
+            if is_evt:
+                if key_dict[keyboard.Key.left] and not key_left_pressed:
+                    key_left_pressed = True
+                    is_reset = True
+                    if not is_paused:
+                        is_paused = True
+                        stop_realtime_controller()
+                        if is_uf_teleop:
+                            teleop.set_teleop_enabled(False)
+                    print('⌨   [ESC] Exit  [Space] Reset / Start  [←] Reset')
+                elif not key_dict[keyboard.Key.left] and key_left_pressed:
+                    key_left_pressed = False
+
+                if key_dict[keyboard.Key.space] and not key_space_pressed:
+                    key_space_pressed = True
+                    is_paused = not is_paused
+                    if is_paused:
+                        stop_realtime_controller()
+                        if is_uf_teleop:
+                            teleop.set_teleop_enabled(False)
+                        print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
+                    else:
+                        if is_reset:
+                            reset_uf_control()
+                            is_reset = False
+                        elif is_uf_teleop:
+                            obs = robot.get_observation()
+                            teleop.set_teleop_enabled(True, obs)
+                        start_realtime_controller()
+                        print('⌨   [ESC] Exit  [Space] Pause  [←] Reset')
+                    continue
+                elif not key_dict[keyboard.Key.space] and key_space_pressed:
+                    key_space_pressed = False
+
+                if is_reset or is_paused:
+                    precise_sleep(sleep_time_s)
+                    continue
+
+            if cfg.guard_latency_experiment:
+                if experiment_start_t is None:
+                    experiment_start_t = start_loop_t
+                period_ms = None
+                if previous_command_t is not None:
+                    period_ms = (start_loop_t - previous_command_t) * 1e3
+                previous_command_t = start_loop_t
+
+                read_start_t = time.perf_counter()
                 act = teleop.get_action()
-                act_processed_teleop = teleop_action_processor((act, obs))
-                robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
-                robot.send_action(robot_action_to_send)
-                dt_s = time.perf_counter() - start_loop_t
-                precise_sleep(max(sleep_time_s - dt_s, 0.0))
+                read_end_t = time.perf_counter()
+                robot.send_action(act)
+                send_end_t = time.perf_counter()
+                robot_logs = getattr(robot, "logs", {})
+                work_s = send_end_t - start_loop_t
+                precise_sleep(max(sleep_time_s - work_s, 0.0))
+                cycle_end_t = time.perf_counter()
+                latency_samples.append(
+                    GuardLatencyTiming(
+                        iteration=len(latency_samples),
+                        elapsed_s=start_loop_t - experiment_start_t,
+                        period_ms=period_ms,
+                        gello_read_ms=(read_end_t - read_start_t) * 1e3,
+                        safety_guard_ms=float(robot_logs.get("safety_guard_dt_s", float("nan"))) * 1e3,
+                        guard_path=str(robot_logs.get("safety_guard_path", "unknown")),
+                        servo_j_ms=float(robot_logs.get("servo_j_dt_s", float("nan"))) * 1e3,
+                        send_action_ms=(send_end_t - read_end_t) * 1e3,
+                        work_ms=work_s * 1e3,
+                        cycle_ms=(cycle_end_t - start_loop_t) * 1e3,
+                    )
+                )
+                if cycle_end_t - experiment_start_t >= cfg.experiment_duration_s:
+                    events["exit"] = True
+            else:
+                if realtime_controller is not None:
+                    realtime_controller.heartbeat()
+                    realtime_controller.raise_if_failed()
+                    precise_sleep(sleep_time_s)
+                else:
+                    # Generic non-UFACTORY teleoperators retain the standard loop.
+                    obs = robot.get_observation()
+                    act = teleop.get_action()
+                    act_processed_teleop = teleop_action_processor((act, obs))
+                    robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+                    robot.send_action(robot_action_to_send)
+                    dt_s = time.perf_counter() - start_loop_t
+                    precise_sleep(max(sleep_time_s - dt_s, 0.0))
     
-    print("\n********** Teleop Control Loop Exit **********")
-    stop_realtime_controller()
-    if latency_samples:
-        output_path = _write_guard_latency_timings(
-            latency_samples, cfg.timing_log_dir, realtime_control_fps
-        )
-        print(f"Guard latency timing log: {output_path}")
-    cleanup_connections()
-    atexit.unregister(cleanup_connections)
+        print("\n********** Teleop Control Loop Exit **********")
+        stop_realtime_controller()
+        if latency_samples:
+            output_path = _write_guard_latency_timings(
+                latency_samples, cfg.timing_log_dir, realtime_control_fps
+            )
+            print(f"Guard latency timing log: {output_path}")
+        cleanup_connections()
+        atexit.unregister(cleanup_connections)
+    finally:
+        cleanup_connections()
+        atexit.unregister(cleanup_connections)
 
 @parser.wrap()
 def get_cfg(cfg: TeleopConfig) -> TeleopConfig:

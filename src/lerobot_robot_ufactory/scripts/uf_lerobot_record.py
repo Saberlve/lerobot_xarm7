@@ -761,6 +761,12 @@ class _EpisodeSynchronizationOwner:
 
 def _disconnect_recording_resources(robot, teleop, listener):
     """Release recording devices while preserving cleanup after partial failures."""
+    stop_gravity = getattr(teleop, "stop_gravity_compensation", None)
+    if stop_gravity is not None:
+        try:
+            stop_gravity()
+        except Exception:
+            logging.exception("Failed to stop GELLO before disconnecting recording resources")
     try:
         if getattr(robot, "_is_connected", False) or getattr(robot, "real_arm", None) is not None:
             robot.disconnect()
@@ -787,6 +793,13 @@ class _RecordingCleanup:
     def __exit__(self, exc_type, exc_value, traceback):
         try:
             try:
+                # Release active leader output before potentially slow disk writes.
+                stop_gravity = getattr(self.teleop, "stop_gravity_compensation", None)
+                if stop_gravity is not None:
+                    try:
+                        stop_gravity()
+                    except Exception:
+                        logging.exception("Failed to stop GELLO compensation before save")
                 if self.async_episode_saver is not None:
                     self.async_episode_saver.close()
             finally:

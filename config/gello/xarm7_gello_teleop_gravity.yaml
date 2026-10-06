@@ -1,0 +1,48 @@
+# Run from the project root with:
+# .venv/bin/uf-robot-teleop --config_path config/gello/xarm7_gello_teleop_gravity.yaml
+robot:
+  type: uf::robot
+  id: uf_robot
+  robot_ip: "192.168.1.245"
+  robot_dof: 7
+  control_space: joint
+  record_space: joint
+  joint_command_mode: 6
+  max_joint_velocity: 120
+  gripper_type: 2
+  gripper_speed: 100
+  gripper_force: 50
+  gripper_command_interval_s: 0.03334
+  min_tcp_z_mm: -2.0
+  tcp_z_guard_backend: local_projection
+  tcp_z_soft_margin_mm: 0.5
+  local_kinematics_max_error_mm: 2.0
+  controller_safety_boundary: true
+  cameras: {}
+
+teleop:
+  type: uf::gello_teleop
+  id: gello_teleop
+  port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
+  joint_ids: [1, 2, 3, 4, 5, 6, 7]
+  joint_signs: [1, 1, 1, 1, 1, 1, 1]
+  realtime_control_fps: 30
+  gripper_id: 8
+  gripper_control_mode: gello
+  gripper_open_deg: 198.28125
+  gripper_close_deg: 155.75
+  # Session overrides; these do not modify the physical model calibration.
+  # User-approved seven-axis gains from web tuning on 2026-10-06.
+  gravity_compensation:
+    enabled: true
+    experimental: true
+    profile_path: config/gravity/gello_A_working.yaml
+    gain: 0.3
+    joint_gains: [0.065, 0.15, 0.115, 0.15, 0.06, 0.1, 0.12]
+    # Running rates only; first 2 seconds keep the original 0.05 A/s.
+    running_current_slew_a_s: [0.05, 0.12, 0.05, 0.12, 0.05, 0.05, 0.05]
+    j5_gain: null
+    j6_gain: null
+    log_dir: logs/gravity_teleop
+
+fps: 30

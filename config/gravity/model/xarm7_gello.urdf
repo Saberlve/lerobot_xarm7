@@ -1,0 +1,329 @@
+<robot name="xarm7_gello_official_estimate">
+  <!-- UNVERIFIED_GEOMETRY: reconstructed assembly and estimated masses; offline only -->
+  <!-- Printed mesh coordinates are millimeters. All URDF coordinates and inertias are SI. -->
+  <link name="base">
+    <visual name="base_print">
+      <origin xyz="0 0 0" rpy="1.57079632679 -0 0" />
+      <geometry>
+        <mesh filename="source_meshes/base.STL" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="pla">
+        <color rgba="0.2 0.55 0.8 1" />
+      </material>
+    </visual>
+    <visual name="motor1_case">
+      <origin xyz="-0.0625 0 0.0215" rpy="0 -0 -1.57079632679" />
+      <geometry>
+        <box size="0.02 0.034 0.023" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <visual name="motor1_horn">
+      <origin xyz="-0.055 0 0.0345" rpy="0 -0 -1.57079632679" />
+      <geometry>
+        <cylinder radius="0.008" length="0.003" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+  </link>
+  <joint name="joint1" type="revolute">
+    <parent link="base" />
+    <child link="link1" />
+    <origin xyz="-0.055 0 0.036" rpy="0 -0 -1.57079632679" />
+    <axis xyz="0 0 1" />
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="0.52" velocity="6" />
+  </joint>
+  <link name="link1">
+    <visual name="L1_print">
+      <origin xyz="0 0 -0.0025" rpy="0 -0 0" />
+      <geometry>
+        <mesh filename="source_meshes/L1.STL" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="pla">
+        <color rgba="0.2 0.55 0.8 1" />
+      </material>
+    </visual>
+    <visual name="motor2_case">
+      <origin xyz="0 0.0163 0.046" rpy="1.57079632679 -0 3.14159265359" />
+      <geometry>
+        <box size="0.02 0.034 0.023" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <visual name="motor2_horn">
+      <origin xyz="0 0.0293 0.0535" rpy="1.57079632679 -0 3.14159265359" />
+      <geometry>
+        <cylinder radius="0.008" length="0.003" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <inertial>
+      <origin xyz="9.6297965092e-09 0.01223607374 0.0310713743759" rpy="0 0 0" />
+      <mass value="0.037490870436" />
+      <inertia ixx="1.82394682863e-05" iyy="1.51848873851e-05" izz="6.25142317554e-06" ixy="-6.7104402473e-12" ixz="8.89091167279e-12" iyz="-3.01078356548e-06" />
+    </inertial>
+  </link>
+  <joint name="joint2" type="revolute">
+    <parent link="link1" />
+    <child link="link2" />
+    <origin xyz="0 0.0308 0.0535" rpy="-1.57079632679 -1.22464679915e-16 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="0.52" velocity="6" />
+  </joint>
+  <link name="link2">
+    <visual name="L2_print">
+      <origin xyz="0 -0.089 -0.0265" rpy="1.57079632679 -0 0" />
+      <geometry>
+        <mesh filename="source_meshes/L2.STL" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="pla">
+        <color rgba="0.2 0.55 0.8 1" />
+      </material>
+    </visual>
+    <visual name="motor3_case">
+      <origin xyz="0 -0.0908 -0.009" rpy="1.57079632679 -0 0" />
+      <geometry>
+        <box size="0.02 0.034 0.023" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <visual name="motor3_horn">
+      <origin xyz="0 -0.1038 -0.0015" rpy="1.57079632679 -0 0" />
+      <geometry>
+        <cylinder radius="0.008" length="0.003" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <inertial>
+      <origin xyz="9.23516862924e-11 -0.0550622374155 -0.000146165844634" rpy="0 0 0" />
+      <mass value="0.0695811459109" />
+      <inertia ixx="9.53484015661e-05" iyy="1.01266461602e-05" izz="9.08615197029e-05" ixy="-5.59859324688e-13" ixz="4.36858985933e-14" iyz="-1.11151268501e-05" />
+    </inertial>
+  </link>
+  <joint name="joint3" type="revolute">
+    <parent link="link2" />
+    <child link="link3" />
+    <origin xyz="0 -0.1053 -0.0015" rpy="1.57079632679 -1.57079632679 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="0.52" velocity="6" />
+  </joint>
+  <link name="link3">
+    <visual name="L3_print">
+      <origin xyz="0 0 -0.0025" rpy="0 -0 0" />
+      <geometry>
+        <mesh filename="source_meshes/L3.STL" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="pla">
+        <color rgba="0.2 0.55 0.8 1" />
+      </material>
+    </visual>
+    <visual name="motor4_case">
+      <origin xyz="0.0299 0.015002 0.0351305" rpy="1.57079632679 0.497428040433 1.57079632679" />
+      <geometry>
+        <box size="0.02 0.034 0.023" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <visual name="motor4_horn">
+      <origin xyz="0.0429 0.018580751364 0.0417215954078" rpy="1.57079632679 0.497428040433 1.57079632679" />
+      <geometry>
+        <cylinder radius="0.008" length="0.003" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <inertial>
+      <origin xyz="0.0235521626044 0.0116777666053 0.0285706441566" rpy="0 0 0" />
+      <mass value="0.0327925552482" />
+      <inertia ixx="9.31549399958e-06" iyy="1.09937158137e-05" izz="7.08574580784e-06" ixy="-1.45162808697e-06" ixz="-3.01886158513e-06" iyz="-2.91021108239e-06" />
+    </inertial>
+  </link>
+  <joint name="joint4" type="revolute">
+    <parent link="link3" />
+    <child link="link4" />
+    <origin xyz="0.0444 0.018580751364 0.0417215954078" rpy="-1.57079632679 -1.54462559163 -1.57079632679" />
+    <axis xyz="0 0 1" />
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="0.52" velocity="6" />
+  </joint>
+  <link name="link4">
+    <visual name="L4_print">
+      <origin xyz="0 0.01 0.0125" rpy="-3.14159265359 -1.57079632679 0" />
+      <geometry>
+        <mesh filename="source_meshes/L4.STL" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="pla">
+        <color rgba="0.2 0.55 0.8 1" />
+      </material>
+    </visual>
+    <visual name="motor5_case">
+      <origin xyz="-0.0346738184987 -0.0691698826965 -0.036" rpy="2.32128779457 1.57079632679 0" />
+      <geometry>
+        <box size="0.02 0.034 0.023" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <visual name="motor5_horn">
+      <origin xyz="-0.0380546428003 -0.0837924688919 -0.036" rpy="2.32128779457 1.57079632679 0" />
+      <geometry>
+        <cylinder radius="0.008" length="0.003" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <inertial>
+      <origin xyz="-0.0123495319674 -0.0416052060196 -0.0235081654463" rpy="0 0 0" />
+      <mass value="0.0748510000515" />
+      <inertia ixx="7.14582802871e-05" iyy="4.05397051442e-05" izz="7.41072556154e-05" ixy="-2.04487222109e-05" ixz="-1.10843055584e-05" iyz="-2.22244803723e-05" />
+    </inertial>
+  </link>
+  <joint name="joint5" type="revolute">
+    <parent link="link4" />
+    <child link="link5" />
+    <origin xyz="-0.0390776402191 -0.0848894995575 -0.036" rpy="0.820304859024 -1.57079632679 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="0.52" velocity="6" />
+  </joint>
+  <link name="link5">
+    <visual name="L5_print">
+      <origin xyz="0 0.001 0.08375" rpy="-1.57079632679 -0 -1.57079632679" />
+      <geometry>
+        <mesh filename="source_meshes/L5.STL" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="pla">
+        <color rgba="0.2 0.55 0.8 1" />
+      </material>
+    </visual>
+    <visual name="motor6_case">
+      <origin xyz="0 -0.0072 0.07625" rpy="1.57079632679 -0 3.14159265359" />
+      <geometry>
+        <box size="0.02 0.034 0.023" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <visual name="motor6_horn">
+      <origin xyz="0 0.0058 0.08375" rpy="1.57079632679 -0 3.14159265359" />
+      <geometry>
+        <cylinder radius="0.008" length="0.003" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <inertial>
+      <origin xyz="1.67200754031e-18 -0.00954871974034 0.0487043034821" rpy="0 0 0" />
+      <mass value="0.0453476717369" />
+      <inertia ixx="4.19616584732e-05" iyy="4.21911021957e-05" izz="6.33932625384e-06" ixy="2.59835753386e-22" ixz="-8.16190098313e-22" iyz="-9.61921060049e-07" />
+    </inertial>
+  </link>
+  <joint name="joint6" type="revolute">
+    <parent link="link5" />
+    <child link="link6" />
+    <origin xyz="0 0.0073 0.08375" rpy="-1.57079632679 -1.57079632679 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="0.52" velocity="6" />
+  </joint>
+  <link name="link6">
+    <visual name="L6_print">
+      <origin xyz="-0.015 0.015 -0.0025" rpy="-1.57079632679 -1.57079632679 0" />
+      <geometry>
+        <mesh filename="source_meshes/L6.STL" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="pla">
+        <color rgba="0.2 0.55 0.8 1" />
+      </material>
+    </visual>
+    <visual name="motor7_case">
+      <origin xyz="-0.0428 0.030824 0" rpy="-0 -1.57079632679 0" />
+      <geometry>
+        <box size="0.02 0.034 0.023" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <visual name="motor7_horn">
+      <origin xyz="-0.0558 0.038324 0" rpy="-0 -1.57079632679 0" />
+      <geometry>
+        <cylinder radius="0.008" length="0.003" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <inertial>
+      <origin xyz="-0.0348351028596 0.0260446209961 2.82053730669e-05" rpy="0 0 0" />
+      <mass value="0.0295435423679" />
+      <inertia ixx="5.61696825688e-06" iyy="8.31694682484e-06" izz="1.247455438e-05" ixy="3.7600448417e-06" ixz="-2.60800132743e-08" iyz="1.94988383647e-08" />
+    </inertial>
+  </link>
+  <joint name="joint7" type="revolute">
+    <parent link="link6" />
+    <child link="link7" />
+    <origin xyz="-0.0573 0.038324 0" rpy="-0 -1.57079632679 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="0.52" velocity="6" />
+  </joint>
+  <link name="link7">
+    <visual name="handle_print">
+      <origin xyz="0 0.0142309460836 0.0217165522486" rpy="1.57079632679 -0.0523598969078 1.57079632679" />
+      <geometry>
+        <mesh filename="source_meshes/handle.STL" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="pla">
+        <color rgba="0.2 0.55 0.8 1" />
+      </material>
+    </visual>
+    <visual name="motor8_case">
+      <origin xyz="0.0065 0.00802579916677 0.0240790375375" rpy="1.57079632679 -1.51843642989 -1.57079632679" />
+      <geometry>
+        <box size="0.02 0.034 0.023" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <visual name="motor8_horn">
+      <origin xyz="-0.0065 0.0155155206698 0.0244715573543" rpy="1.57079632679 -1.51843642989 -1.57079632679" />
+      <geometry>
+        <cylinder radius="0.008" length="0.003" />
+      </geometry>
+      <material name="servo">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <visual name="trigger_print">
+      <origin xyz="3.46944695195e-18 0.0155155206698 0.0244715573543" rpy="3.14159265359 -1.51843642989 -1.57079632679" />
+      <geometry>
+        <mesh filename="source_meshes/trigger.STL" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="pla">
+        <color rgba="0.2 0.55 0.8 1" />
+      </material>
+    </visual>
+    <inertial>
+      <origin xyz="-0.000582610758149 -0.0126937047852 0.0295898247535" rpy="0 0 0" />
+      <mass value="0.114656280838" />
+      <inertia ixx="8.38741517678e-05" iyy="4.25760329374e-05" izz="6.00808933563e-05" ixy="-1.25519280789e-07" ixz="-1.65866025601e-07" iyz="1.7448183879e-05" />
+    </inertial>
+  </link>
+</robot>

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 from lerobot.teleoperators import TeleoperatorConfig
+from ...gravity_compensation.config import GravityCompensationConfig
 
 @dataclass
 class GelloFeedbackConfig:
@@ -26,6 +27,7 @@ class GelloFeedbackConfig:
 @TeleoperatorConfig.register_subclass("uf::gello_teleop")
 @dataclass
 class GelloTeleopConfig(TeleoperatorConfig):
+    gravity_compensation: GravityCompensationConfig = field(default_factory=GravityCompensationConfig)
     # Frequency of the independent GELLO -> xArm realtime control loop.
     realtime_control_fps: int = 30
     # Port to connect to the gello dummy arm
@@ -60,6 +62,8 @@ class GelloTeleopConfig(TeleoperatorConfig):
     torque_joint_ids: Tuple[int, ...] = None  # deprecated
 
     def __post_init__(self):
+        if self.gravity_compensation.enabled and not self.gravity_compensation.profile_path:
+            raise ValueError("gravity_compensation.profile_path is required when enabled")
         self.id = 'gello_teleop' if self.id is None else self.id
         if self.realtime_control_fps <= 0:
             raise ValueError("realtime_control_fps must be positive")

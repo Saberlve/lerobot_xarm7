@@ -1,6 +1,37 @@
 # UFACTORY xArm7 · LeRobot（GELLO / 手动拖拽）
 
+## GELLO 重力补偿（实验功能）
+
+`gravity_comp` 分支提供按 USB 序列号区分的双 GELLO 补偿、只读诊断、URDF 生成与离线验证。
+已接入官方 xArm7 GELLO STL 的装配估算 URDF；两套 profile 共用几何、独立标定。正式出力需要完整标定；当前 working 配置支持显式实验补偿和逐轴增益，标定未完成项仍保留。
+真机测试与标定按配置文件、网页提示和下方命令执行，出力前须完成只读检查并托住手臂。
+补偿功能直接位于 `gravity_compensation/` 下，网页界面位于 `web/`，运行入口仅保留网页和遥操作，详见 [代码结构](src/lerobot_robot_ufactory/gravity_compensation/README.md)。
+
+GELLO A 的重力补偿已接入 xArm7 遥操，使用单个串口连接，暂停跟随时保持支撑，退出时卸力：
+
+```bash
+.venv/bin/uf-robot-teleop --config_path config/gello/xarm7_gello_teleop_gravity.yaml
+```
+
+启动前托持 GELLO，退出其他串口程序。网页、上述遥操及 `xarm7_gello_record_gravity_config.yaml` 的默认 J1–J7 绝对增益已保存为 `[0.065, 0.15, 0.115, 0.15, 0.06, 0.1, 0.12]`（2026-10-06 用户实测确认）；遥操配置位于 `teleop.gravity_compensation.joint_gains`，旧 J5/J6 覆盖已清空。每轴限流 1 A，遥操补偿持续至退出，不限制相对启动姿态的位移。日志自动保存到 `logs/gravity_teleop/`。
+
+设置 `joint_gains` 后应修改列表对应项，单改全局 `gain` 不会改变列表中的轴。
+
 > [English Version](README.md)
+
+统一网页支持离线模型演示、只读电机角度对照和持续补偿调参，无需启动 xArm 遥操作：
+
+```bash
+.venv/bin/python -m lerobot_robot_ufactory.gravity_compensation.web.tuning_web \
+  --profile config/gravity/gello_A_working.yaml --port 8765
+```
+
+打开 <http://127.0.0.1:8765>，默认使用上述实测七轴增益。
+页面默认离线查看，不连接电机；点击“只读电机角度”可核对实物姿态，点击“开始持续补偿”才出力。
+使用红色“立即卸力”按钮停止补偿，停止后可切回离线或只读查看。网页失联超过 3 秒自动卸力。
+每轴可在线调整电流变化率（50–200 mA/s）；默认 J1–J7 为 `[50, 120, 50, 120, 50, 50, 50] mA/s`，网页及重力补偿遥操/录制均沿用；启动前 2 秒保留原限速。
+显示逐轴温度，40°C 起提示，网页及使用默认运行变化率的遥操模式达到 45°C 自动卸力，电流上限保持原值。
+网页启动后默认离线查看；可切换只读角度或持续补偿，页面内含增益、变化率、温度和卸力控制。
 
 UFACTORY xArm 与 [LeRobot](https://github.com/huggingface/lerobot) 框架的集成项目，专注于两种数据采集方式：
 
@@ -15,7 +46,7 @@ UFACTORY xArm 与 [LeRobot](https://github.com/huggingface/lerobot) 框架的集
 - 🎮 GELLO 关节空间遥操作（Dynamixel 示教臂）
 - ✋ xArm 示教模式手动拖拽采集
 - 📷 Intel RealSense 相机观测（D435 / D435i）
-- 双 Xense Photon 触觉图像采集：[安装与配置](docs/xense_photon_zh.md)
+- 双 Xense Photon 触觉图像采集：[示例配置](config/gello/xarm7_gello_record_xense_photon_config.yaml)
 - 📊 兼容 LeRobot 格式的数据集录制与管理
 - 🧠 模仿学习训练与策略推理
 - ▶️ 手动演示数据的 episode 回放
@@ -142,11 +173,6 @@ uv run uf-robot-teleop \
 `guard_path` 会标记 `local_safe`、`local_projected`、`local_hold` 或
 `model_fault`，终端也会按路径输出分组统计。结果写入
 `logs/gello_guard_latency_<时间>.csv`。
-
-实验结果与分析见 [GELLO 安全高度 Guard 延迟实验记录](docs/gello_guard_latency_experiment_20260817.md)。
-
-完整的抖动修复、数据同步和夹爪 Error 19 排障过程见
-[xArm7 + GELLO 平滑安全录制实践](docs/gello_xarm7_smooth_safe_recording_zh.md)。
 
 #### 设置 GELLO TCP 最低高度
 

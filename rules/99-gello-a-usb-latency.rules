@@ -1,0 +1,3 @@
+# GELLO A: set FTDI USB latency to 1 ms on connection and change events.
+# Match the physical adapter rather than its transient ttyUSB number.
+ACTION=="add|change", SUBSYSTEM=="usb-serial", KERNEL=="ttyUSB*", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6014", ATTRS{serial}=="FTB9HYVD", ATTR{latency_timer}="1"

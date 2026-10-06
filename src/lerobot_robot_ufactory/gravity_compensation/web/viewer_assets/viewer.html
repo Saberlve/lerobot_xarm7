@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GELLO · 关节方向 3D 查看器</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101923;color:#e5edf5;font:14px/1.55 system-ui,-apple-system,sans-serif}button,input,select{font:inherit}button{cursor:pointer;color:inherit;background:#243443;border:1px solid #3a4b5c;border-radius:8px;padding:9px 12px}button:hover{background:#334b60}button.active{border-color:#f8b052;background:#553c24}button.primary{background:#f8b052;border-color:#f8b052;color:#151b22;font-weight:650}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #6ce4e0;outline-offset:3px}header{height:76px;padding:15px 24px;border-bottom:1px solid #30404f;display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:20px;margin:0}header small{color:#a7b9ca}.chip{font-size:12px;background:#173939;color:#8ce4cd;border:1px solid #29504b;padding:4px 9px;border-radius:20px}main{display:grid;grid-template-columns:320px 1fr;height:calc(100vh - 76px);min-height:620px}aside{overflow:auto;padding:22px;background:#15222e;border-right:1px solid #30404f}h2{font-size:15px;margin:0 0 12px}p{margin:10px 0;color:#b1c2d2}.joints{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}.section{margin-top:25px;border-top:1px solid #30404f;padding-top:20px}.value{font-size:36px;color:#f8b052;font-variant-numeric:tabular-nums;line-height:1.1;margin:14px 0 8px}.rad{font-size:13px;color:#a7b9ca;margin-bottom:18px}input[type=range]{width:100%;accent-color:#f8b052;cursor:pointer}.scale{display:flex;justify-content:space-between;color:#8299ad;font-size:12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}select,input[type=number]{color:#e5edf5;background:#243443;border:1px solid #3a4b5c;border-radius:7px;padding:7px;width:85px}label.check{display:flex;gap:9px;margin:12px 0;cursor:pointer}input[type=checkbox]{accent-color:#6ce4e0;width:16px}.stage{position:relative;overflow:hidden;background:radial-gradient(ellipse at 60% 35%,#223949,#101c27 78%)}#viewport{width:100%;height:100%;touch-action:none;display:block}.topbar{position:absolute;top:18px;left:20px;right:20px;display:flex;justify-content:space-between;gap:14px;align-items:flex-start;pointer-events:none}.topbar button{pointer-events:auto;padding:6px 11px;font-size:12px;background:#182837e8}.stage-title{font-size:20px;font-weight:650}.stage-title small{font-size:12px;color:#a7b9ca;display:block;font-weight:400;margin-top:4px}.badge{position:absolute;transform:translate(-50%,-50%);padding:3px 8px;border-radius:6px;background:#102330e8;color:#c1d4e2;border:1px solid #456074;font-size:12px;cursor:pointer;z-index:3}.badge.selected{background:#5b3713;border-color:#f8b052;color:#ffcf88;font-weight:700}.axis-label{pointer-events:none;color:#ffcf88;background:#342b20eb;border-color:#f8b052;font-weight:700}.legend{position:absolute;bottom:58px;left:20px;pointer-events:none;background:#15222ee8;border:1px solid #304b60;border-radius:9px;padding:11px 15px;color:#c0d1df;font-size:12px}.legend span{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px}.hint{position:absolute;bottom:18px;left:20px;color:#9ab1c4;font-size:12px}.status{font-size:13px;min-height:42px;margin-top:12px;color:#9fe6db}.note{font-size:12px;color:#90a5b7}#error{display:none;position:absolute;inset:100px 30px auto;padding:22px;border:1px solid #e58787;background:#462d30;border-radius:10px;z-index:10}.pose{font-size:12px;font-variant-numeric:tabular-nums;color:#93acbf;word-break:break-all}
+@media(max-width:760px){header{padding:12px 16px;height:70px}header small{display:none}h1{font-size:17px}main{height:auto;min-height:0;display:flex;flex-direction:column}.stage{height:65vh;min-height:430px;order:0}aside{order:1;border:0;overflow:visible}.joints{grid-template-columns:repeat(7,1fr)}.topbar{left:12px;right:12px}.stage-title{font-size:17px}.legend{bottom:50px;left:12px}.hint{left:12px;font-size:11px}.topbar .row{gap:4px}.topbar button{padding:5px 7px}}
+</style>
+</head>
+<body>
+<header><div><h1>GELLO <span style="color:#839aad;font-weight:400">/ 关节方向 3D 查看器</span></h1><small>拖动模型，从你熟悉的方向观察旋转</small></div><span class="chip">离线模型 · 不连接电机</span></header>
+<main>
+<aside>
+<h2>选择关节</h2><div class="joints" id="joints"></div>
+<div class="section" id="angle-section"><h2 id="joint-title">J5 · 模型角度</h2><div class="value" id="angle-value">0.0°</div><div class="rad" id="rad-value">0.000 rad</div><input id="angle" aria-label="选中关节的模型角度" type="range" min="-180" max="180" step="0.1" value="0"><div class="scale"><span>−180°</span><span>0°</span><span>+180°</span></div><div class="row"><button id="minus">−15°</button><button id="zero">该轴归零</button><button id="plus">+15°</button></div></div>
+<div class="section" id="demo-section"><h2>看清正向转动</h2><div class="row"><label for="amplitude">演示增量</label><select id="amplitude"><option value="30">+30°</option><option value="60" selected>+60°</option><option value="90">+90°</option></select></div><div class="row"><button class="primary" id="play">▶ 播放正向转动</button><button id="capture">记录参考姿态</button></div><div class="status" id="status">点击播放，观察黄色指针如何转动。</div><p class="note">黄色指针随关节转动；灰蓝色影子是参考姿态。正向演示后会返回起点，界面会提示当前阶段。</p></div>
+<div class="section"><h2>观察方式</h2><div class="row"><button id="focus">放大该关节</button><button id="axial">沿转轴看</button><button id="fit">查看整臂</button></div><label class="check"><input id="transparent" type="checkbox" checked>连杆透明，露出转轴</label><label class="check"><input id="ghost" type="checkbox" checked>显示参考姿态</label><label class="check"><input id="nearby" type="checkbox">只看该关节及下游</label><div class="row"><button id="reset">全部回到模型零位</button></div></div>
+<div class="section"><div class="pose" id="pose"></div><p class="note">这里的零位由模型定义。实物安装、编码器零位和读数正负需分别核对。</p></div>
+</aside>
+<section class="stage" id="stage"><canvas id="viewport"></canvas><div class="topbar"><div class="stage-title" id="stage-title">J5 · 正方向<div></div><small>实线箭头：轴正向　圆弧箭头：正向旋转</small></div><div class="row"><button data-view="perspective">立体</button><button data-view="front">前视</button><button data-view="side">侧视</button><button data-view="top">俯视</button></div></div><div id="labels"></div><div class="legend"><div><span style="background:#f8b052"></span>黄色：转轴、正向圆弧与运动指针</div><div><span style="background:#79bedc"></span>蓝色：该关节下游连杆</div><div><span style="background:#748d9e"></span>灰蓝影子：参考姿态</div></div><div class="hint">左键拖动旋转 · 滚轮缩放 · 右键拖动平移 · 点击 J 标签切换关节</div><div id="error" role="alert"></div></section>
+</main>
+<script>/*__THREE_JS__*/</script>
+<script>
+'use strict';
+const MODEL = /*__MODEL_DATA__*/;
+const $ = id => document.getElementById(id);
+try {
+const scene = new THREE.Scene();
+const renderer = new THREE.WebGLRenderer({canvas:$('viewport'),antialias:true,alpha:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.outputColorSpace=THREE.SRGBColorSpace;
+const camera=new THREE.PerspectiveCamera(38,1,0.001,30);camera.up.set(0,0,1);
+scene.add(new THREE.HemisphereLight(0xe1f5ff,0x59636e,2.0));
+const light=new THREE.DirectionalLight(0xffffff,2.5);light.position.set(.4,-.4,.8);scene.add(light);
+const fill=new THREE.DirectionalLight(0xa3d3ee,1.3);fill.position.set(-.3,.5,.3);scene.add(fill);
+const grid=new THREE.GridHelper(1,20,0x496377,0x2b4253);grid.rotation.x=Math.PI/2;grid.position.z=-.005;scene.add(grid);
+const baseAxes=new THREE.AxesHelper(.07);scene.add(baseAxes);
+const palette=[0x526a7d,0x809eab,0x93b6c4,0x698fac,0x82b2c7,0x69a8bb,0x8eb8cc,0x96c9db];
+function makeRobot(ghost){
+ const links=new Map(), meshes=[];
+ for(const [index,link] of MODEL.links.entries()){
+  const group=new THREE.Group();group.name=link.name;links.set(link.name,group);
+  for(const visual of link.visuals){
+   const bytes=Uint8Array.from(atob(visual.positions),c=>c.charCodeAt(0));
+   const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array(bytes.buffer),3));geometry.computeVertexNormals();
+   const material=new THREE.MeshStandardMaterial({color:ghost?0x748d9e:visual.motor?0x384b5c:palette[index%palette.length],metalness:.05,roughness:.78,side:THREE.DoubleSide,transparent:ghost,opacity:ghost?.10:1,depthWrite:!ghost});
+   const mesh=new THREE.Mesh(geometry,material);mesh.userData={index,motor:visual.motor};group.add(mesh);meshes.push(mesh);
+  }
+ }
+ const joints=MODEL.joints.map(j=>{
+  const origin=new THREE.Group();origin.matrixAutoUpdate=false;origin.matrix.fromArray(j.origin);links.get(j.parent).add(origin);
+  const pivot=new THREE.Group();origin.add(pivot);pivot.add(links.get(j.child));return {origin,pivot,axis:new THREE.Vector3(...j.axis)};
+ });
+ const root=links.get(MODEL.root);scene.add(root);
+ return {root,links,meshes,joints};
+}
+const robot=makeRobot(false),reference=makeRobot(true);
+let q=MODEL.initial_q.slice(),referenceQ=q.slice(),selected=4,playing=false,startTime=0,animationBase=null;
+const target=new THREE.Vector3(0,0,.15);let radius=.65,azimuth=-1.0,elevation=.45;
+function applyPose(instance,values){instance.joints.forEach((joint,i)=>joint.pivot.quaternion.setFromAxisAngle(joint.axis,values[i]));instance.root.updateMatrixWorld(true);}
+applyPose(robot,q);applyPose(reference,referenceQ);
+function cameraUpdate(){const ce=Math.cos(elevation);camera.position.set(target.x+radius*ce*Math.cos(azimuth),target.y+radius*ce*Math.sin(azimuth),target.z+radius*Math.sin(elevation));camera.lookAt(target);camera.updateMatrixWorld();}
+function setCameraDirection(direction){direction.normalize();azimuth=Math.atan2(direction.y,direction.x);elevation=Math.asin(THREE.MathUtils.clamp(direction.z,-.9999,.9999));cameraUpdate();}
+function jointCenter(){return robot.joints[selected].origin.getWorldPosition(new THREE.Vector3());}
+function jointAxis(){return robot.joints[selected].axis.clone().transformDirection(robot.joints[selected].origin.matrixWorld);}
+function fit(){const bounds=new THREE.Box3().setFromObject(robot.root);bounds.getCenter(target);radius=Math.max(.3,bounds.getSize(new THREE.Vector3()).length()*1.8);cameraUpdate();}
+function focus(){target.copy(jointCenter());radius=.26;cameraUpdate();}
+const axisGroup=new THREE.Group();scene.add(axisGroup);
+const axisColor=0xf8b052, overlay={depthTest:false,depthWrite:false,transparent:true};
+const shaft=new THREE.ArrowHelper(new THREE.Vector3(0,0,1),new THREE.Vector3(0,0,-.06),.14,axisColor,.016,.008);axisGroup.add(shaft);
+shaft.line.material.depthTest=false;shaft.cone.material.depthTest=false;shaft.line.material.depthWrite=false;shaft.cone.material.depthWrite=false;shaft.line.renderOrder=100;shaft.cone.renderOrder=100;
+const dot=new THREE.Mesh(new THREE.SphereGeometry(.0035,16,12),new THREE.MeshBasicMaterial({color:axisColor,...overlay}));dot.renderOrder=101;axisGroup.add(dot);
+const arcPoints=[];for(let i=0;i<=64;i++){const a=-.35+i/64*Math.PI*1.55;arcPoints.push(new THREE.Vector3(.037*Math.cos(a),.037*Math.sin(a),0));}
+const arc=new THREE.Line(new THREE.BufferGeometry().setFromPoints(arcPoints),new THREE.LineBasicMaterial({color:axisColor,...overlay}));arc.renderOrder=101;axisGroup.add(arc);
+const arcEnd=arcPoints[arcPoints.length-1], tangent=new THREE.Vector3(-arcEnd.y,arcEnd.x,0).normalize();
+const arcTip=new THREE.Mesh(new THREE.ConeGeometry(.005,.013,12),new THREE.MeshBasicMaterial({color:axisColor,...overlay}));arcTip.position.copy(arcEnd);arcTip.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),tangent);arcTip.renderOrder=102;axisGroup.add(arcTip);
+const pointer=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(),.05,axisColor,.01,.005);axisGroup.add(pointer);pointer.line.material.depthTest=false;pointer.cone.material.depthTest=false;pointer.line.material.depthWrite=false;pointer.cone.material.depthWrite=false;pointer.line.renderOrder=103;pointer.cone.renderOrder=103;
+const axisLabel=document.createElement('div');axisLabel.className='badge axis-label';$('labels').append(axisLabel);
+const labels=robot.joints.map((j,i)=>{const label=document.createElement('button');label.className='badge';label.textContent=`J${i+1}`;label.onclick=()=>choose(i);$('labels').append(label);return label;});
+const jointButtons=robot.joints.map((j,i)=>{const button=document.createElement('button');button.textContent=`J${i+1}`;button.onclick=()=>choose(i);$('joints').append(button);return button;});
+function stop(){playing=false;$('play').textContent='▶ 播放正向转动';}
+function remember(){referenceQ=q.slice();applyPose(reference,referenceQ);}
+function appearance(){
+ const transparent=$('transparent').checked,nearby=$('nearby').checked;
+ for(const mesh of robot.meshes){const down=mesh.userData.index>=selected+1;mesh.visible=!nearby||mesh.userData.index>=selected;mesh.material.transparent=transparent;mesh.material.opacity=transparent?(down?.58:.23):1;mesh.material.depthWrite=!transparent;mesh.material.color.setHex(mesh.userData.motor?(down?0x527b91:0x384b5c):(down?0x79bedc:0x6a8395));}
+ reference.root.visible=$('ghost').checked;for(const mesh of reference.meshes)mesh.visible=!nearby||mesh.userData.index>=selected;
+}
+function sync(){
+ applyPose(robot,q);const deg=THREE.MathUtils.radToDeg(q[selected]);$('angle').value=deg;$('angle-value').textContent=`${deg.toFixed(1)}°`;$('rad-value').textContent=`${q[selected].toFixed(3)} rad`;
+ $('pose').textContent=`模型 q(rad) = [${q.map(x=>x.toFixed(3)).join(', ')}]`;
+}
+function choose(index){stop();selected=index;$('joint-title').textContent=`J${index+1} · 模型角度`;$('stage-title').firstChild.textContent=`J${index+1} · 正方向`;
+ jointButtons.forEach((b,i)=>b.classList.toggle('active',i===index));labels.forEach((b,i)=>b.classList.toggle('selected',i===index));axisLabel.textContent=`J${index+1} 转轴 +`;$('status').textContent='点击播放，观察黄色指针如何转动。';if(MODEL.live.mode==='offline')remember();appearance();sync();}
+$('angle').oninput=()=>{stop();q[selected]=THREE.MathUtils.degToRad(Number($('angle').value));sync();$('status').textContent='拖动滑块：角度增加表示模型正向转动。';};
+function increment(delta){stop();q[selected]=THREE.MathUtils.clamp(q[selected]+THREE.MathUtils.degToRad(delta),-Math.PI,Math.PI);sync();}
+$('minus').onclick=()=>increment(-15);$('plus').onclick=()=>increment(15);$('zero').onclick=()=>{stop();q[selected]=0;sync();};
+$('capture').onclick=()=>{stop();remember();$('status').textContent='已将当前模型姿态记录为灰蓝色参考。';};
+$('play').onclick=()=>{if(playing){stop();$('status').textContent='演示已暂停，可拖动视角继续观察。';return;}animationBase=q.slice();remember();startTime=performance.now();playing=true;$('play').textContent='Ⅱ 暂停演示';};
+$('amplitude').onchange=()=>{stop();$('status').textContent='已更改演示增量，再点击播放。';};
+$('focus').onclick=focus;$('axial').onclick=()=>{focus();setCameraDirection(jointAxis());};$('fit').onclick=fit;
+for(const id of ['transparent','ghost','nearby'])$(id).onchange=appearance;
+$('reset').onclick=()=>{stop();q.fill(0);remember();sync();fit();$('status').textContent='模型七轴已归零。';};
+document.querySelectorAll('[data-view]').forEach(button=>button.onclick=()=>{const dirs={perspective:[.6,-.9,.55],front:[0,-1,.001],side:[1,0,.001],top:[.001,0,1]};setCameraDirection(new THREE.Vector3(...dirs[button.dataset.view]));});
+let drag=null;const canvas=$('viewport');canvas.oncontextmenu=e=>e.preventDefault();
+canvas.onpointerdown=e=>{canvas.setPointerCapture(e.pointerId);drag={x:e.clientX,y:e.clientY,pan:e.button===2||e.shiftKey};};
+canvas.onpointerup=canvas.onpointercancel=()=>{drag=null;};
+canvas.onpointermove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;drag.x=e.clientX;drag.y=e.clientY;if(drag.pan){const right=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion),up=new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion);target.addScaledVector(right,-dx*radius*.0015).addScaledVector(up,dy*radius*.0015);}else{azimuth-=dx*.007;elevation=THREE.MathUtils.clamp(elevation+dy*.007,-1.55,1.55);}cameraUpdate();};
+canvas.addEventListener('wheel',e=>{e.preventDefault();radius=THREE.MathUtils.clamp(radius*Math.exp(e.deltaY*.001),.055,4);cameraUpdate();},{passive:false});
+const resize=()=>{const w=$('stage').clientWidth,h=$('stage').clientHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();};new ResizeObserver(resize).observe($('stage'));resize();choose(selected);fit();
+function projectLabel(label,point){const pos=point.clone().project(camera);const visible=pos.z>-1&&pos.z<1&&Math.abs(pos.x)<1&&Math.abs(pos.y)<1;label.style.display=visible?'block':'none';label.style.left=`${(pos.x*.5+.5)*canvas.clientWidth}px`;label.style.top=`${(-pos.y*.5+.5)*canvas.clientHeight}px`;return {x:(pos.x*.5+.5)*canvas.clientWidth,y:(-pos.y*.5+.5)*canvas.clientHeight,visible};}
+function tick(now){
+ requestAnimationFrame(tick);
+ if(playing){const phase=((now-startTime)/1000)%6;let fraction;if(phase<2.4){fraction=phase/2.4;$('status').textContent=`正向转动：J${selected+1} 角度正在增加 →`;}else if(phase<3.3){fraction=1;$('status').textContent='保持正向终点，拖动视角对比参考影子。';}else if(phase<5.3){fraction=1-(phase-3.3)/2;$('status').textContent='返回起点：当前是反向回转。';}else{fraction=0;$('status').textContent='保持起点，即将再次正向转动。';}q=animationBase.slice();q[selected]+=fraction*THREE.MathUtils.degToRad(Number($('amplitude').value));sync();}
+ const center=jointCenter(),axis=jointAxis();axisGroup.position.copy(center);axisGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),axis);
+ pointer.rotation.z=q[selected]-referenceQ[selected];
+ const occupied=[];labels.forEach((label,i)=>{if($('nearby').checked&&i<selected){label.style.display='none';return;}const point=robot.joints[i].origin.getWorldPosition(new THREE.Vector3());const pos=projectLabel(label,point);if(pos.visible){let y=pos.y-16;while(occupied.some(p=>Math.abs(p.x-pos.x)<48&&Math.abs(p.y-y)<25))y+=27;label.style.top=`${y}px`;occupied.push({x:pos.x,y});}});
+ const tipPos=projectLabel(axisLabel,center.clone().addScaledVector(axis,.095));
+ const centerPos=center.clone().project(camera);
+ const centerX=(centerPos.x*.5+.5)*canvas.clientWidth,centerY=(-centerPos.y*.5+.5)*canvas.clientHeight;
+ if(tipPos.visible&&Math.hypot(tipPos.x-centerX,tipPos.y-centerY)<65){axisLabel.style.left=`${THREE.MathUtils.clamp(centerX+115,70,canvas.clientWidth-70)}px`;axisLabel.style.top=`${Math.max(95,centerY-40)}px`;}
+ renderer.render(scene,camera);
+}
+// Read-only diagnostics for offline browser/kinematics verification.
+window.gelloViewer={model:MODEL,get q(){return q.slice();},get selected(){return selected;},select:choose,setPose(values){if(values.length!==7||!values.every(Number.isFinite))throw Error('需要7个有限角度');stop();q=values.slice();sync();},getJointFrames(){robot.root.updateMatrixWorld(true);return robot.joints.map(j=>j.origin.matrixWorld.elements.slice());},get playing(){return playing;}};
+/*__LIVE_VIEW__*/
+requestAnimationFrame(tick);
+} catch(error){$('error').style.display='block';$('error').textContent='3D 页面未能启动：'+error.message+'。请使用支持 WebGL 的 Chrome、Edge 或 Firefox。';console.error(error);}
+</script>
+</body>
+</html>

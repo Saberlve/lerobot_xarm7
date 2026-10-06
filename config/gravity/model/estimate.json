@@ -1,0 +1,387 @@
+{
+  "version": 1,
+  "upstream_revision": "8ea3f2e661b55d4a128683b09227f8e771cd729e",
+  "mesh_directory": "source_meshes",
+  "pla_density_kg_m3": 1240.0,
+  "printed_mass_scale": 1.0,
+  "part_mass_scales": {},
+  "weld_grid_m": 1e-08,
+  "motor_mass_kg": 0.018,
+  "fasteners_and_wire_kg_per_link": 0.003,
+  "base_motor_mount": {
+    "back_center_mm": [
+      -62.5,
+      10,
+      0
+    ],
+    "outward_normal": [
+      0,
+      1,
+      0
+    ],
+    "long_axis": [
+      1,
+      0,
+      0
+    ]
+  },
+  "links": [
+    {
+      "mesh": "L1",
+      "incoming_frame": {
+        "point_mm": [
+          0,
+          0,
+          2.5
+        ],
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "x_hint": [
+          1,
+          0,
+          0
+        ]
+      },
+      "zero_twist_deg": 0,
+      "next_motor_mount": {
+        "back_center_mm": [
+          0,
+          4.8,
+          48.5
+        ],
+        "outward_normal": [
+          0,
+          1,
+          0
+        ],
+        "long_axis": [
+          0,
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "mesh": "L2",
+      "incoming_frame": {
+        "point_mm": [
+          0,
+          26.5,
+          -89
+        ],
+        "normal": [
+          0,
+          1,
+          0
+        ],
+        "x_hint": [
+          1,
+          0,
+          0
+        ]
+      },
+      "zero_twist_deg": 180,
+      "next_motor_mount": {
+        "back_center_mm": [
+          0,
+          17.5,
+          -9.7
+        ],
+        "outward_normal": [
+          0,
+          0,
+          1
+        ],
+        "long_axis": [
+          0,
+          1,
+          0
+        ]
+      }
+    },
+    {
+      "mesh": "L3",
+      "incoming_frame": {
+        "point_mm": [
+          0,
+          0,
+          2.5
+        ],
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "x_hint": [
+          1,
+          0,
+          0
+        ]
+      },
+      "zero_twist_deg": 90,
+      "next_motor_mount": {
+        "back_center_mm": [
+          18.4,
+          15.002,
+          37.6305
+        ],
+        "outward_normal": [
+          1,
+          0,
+          0
+        ],
+        "long_axis": [
+          0,
+          0.477167,
+          0.878813
+        ]
+      }
+    },
+    {
+      "mesh": "L4",
+      "incoming_frame": {
+        "point_mm": [
+          -12.5,
+          10,
+          0
+        ],
+        "normal": [
+          1,
+          0,
+          0
+        ],
+        "x_hint": [
+          0,
+          0,
+          1
+        ]
+      },
+      "zero_twist_deg": 120,
+      "next_motor_mount": {
+        "back_center_mm": [
+          -48.5,
+          70.75931426055392,
+          -26.830838288082436
+        ],
+        "outward_normal": [
+          0.0,
+          0.7313537770390333,
+          -0.6819982791845887
+        ],
+        "long_axis": [
+          0,
+          0.6819982791845887,
+          0.7313537770390333
+        ]
+      }
+    },
+    {
+      "mesh": "L5",
+      "incoming_frame": {
+        "point_mm": [
+          1,
+          83.75,
+          0
+        ],
+        "normal": [
+          0,
+          -1,
+          0
+        ],
+        "x_hint": [
+          0,
+          0,
+          1
+        ]
+      },
+      "zero_twist_deg": 180,
+      "next_motor_mount": {
+        "back_center_mm": [
+          19.7,
+          7.5,
+          0
+        ],
+        "outward_normal": [
+          -1,
+          0,
+          0
+        ],
+        "long_axis": [
+          0,
+          -1,
+          0
+        ]
+      }
+    },
+    {
+      "mesh": "L6",
+      "incoming_frame": {
+        "point_mm": [
+          2.5,
+          15,
+          -15
+        ],
+        "normal": [
+          1,
+          0,
+          0
+        ],
+        "x_hint": [
+          0,
+          1,
+          0
+        ]
+      },
+      "zero_twist_deg": 90,
+      "next_motor_mount": {
+        "back_center_mm": [
+          2.5,
+          -16.3,
+          15.824
+        ],
+        "outward_normal": [
+          0,
+          -1,
+          0
+        ],
+        "long_axis": [
+          0,
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "mesh": "handle",
+      "incoming_frame": {
+        "point_mm": [
+          -15.348,
+          -20.942,
+          0
+        ],
+        "normal": [
+          0.052336,
+          0.99863,
+          0
+        ],
+        "x_hint": [
+          0,
+          0,
+          1
+        ]
+      },
+      "zero_twist_deg": 0,
+      "next_motor_mount": {
+        "back_center_mm": [
+          -6.073,
+          2.684,
+          18
+        ],
+        "outward_normal": [
+          0,
+          0,
+          -1
+        ],
+        "long_axis": [
+          1,
+          0,
+          0
+        ]
+      }
+    }
+  ],
+  "trigger_incoming_frame": {
+    "point_mm": [
+      0,
+      8,
+      0
+    ],
+    "normal": [
+      0,
+      1,
+      0
+    ],
+    "x_hint": [
+      1,
+      0,
+      0
+    ]
+  },
+  "trigger_park_deg": 0,
+  "assumptions": [
+    "Official STL geometry, millimeter scale, frozen upstream revision; mesh shapes are not invented.",
+    "PLA density 1240 kg/m^3 is a representative NatureWorks 4043D material value, not a measurement of the purchased filament.",
+    "printed_mass_scale=1 is a uniform SOLID reference. Official xArm7 infill, walls and slicer settings were not found. It is not a claim of 100% infill in the purchased device.",
+    "Each printed part may override the uniform mass scale. This approximation preserves the solid COM; real shells/infill can shift COM.",
+    "Mount centers inferred from STL hole patterns; servo-facing sides, oblique L4 mounting frame, horn seating depth and zero twists require physical comparison. This is a reconstructed assembly, not an official CAD export.",
+    "Each XL330 is 18 g per ROBOTIS specifications. COM/inertia use a uniform 20x34x26 mm envelope; motor case/horn visual are simplified.",
+    "Fasteners and moving wire are estimated as 3 g per moving link at its combined COM. U2D2 and base electronics are fixed and omitted from moving mass.",
+    "Motor1 is fixed to base. Motor2 is carried by link1, ... motor8 by link7. Motors are counted once.",
+    "Trigger is fixed at one parked pose and its mass is aggregated into link7; spring forces and trigger-motion gravity variation are not modeled.",
+    "Joint zero is defined by this model, NOT follower rebase offsets or encoder factory zero. No encoder calibration is supplied.",
+    "URDF limits are computational ranges, not verified physical limits. No collision model is supplied. No live commissioning flags are set.",
+    "Model zero twists select an open reference posture; they are not manufacturer encoder offsets."
+  ],
+  "sources": {
+    "mechanical": "https://github.com/wuphilipp/gello_mechanical/tree/main/xarm7",
+    "assembly": "https://docs.google.com/document/d/1bdvqPiW4jI5PJm6aIFizhcTuyVJZGEIgqbJe92IoyaM/edit",
+    "motor": "https://emanual.robotis.com/docs/en/dxl/x/xl330-m288/",
+    "gripper_motor": "https://emanual.robotis.com/docs/en/dxl/x/xl330-m077/",
+    "material": "https://www.natureworksllc.com/~/media/Files/NatureWorks/Technical-Documents/Technical-Data-Sheets/TechnicalDataSheet_4043D_3D-monofilament_pdf.pdf",
+    "printing_question_other_variant": "https://github.com/wuphilipp/gello_mechanical/issues/27"
+  },
+  "mesh_sha256": {
+    "L1": "6d5f8d3ca77e77a7eb773540f9f831ad8b63f9e1235471bf1ed79630f8f0efd6",
+    "L2": "b60ca32fc6c7ffa4725a3176a177c891906e908a59d48ef8cd5f7297a7f89739",
+    "L3": "a90668c72478fd1a8de3976a9a2b5501cbc9c7bce8ea9f9fbd4deae54d8582d8",
+    "L4": "50107ff70643f0db844d1f7cd3a309454f45430292867b9868cddf68cf2accb8",
+    "L5": "9886afe6b61e4f77b67d94e88ba5fc7454c5962a20c4541075626b4ef7671e86",
+    "L6": "51031f33fcbdec526fe701a2f9ea0ca5f215912d7cc8b8490785eb4f6531b3a5",
+    "base": "14230a3da0000f0d790a262c7cd8034d1095a4b3858f6858bbd519ebd92b77ca",
+    "handle": "5bd429cce4e99692d406d758cd896bde79b71f4aab8bfed0850dfcd0fe3e91f5",
+    "trigger": "711d2bf0a499948efabd2dbcb39703532ac59f114965af1b14ec97efca52360f"
+  },
+  "assembly_revision": "l1-l3-l6-opposite-motor-faces",
+  "motor_side_corrections": {
+    "basis": "User identified motors on L1, L3 and L6 as mounted on the opposite side in three photographs of the same nonzero pose. No encoder readings were supplied.",
+    "shaft_direction_verified": false,
+    "encoder_mapping_verified": false,
+    "mount_centers_verified": false,
+    "placement_method": "Move motor back to the opposite STL mounting face and reverse its outward normal; preserve tangential back-center coordinates and long_axis. Mount centers remain estimates.",
+    "changes": [
+      {"link": "L1", "motor_id": 2, "axis": "Y", "previous_face_mm": 2.5, "opposite_face_mm": 4.8},
+      {"link": "L3", "motor_id": 4, "axis": "X", "previous_face_mm": 16.1, "opposite_face_mm": 18.4},
+      {"link": "L6", "motor_id": 7, "axis": "Y", "previous_face_mm": -14.0, "opposite_face_mm": -16.3}
+    ]
+  },
+  "j5_mount_correction": {
+    "reason": "User confirmed J5 body belongs on the opposite side of L4; checked against official xArm7 assembly illustration.",
+    "previous_mount": {
+      "back_center_mm": [
+        -48.5,
+        69.063,
+        -25.249
+      ],
+      "outward_normal": [
+        0,
+        -0.732,
+        0.681
+      ],
+      "long_axis": [
+        0,
+        0.681,
+        0.732
+      ]
+    },
+    "stl_mount_face_normal": [
+      0.0,
+      0.7313537770390333,
+      -0.6819982791845887
+    ],
+    "stl_mount_face_plane_mm": 70.04867728670023,
+    "reference": "https://docs.google.com/document/d/1bdvqPiW4jI5PJm6aIFizhcTuyVJZGEIgqbJe92IoyaM/edit"
+  }
+}
