@@ -7,15 +7,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from lerobot_robot_ufactory.gravity_compensation.config import DeviceProfile
-from lerobot_robot_ufactory.gravity_compensation.monitoring.encoder_monitor import EncoderMonitor
+from lerobot_robot_ufactory.current_control.config import DeviceProfile
+from lerobot_robot_ufactory.current_control.monitoring.encoder_monitor import EncoderMonitor
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
 def profile():
-    p = DeviceProfile(ROOT / "config/gravity/gello_A_working.yaml")
+    p = DeviceProfile(ROOT / "config/current_control/gello_A_working.yaml")
     # Exercise signs independently of the current all-positive real calibration.
     p.signs = np.array([1, -1, 1, -1, 1, -1, 1])
     return p

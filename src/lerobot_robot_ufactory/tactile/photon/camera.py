@@ -5,9 +5,10 @@ consumers receive timestamped copies with bounded cache age.
 """
 
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Condition, Event, Thread
+from threading import Condition, Event, Thread, RLock
 from time import perf_counter, perf_counter_ns
 from typing import Any
 
@@ -77,6 +78,9 @@ class XensePhotonCamera(TactileCamera):
         super().__init__(config)
         self.config = config
         self._sensor = None
+        self._solver = None
+        self._solver_runtime = None
+        self._solver_lock = RLock()
         self._thread = None
         self._condition = Condition()
         self._stop = Event()
@@ -105,31 +109,43 @@ class XensePhotonCamera(TactileCamera):
             "motion_3d_output": self.config.motion_3d_output,
         }
 
+    @contextmanager
+    def deferred_session(self, runtime_dir: Path):
+        """One solver per sensor/runtime batch, including nested episode calls."""
+        runtime = (Path(runtime_dir) / f"runtime_{self.config.serial_number}").resolve()
+        with self._solver_lock:
+            if self._solver is not None:
+                if runtime != self._solver_runtime:
+                    raise RuntimeError("Cannot switch runtime inside a deferred session")
+                yield self
+                return
+            sensor_class = _sensor_class()
+            solver = sensor_class.createSolver(runtime, overrides={"dev.disable_infer": False})
+            if not solver:
+                raise RuntimeError(f"Cannot create offline solver: {runtime}")
+            self._solver, self._solver_runtime = solver, runtime
+            try:
+                yield self
+            finally:
+                self._solver = self._solver_runtime = None
+                solver.release()
+
     def compute_deferred_features(
         self, image_bgr: NDArray[np.uint8], runtime_dir: Path
     ) -> dict[str, NDArray[np.float32]]:
-        from xensesdk import Sensor
-
-        runtime = runtime_dir / f"runtime_{self.config.serial_number}"
-        solver = Sensor.createSolver(runtime, overrides={"dev.disable_infer": False})
-        if not solver:
-            raise RuntimeError(f"Cannot create offline solver: {runtime}")
-        try:
-            flow = np.asarray(
-                solver.selectSensorInfo(
-                    Sensor.OutputType.Mesh3DFlow, rectify_image=image_bgr
-                ),
-                dtype=np.float32,
+        with self.deferred_session(runtime_dir):
+            flow = np.array(
+                self._solver.selectSensorInfo(
+                    _sensor_class().OutputType.Mesh3DFlow, rectify_image=image_bgr
+                ), dtype=np.float32, copy=True,
             )
-        finally:
-            solver.release()
-        expected_shape = self.deferred_feature_shapes["mesh_motion_3d"]
-        if flow.shape != expected_shape or not np.isfinite(flow).all():
-            raise RuntimeError(
-                f"Invalid offline Mesh3DFlow for {self.config.serial_number}: "
-                f"expected {expected_shape}, got {flow.shape}"
-            )
-        return {"mesh_motion_3d": flow}
+            expected_shape = self.deferred_feature_shapes["mesh_motion_3d"]
+            if flow.shape != expected_shape or not np.isfinite(flow).all():
+                raise RuntimeError(
+                    f"Invalid offline Mesh3DFlow for {self.config.serial_number}: "
+                    f"expected {expected_shape}, got {flow.shape}"
+                )
+            return {"mesh_motion_3d": flow}
 
     @property
     def is_connected(self) -> bool:

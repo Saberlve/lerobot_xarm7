@@ -138,7 +138,6 @@ class XL330Transport:
 
     def state(self):
         start = time.monotonic()
-        sample_start_ns = time.perf_counter_ns()
         # SDK GroupSyncRead.rxPacket discards each status packet's device error.
         # Keep its broadcast request, but validate every reply ourselves.
         self.check(self.reader.txPacket(), 0, "sync read request")
@@ -149,7 +148,6 @@ class XL330Transport:
             if len(data) != 21:
                 raise RuntimeError(f"Incomplete state for ID{dxl_id}")
             payloads[dxl_id] = bytes(data)
-        sample_end_ns = time.perf_counter_ns()
         q, dq, current, temperature, voltage = [], [], [], [], []
         for dxl_id in self.profile.all_ids:
 
@@ -163,8 +161,6 @@ class XL330Transport:
             temperature.append(value(146, 1))
         return {
             "stamp": start,
-            "sample_start_ns": sample_start_ns,
-            "sample_end_ns": sample_end_ns,
             "position": np.array(q),
             "velocity": np.array(dq),
             "current_a": current,

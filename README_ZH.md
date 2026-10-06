@@ -1,37 +1,20 @@
 # UFACTORY xArm7 · LeRobot（GELLO / 手动拖拽）
 
-## GELLO 重力补偿（实验功能）
+## GELLO 恒流与阻尼
 
-`gravity_comp` 分支提供按 USB 序列号区分的双 GELLO 补偿、只读诊断、URDF 生成与离线验证。
-已接入官方 xArm7 GELLO STL 的装配估算 URDF；两套 profile 共用几何、独立标定。正式出力需要完整标定；当前 working 配置支持显式实验补偿和逐轴增益，标定未完成项仍保留。
-真机测试与标定按配置文件、网页提示和下方命令执行，出力前须完成只读检查并托住手臂。
-补偿功能直接位于 `gravity_compensation/` 下，网页界面位于 `web/`，运行入口仅保留网页和遥操作，详见 [代码结构](src/lerobot_robot_ufactory/gravity_compensation/README.md)。
-
-GELLO A 的重力补偿已接入 xArm7 遥操，使用单个串口连接，暂停跟随时保持支撑，退出时卸力：
+main 仅运行恒流与定幅阻尼；模型重力补偿实现保存在 `feature/gello-gravity-compensation` 分支。
+默认 J2 为 -50 mA，J4 为 +80 mA；J3/J7 为与运动方向相反的 2 mA 阻尼，速度死区为 0.05 rad/s；其余轴零电流。
+参数在 `config/current_control/gello_A_working.yaml`。启动保留 2 秒缓升、电流限速、温度保护和通信看门狗。
+网页保留模型查看与电流控制，默认离线，不会自动启用电机：
 
 ```bash
-.venv/bin/uf-robot-teleop --config_path config/gello/xarm7_gello_teleop_gravity.yaml
+.venv/bin/python -m lerobot_robot_ufactory.current_control.web.tuning_web --profile config/current_control/gello_A_working.yaml --port 8765
 ```
 
-启动前托持 GELLO，退出其他串口程序。网页、上述遥操及 `xarm7_gello_record_gravity_config.yaml` 的默认 J1–J7 绝对增益已保存为 `[0.0, 0.12, 0.025, 0.15, 0.0, 0.135, 0.12]`（2026-10-06 用户实测确认）；遥操配置位于 `teleop.gravity_compensation.joint_gains`，旧 J5/J6 覆盖已清空。每轴限流 1 A，遥操补偿持续至退出，不限制相对启动姿态的位移。日志自动保存到 `logs/gravity_teleop/`。
-
-设置 `joint_gains` 后应修改列表对应项，单改全局 `gain` 不会改变列表中的轴。
-
-> [English Version](README.md)
-
-统一网页支持离线模型演示、只读电机角度对照和持续补偿调参，无需启动 xArm 遥操作：
-
-```bash
-.venv/bin/python -m lerobot_robot_ufactory.gravity_compensation.web.tuning_web \
-  --profile config/gravity/gello_A_working.yaml --port 8765
-```
-
-打开 <http://127.0.0.1:8765>，默认使用上述实测七轴增益。
-页面默认离线查看，不连接电机；点击“只读电机角度”可核对实物姿态，点击“开始持续补偿”才出力。
-使用红色“立即卸力”按钮停止补偿，停止后可切回离线或只读查看。网页失联超过 3 秒自动卸力。
-每轴可在线调整电流变化率（50–200 mA/s）；默认 J1–J7 为 `[170, 200, 170, 170, 160, 170, 170] mA/s`，网页及重力补偿遥操/录制均沿用；启动前 2 秒保留原限速。
-显示逐轴温度，40°C 起提示，网页及使用默认运行变化率的遥操模式达到 45°C 自动卸力，电流上限保持原值。
-网页启动后默认离线查看；可切换只读角度或持续补偿，页面内含增益、变化率、温度和卸力控制。
+遥操作使用 `config/gello/xarm7_gello_teleop_current.yaml`。
+完整 chips 录制使用 `config/gello/xarm7_gello_record_xense_potato_chips.yaml`，控制 30 Hz、数据集 15 FPS，含相机及双 Photon。
+配置项为 `teleop.current_control`，不再支持重力增益。网页失联超过 3 秒自动卸力。
+Photon 离线 Mesh3DFlow 按传感器复用 solver，整批 episode 完成或异常时释放。
 
 UFACTORY xArm 与 [LeRobot](https://github.com/huggingface/lerobot) 框架的集成项目，专注于两种数据采集方式：
 

@@ -28,8 +28,8 @@ class GelloTeleop(UFBaseTeleop):
         self._teleop_enabled = False
         self._needs_alignment = True
         self._is_calibrated = True # CHECK!!
-        self._gravity_runtime = None
-        self._gravity_log = None
+        self._current_runtime = None
+        self._current_log = None
         self._keyboard_gripper_state = {"close": False, "open": False}
         self._keyboard_gripper_target = None
         self._keyboard_gripper_observed_position = None
@@ -99,8 +99,8 @@ class GelloTeleop(UFBaseTeleop):
         if self._is_connected:
             raise DeviceAlreadyConnectedError(f"{self} already connected")
         try:
-            if self.config.gravity_compensation.enabled:
-                self.start_gravity_compensation()
+            if self.config.current_control.enabled:
+                self.start_current_control()
             else:
                 from gello.agents.gello_agent import GelloAgent
                 self.gello_agent = GelloAgent(port=self.config.port, dynamixel_config=self._dynamixel_robo_config)
@@ -120,40 +120,37 @@ class GelloTeleop(UFBaseTeleop):
             raise
         logger.info(f"{self} connected.")
 
-    def start_gravity_compensation(self):
+    def start_current_control(self):
         """Create the sole connection for this GELLO, after commissioning checks."""
-        from ...gravity_compensation.monitoring.logging import GravityLog
-        from ...gravity_compensation.control.runtime import GravityRuntime, RuntimeAgent, RuntimeRobot
-        if not self.config.gravity_compensation.enabled:
-            raise RuntimeError("Enable gravity_compensation in the configuration before connecting")
-        if self._is_connected and self._gravity_runtime is None:
-            raise RuntimeError("Disconnect the passive driver before enabling gravity compensation")
-        if self._gravity_runtime is not None:
-            self._gravity_runtime.raise_if_failed()
-            if self._gravity_runtime.status()["state"] != "active":
+        from ...current_control.monitoring.logging import CurrentLog
+        from ...current_control.control.runtime import CurrentRuntime, RuntimeAgent, RuntimeRobot
+        if not self.config.current_control.enabled:
+            raise RuntimeError("Enable current_control in the configuration before connecting")
+        if self._is_connected and self._current_runtime is None:
+            raise RuntimeError("Disconnect the passive driver before enabling current control")
+        if self._current_runtime is not None:
+            self._current_runtime.raise_if_failed()
+            if self._current_runtime.status()["state"] != "active":
                 raise RuntimeError("Compensation was stopped; disconnect and reconnect before resuming")
             return
-        gravity_config = self.config.gravity_compensation
-        profile = gravity_config.load_profile()
+        current_config = self.config.current_control
+        profile = current_config.load_profile()
         if profile.port != self.config.port or tuple(self.config.joint_ids) != profile.ids or self.config.gripper_id != profile.gripper_id:
-            raise ValueError("Gravity profile port/joint IDs/gripper must match teleop config")
-        runtime = GravityRuntime(profile, live=True, experimental=gravity_config.experimental, teleop=True)
-        self._gravity_runtime = runtime
+            raise ValueError("Current profile port/joint IDs/gripper must match teleop config")
+        runtime = CurrentRuntime(profile, live=True, experimental=current_config.experimental, teleop=True)
+        self._current_runtime = runtime
         self.gello_agent = RuntimeAgent(RuntimeRobot(runtime, self.config.joint_signs, self._dynamixel_robo_config.gripper_config))
-        if gravity_config.log_dir is not None:
-            self._gravity_log = GravityLog(runtime, gravity_config.log_dir)
-            self._gravity_log.start()
-            logger.info("GELLO gravity diagnostics: %s", self._gravity_log.path)
-        logger.info("GELLO gravity gains: global=%s, J5=%s, J6=%s; continuous teleop support",
-                    profile.gain, profile.j5_gain, profile.j6_gain)
-        if profile.joint_gains is not None:
-            logger.info("GELLO J1..J7 gravity gains: %s (J5/J6 overrides take precedence)",
-                        profile.joint_gains)
+        if current_config.log_dir is not None:
+            self._current_log = CurrentLog(runtime, current_config.log_dir)
+            self._current_log.start()
+            logger.info("GELLO current diagnostics: %s", self._current_log.path)
+        logger.info("GELLO constant currents: %s A; damping: %s A",
+                    profile.constant_current_a, profile.constant_damping_a.tolist())
         runtime.start()
 
-    def stop_gravity_compensation(self):
+    def stop_current_control(self):
         """Explicit unload also stops follower output; reconnect to resume."""
-        runtime = getattr(self, "_gravity_runtime", None)
+        runtime = getattr(self, "_current_runtime", None)
         if runtime is not None:
             self._teleop_enabled = False
             self._needs_alignment = True
@@ -161,27 +158,27 @@ class GelloTeleop(UFBaseTeleop):
             try:
                 runtime.stop()
             finally:
-                self._stop_gravity_log()
+                self._stop_current_log()
 
-    def _stop_gravity_log(self):
-        gravity_log = getattr(self, "_gravity_log", None)
+    def _stop_current_log(self):
+        gravity_log = getattr(self, "_current_log", None)
         if gravity_log is not None:
             gravity_log.stop()
 
-    def check_gravity_compensation(self):
-        runtime = getattr(self, "_gravity_runtime", None)
+    def check_current_control(self):
+        runtime = getattr(self, "_current_runtime", None)
         if runtime is not None:
-            gravity_log = getattr(self, "_gravity_log", None)
+            gravity_log = getattr(self, "_current_log", None)
             if gravity_log is not None:
                 gravity_log.raise_if_failed()
             runtime.raise_if_failed()
             if runtime.status()["state"] != "active":
                 raise RuntimeError("GELLO compensation stopped; disconnect and reconnect to resume")
 
-    def get_gravity_compensation_status(self):
-        runtime = getattr(self, "_gravity_runtime", None)
+    def get_current_control_status(self):
+        runtime = getattr(self, "_current_runtime", None)
         result = {"state": "disabled"} if runtime is None else runtime.status()
-        gravity_log = getattr(self, "_gravity_log", None)
+        gravity_log = getattr(self, "_current_log", None)
         if gravity_log is not None:
             result["log_path"] = str(gravity_log.path)
         return result
@@ -408,7 +405,7 @@ class GelloTeleop(UFBaseTeleop):
 
     def set_teleop_enabled(self, enabled: bool, obs=None):
         if enabled:
-            self.check_gravity_compensation()
+            self.check_current_control()
         if enabled and not self._is_connected:
             raise DeviceNotConnectedError("Gello teleop is not connected")
         if enabled and self._needs_alignment:
@@ -541,12 +538,8 @@ class GelloTeleop(UFBaseTeleop):
                             )
             return self._keyboard_gripper_target
 
-    def get_action_sample_timing(self):
-        """Timing for the raw sample consumed by the most recent get_action call."""
-        return dict(getattr(self.gello_agent._robot, "last_joint_sample_timing", {}))
-
     def get_action(self) -> dict[str, np.ndarray]:
-        self.check_gravity_compensation()
+        self.check_current_control()
         if not self._teleop_enabled:
             raise RuntimeError("Gello teleop is disabled")
         fake_obs = dict({"joint_state": np.array([0.0]*(self.dof+1))}) # for agent.act() argument, actually no use
@@ -599,7 +592,7 @@ class GelloTeleop(UFBaseTeleop):
             try:
                 gello_robot._driver.close()
             finally:
-                self._stop_gravity_log()
+                self._stop_current_log()
 
     def disconnect(self) -> None:
         try:
@@ -608,7 +601,7 @@ class GelloTeleop(UFBaseTeleop):
             self._is_connected = False
             self._teleop_enabled = False
             self._needs_alignment = True
-            runtime = getattr(self, "_gravity_runtime", None)
+            runtime = getattr(self, "_current_runtime", None)
             if runtime is not None and runtime.status()["state"] in ("stopped", "fault"):
-                self._gravity_runtime = None
+                self._current_runtime = None
         logger.info(f"{self} disconnected.")

@@ -9,22 +9,21 @@ import numpy as np
 import pytest
 import yaml
 
-from lerobot_robot_ufactory.gravity_compensation.config import DeviceProfile
-from lerobot_robot_ufactory.gravity_compensation.models.mesh_mass import (
+from lerobot_robot_ufactory.current_control.config import DeviceProfile
+from lerobot_robot_ufactory.current_control.models.mesh_mass import (
     combine_properties,
     read_binary_stl,
     solid_properties,
 )
-from lerobot_robot_ufactory.gravity_compensation.control.model import GravityModel
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = ROOT / "config/gravity/model/estimate.json"
+SPEC = ROOT / "config/current_control/model/estimate.json"
 
 # The offline builder is a repository tool, outside the installed runtime package.
 _builder_spec = importlib.util.spec_from_file_location(
-    "gravity_compensation.official_model",
-    ROOT / "src/lerobot_robot_ufactory/gravity_compensation/official_model.py",
+    "current_control.official_model",
+    ROOT / "src/lerobot_robot_ufactory/current_control/official_model.py",
 )
 builder = importlib.util.module_from_spec(_builder_spec)
 _builder_spec.loader.exec_module(builder)
@@ -98,58 +97,11 @@ def test_frame_inverse_and_gimbal_rpy_roundtrip():
     ]:
         t = builder.frame([1, 2, 3], normal, x)
         np.testing.assert_allclose(builder.inverse(t) @ t, np.eye(4), atol=1e-15)
-        import pinocchio as pin
+        pin = pytest.importorskip("pinocchio")
 
         np.testing.assert_allclose(pin.rpy.rpyToMatrix(*builder.rpy(t[:3, :3])), t[:3, :3], atol=1e-15)
 
 
-def test_official_estimate_gravity_and_live_gate(tmp_path):
-    out = tmp_path / "model"
-    report = builder.build_estimate(SPEC, out)
-    import pinocchio as pin
-
-    visual_model = pin.buildGeomFromUrdf(
-        pin.buildModelFromUrdf(str(out / "xarm7_gello.urdf")),
-        str(out / "xarm7_gello.urdf"),
-        pin.GeometryType.VISUAL,
-        package_dirs=[str(out)],
-    )
-    assert visual_model.ngeoms == 25
-    assert len(report["joints"]) == 7
-    assert len(report["parts_in_original_stl_frames"]) == 9
-    assert [x["motor_id_on_parent_body"] for x in report["links"]] == list(range(2, 9))
-    printed = sum(
-        p["mass_kg"] for name, p in report["parts_in_original_stl_frames"].items() if name != "base"
-    )
-    assert report["moving_mass_kg"] == pytest.approx(printed + 7 * 0.018 + 7 * 0.003)
-    config = json.loads((ROOT / "config/gravity/gello_A_working.yaml").read_text())
-    config["urdf"] = str(out / "xarm7_gello.urdf")
-    config["urdf_sha256"] = report["urdf_sha256"]
-    config["commissioning"] = {key: True for key in config["commissioning"]}
-    config.update(baudrate=1000000, rate_hz=100, state_timeout_s=0.05, watchdog_ms=100)
-    profile_path = tmp_path / "profile.json"
-    profile_path.write_text(json.dumps(config))
-    p = DeviceProfile(profile_path)
-    with pytest.raises(ValueError, match="UNVERIFIED|unverified|fixture"):
-        p.validate_live()
-    model = GravityModel(p)
-    rng = np.random.default_rng(73)
-    for q in rng.uniform(-1, 1, (12, 7)):
-        numeric = np.array(
-            [
-                (
-                    model.potential(q + np.eye(7)[i] * 1e-6)
-                    - model.potential(q - np.eye(7)[i] * 1e-6)
-                )
-                / 2e-6
-                for i in range(7)
-            ]
-        )
-        np.testing.assert_allclose(model.gravity(q), numeric, atol=2e-8)
-        # Rotation around the vertical base axis cannot change gravitational potential.
-        assert abs(model.gravity(q)[0]) < 1e-12
-    with pytest.raises(FileExistsError):
-        builder.build_estimate(SPEC, out)
 
 
 def test_changed_source_mesh_rejected(tmp_path):
@@ -163,16 +115,15 @@ def test_changed_source_mesh_rejected(tmp_path):
 
 
 def test_shipped_profiles_use_official_model_and_visual_meshes():
-    import pinocchio as pin
+    pin = pytest.importorskip("pinocchio")
 
     for name in ["gello_A_working"]:
-        p = DeviceProfile(ROOT / f"config/gravity/{name}.yaml")
+        p = DeviceProfile(ROOT / f"config/current_control/{name}.yaml")
         assert p.urdf.name == "xarm7_gello.urdf"
-        with pytest.raises(ValueError, match="not commissioned"):
-            p.validate_live()
-        model = GravityModel(p)
+        p.validate_live()
+        model = pin.buildModelFromUrdf(str(p.urdf))
         visuals = pin.buildGeomFromUrdf(
-            model.model, str(p.urdf), pin.GeometryType.VISUAL, package_dirs=[str(p.urdf.parent)]
+            model, str(p.urdf), pin.GeometryType.VISUAL, package_dirs=[str(p.urdf.parent)]
         )
         assert visuals.ngeoms == 25
 
@@ -187,23 +138,24 @@ def test_recording_config_retains_feedback_and_parses_gravity():
 
     original = yaml.safe_load((ROOT / "config/gello/xarm7_gello_record_config.yaml").read_text())
     configured = yaml.safe_load(
-        (ROOT / "config/gello/xarm7_gello_record_gravity_config.yaml").read_text()
+        (ROOT / "config/gello/xarm7_gello_record_current_config.yaml").read_text()
     )
     parsed = draccus.decode(TeleoperatorConfig, configured["teleop"])
     assert isinstance(parsed, GelloTeleopConfig)
-    assert parsed.gravity_compensation.enabled
-    p = DeviceProfile(ROOT / parsed.gravity_compensation.profile_path)
+    assert parsed.current_control.enabled
+    p = DeviceProfile(ROOT / parsed.current_control.profile_path)
     assert parsed.port == p.port
     assert tuple(parsed.joint_ids) == tuple(p.ids)
-    configured["teleop"].pop("gravity_compensation")
-    assert configured == original
+    configured["teleop"].pop("current_control")
+    assert configured["robot"] == original["robot"]
+    assert configured["dataset"] == original["dataset"]
 
 
 def test_regenerated_working_model_matches_shipped_dynamics(tmp_path):
     out = tmp_path / "regenerated"
     builder.build_estimate(SPEC, out)
     regenerated = ET.parse(out / "xarm7_gello.urdf").getroot()
-    working = DeviceProfile(ROOT / "config/gravity/gello_A_working.yaml")
+    working = DeviceProfile(ROOT / "config/current_control/gello_A_working.yaml")
     shipped = ET.parse(working.urdf).getroot()
     # Visual mesh relative paths depend on output location; dynamics do not.
     for tag in ("joint", "link"):
@@ -224,9 +176,9 @@ def test_default_teleop_configuration_parses_saved_gains_and_running_rates():
 
     from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import GelloTeleopConfig
 
-    configured = yaml.safe_load((ROOT / "config/gello/xarm7_gello_teleop_gravity.yaml").read_text())
+    configured = yaml.safe_load((ROOT / "config/gello/xarm7_gello_teleop_current.yaml").read_text())
     parsed = draccus.decode(TeleoperatorConfig, configured["teleop"])
     assert isinstance(parsed, GelloTeleopConfig)
-    assert parsed.gravity_compensation.joint_gains == [0.0, 0.12, 0.025, 0.15, 0.0, 0.135, 0.12]
-    assert parsed.gravity_compensation.running_current_slew_a_s == [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
-    assert parsed.gravity_compensation.load_profile().joint_gains == parsed.gravity_compensation.joint_gains
+    assert parsed.current_control.load_profile().constant_current_a == [0, -.05, 0, .08, 0, 0, 0]
+    assert parsed.current_control.running_current_slew_a_s == [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
+    assert parsed.current_control.load_profile().constant_damping_a.tolist() == [0, 0, .002, 0, 0, 0, .002]

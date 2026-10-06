@@ -761,10 +761,10 @@ class _EpisodeSynchronizationOwner:
 
 def _disconnect_recording_resources(robot, teleop, listener):
     """Release recording devices while preserving cleanup after partial failures."""
-    stop_gravity = getattr(teleop, "stop_gravity_compensation", None)
-    if stop_gravity is not None:
+    stop_current = getattr(teleop, "stop_current_control", None)
+    if stop_current is not None:
         try:
-            stop_gravity()
+            stop_current()
         except Exception:
             logging.exception("Failed to stop GELLO before disconnecting recording resources")
     try:
@@ -794,10 +794,10 @@ class _RecordingCleanup:
         try:
             try:
                 # Release active leader output before potentially slow disk writes.
-                stop_gravity = getattr(self.teleop, "stop_gravity_compensation", None)
-                if stop_gravity is not None:
+                stop_current = getattr(self.teleop, "stop_current_control", None)
+                if stop_current is not None:
                     try:
-                        stop_gravity()
+                        stop_current()
                     except Exception:
                         logging.exception("Failed to stop GELLO compensation before save")
                 if self.async_episode_saver is not None:
@@ -1794,50 +1794,51 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
             # hardware first; _RecordingCleanup safely tolerates a second call.
             _disconnect_recording_resources(robot, teleop, listener)
             listener = None
-            from lerobot_robot_ufactory.tactile.deferred import compute_episode_mesh
+            from lerobot_robot_ufactory.tactile.deferred import compute_episode_mesh, deferred_sessions
 
             total = len(deferred_offline_episodes)
             print(f"Computing offline Mesh3DFlow for {total} episode(s).")
-            for ordinal, (episode_index, episode_buffer, synchronization) in enumerate(
-                deferred_offline_episodes, start=1
-            ):
-                logging.info(
-                    "Computing offline Mesh3DFlow episode %s (%s/%s)",
-                    episode_index,
-                    ordinal,
-                    total,
-                )
-                try:
-                    compute_episode_mesh(
-                        dataset,
-                        tactile_cameras,
-                        runtime_dir,
+            with deferred_sessions(tactile_cameras, runtime_dir):
+                for ordinal, (episode_index, episode_buffer, synchronization) in enumerate(
+                    deferred_offline_episodes, start=1
+                ):
+                    logging.info(
+                        "Computing offline Mesh3DFlow episode %s (%s/%s)",
                         episode_index,
-                        episode_buffer=episode_buffer,
+                        ordinal,
+                        total,
                     )
-                    has_tactile_transaction = (
-                        synchronization is not None
-                        and synchronization.tactile_recorder is not None
-                    )
-                    if has_tactile_transaction:
-                        synchronization.write(
-                            Path(dataset.root),
+                    try:
+                        compute_episode_mesh(
+                            dataset,
+                            tactile_cameras,
+                            runtime_dir,
                             episode_index,
-                            defer_commit=True,
+                            episode_buffer=episode_buffer,
                         )
-                    dataset.save_episode(episode_data=episode_buffer)
-                    if has_tactile_transaction:
-                        synchronization.commit()
-                    discard_episode_images(dataset, episode_index)
-                    if synchronization is not None and not has_tactile_transaction:
-                        synchronization.write(Path(dataset.root), episode_index)
-                    if synchronization is not None:
-                        log_say(synchronization.summary(), cfg.play_sounds)
-                        episode_owner.release(synchronization)
-                    log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
-                except BaseException:
-                    episode_owner.discard(synchronization)
-                    raise
+                        has_tactile_transaction = (
+                            synchronization is not None
+                            and synchronization.tactile_recorder is not None
+                        )
+                        if has_tactile_transaction:
+                            synchronization.write(
+                                Path(dataset.root),
+                                episode_index,
+                                defer_commit=True,
+                            )
+                        dataset.save_episode(episode_data=episode_buffer)
+                        if has_tactile_transaction:
+                            synchronization.commit()
+                        discard_episode_images(dataset, episode_index)
+                        if synchronization is not None and not has_tactile_transaction:
+                            synchronization.write(Path(dataset.root), episode_index)
+                        if synchronization is not None:
+                            log_say(synchronization.summary(), cfg.play_sounds)
+                            episode_owner.release(synchronization)
+                        log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
+                    except BaseException:
+                        episode_owner.discard(synchronization)
+                        raise
 
     print("\n********** Episode Record Loop Exit **********")
 

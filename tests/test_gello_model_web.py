@@ -5,12 +5,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from lerobot_robot_ufactory.gravity_compensation.config import DeviceProfile
-from lerobot_robot_ufactory.gravity_compensation.control.model import GravityModel
-from lerobot_robot_ufactory.gravity_compensation.web.model_web import export_model
+from lerobot_robot_ufactory.current_control.config import DeviceProfile
+from lerobot_robot_ufactory.current_control.web.model_web import export_model
 
 ROOT = Path(__file__).resolve().parents[1]
-PROFILE = ROOT / "config/gravity/gello_A_working.yaml"
+PROFILE = ROOT / "config/current_control/gello_A_working.yaml"
 
 
 @pytest.mark.parametrize(
@@ -24,10 +23,10 @@ PROFILE = ROOT / "config/gravity/gello_A_working.yaml"
 def test_exported_kinematics_match_pinocchio(q):
     profile = DeviceProfile(PROFILE)
     exported = export_model(profile)
-    gravity = GravityModel(profile)
-    full = np.empty(7)
-    full[gravity.order] = q
-    gravity.pin.forwardKinematics(gravity.model, gravity.data, full)
+    pin = pytest.importorskip("pinocchio")
+    model = pin.buildModelFromUrdf(str(profile.urdf))
+    data = model.createData()
+    pin.forwardKinematics(model, data, np.array(q))
     frames = {exported["root"]: np.eye(4)}
     for index, joint in enumerate(exported["joints"]):
         origin = np.asarray(joint["origin"]).reshape(4, 4).T
@@ -36,14 +35,14 @@ def test_exported_kinematics_match_pinocchio(q):
         rotation = np.eye(4)
         rotation[:3, :3] += np.sin(q[index]) * skew + (1 - np.cos(q[index])) * (skew @ skew)
         world = frames[joint["parent"]] @ origin @ rotation
-        expected = gravity.data.oMi[gravity.model.getJointId(joint["name"])]
+        expected = data.oMi[model.getJointId(joint["name"])]
         np.testing.assert_allclose(world[:3, 3], expected.translation, atol=1e-12)
         np.testing.assert_allclose(world[:3, :3], expected.rotation, atol=1e-12)
         frames[joint["child"]] = world
 
 
 def test_unified_html_is_self_contained():
-    from lerobot_robot_ufactory.gravity_compensation.web.tuning_web import tuning_page
+    from lerobot_robot_ufactory.current_control.web.tuning_web import tuning_page
 
     html = tuning_page(DeviceProfile(PROFILE), "test-only-token").decode()
     assert "/*__THREE_JS__*/" not in html

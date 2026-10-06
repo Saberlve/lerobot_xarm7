@@ -685,8 +685,6 @@ class RealtimeTeleopController:
                 read_start_ns = time.perf_counter_ns()
                 action = self.teleop.get_action()
                 read_end_ns = time.perf_counter_ns()
-                timing_reader = getattr(self.teleop, "get_action_sample_timing", None)
-                sample_timing = timing_reader() if self._record_timing and timing_reader else {}
                 processed = self.teleop_action_processor((action, observation))
                 command = self.robot_action_processor((processed, observation))
                 send_start_ns = time.perf_counter_ns()
@@ -708,7 +706,6 @@ class RealtimeTeleopController:
                     if self._record_timing:
                         self._action_timings.append(
                             {
-                                **sample_timing,
                                 "action_index": action_sample.action_index,
                                 "gello_read_start_ns": read_start_ns,
                                 "gello_read_end_ns": read_end_ns,

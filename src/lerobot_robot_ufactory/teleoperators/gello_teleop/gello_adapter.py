@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import time
 from functools import partial
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
@@ -66,82 +65,12 @@ class SafeDynamixelDriver(DynamixelDriver):
     """GELLO driver with serialized writes and complete torque cleanup."""
 
     def __init__(self, *args, **kwargs) -> None:
-        self._timed_joint_sample = None
-        self.last_joint_sample_timing = {}
-        self._sample_sequence = 0
         self._gripper_current_mode_enabled = False
         self._gripper_current_transition_active = False
         self._gripper_current_limit_raw: int | None = None
         self._gripper_current_spec: DynamixelModelSpec | None = None
         self._gripper_restore_operating_mode: int | None = None
         super().__init__(*args, **kwargs)
-
-    def _read_joint_states(self):
-        # Continuously read joint angles and velocities
-        while not self._stop_thread.is_set():
-            time.sleep(0.001)
-            with self._lock:
-                _joint_angles = np.zeros(len(self._ids), dtype=int)
-                _velocities = np.zeros(len(self._ids), dtype=int)
-                sample_start_ns = time.perf_counter_ns()
-                dxl_comm_result = self._groupSyncRead.txRxPacket()
-                sample_end_ns = time.perf_counter_ns()
-                if dxl_comm_result != COMM_SUCCESS:
-                    print(f"warning, comm failed: {dxl_comm_result}")
-                    continue
-                for i, dxl_id in enumerate(self._ids):
-                    # velocity
-                    if self._groupSyncRead.isAvailable(
-                        dxl_id, driver_module.ADDR_PRESENT_VELOCITY, driver_module.LEN_PRESENT_VELOCITY
-                    ):
-                        velocity = self._groupSyncRead.getData(
-                            dxl_id, driver_module.ADDR_PRESENT_VELOCITY, driver_module.LEN_PRESENT_VELOCITY
-                        )
-                        # sign correction for 32-bit two's complement
-                        if velocity > 0x7FFFFFFF:
-                            velocity -= 0x100000000
-                        _velocities[i] = velocity
-                    else:
-                        raise RuntimeError(
-                            f"Failed to get velocity for Dynamixel with ID {dxl_id}"
-                        )
-                    # position
-                    if self._groupSyncRead.isAvailable(
-                        dxl_id, driver_module.ADDR_PRESENT_POSITION, driver_module.LEN_PRESENT_POSITION
-                    ):
-                        angle = self._groupSyncRead.getData(
-                            dxl_id, driver_module.ADDR_PRESENT_POSITION, driver_module.LEN_PRESENT_POSITION
-                        )
-                        # sign correction for 32-bit two's complement
-                        if angle > 0x7FFFFFFF:
-                            angle -= 0x100000000
-                        _joint_angles[i] = angle
-                    else:
-                        raise RuntimeError(
-                            f"Failed to get joint angles for Dynamixel with ID {dxl_id}"
-                        )
-                self._joint_angles = _joint_angles
-                self._velocities = _velocities
-                self._sample_sequence += 1
-                # Publish values and timing together; readers never pair a new stamp with old angles.
-                self._timed_joint_sample = (_joint_angles, {
-                    "sample_sequence": self._sample_sequence,
-                    "sample_start_ns": sample_start_ns,
-                    "sample_end_ns": sample_end_ns,
-                })
-            # self._groupSyncRead.clearParam()
-
-    def get_joints(self) -> np.ndarray:
-        if self._is_fake:
-            self.last_joint_sample_timing = {}
-            return super().get_joints()
-        while self._timed_joint_sample is None:
-            if self._stop_thread.is_set():
-                raise RuntimeError("Dynamixel reader stopped before its first sample")
-            time.sleep(0.001)
-        angles, timing = self._timed_joint_sample
-        self.last_joint_sample_timing = timing.copy()
-        return angles.copy() / 2048.0 * np.pi
 
     def _require_real_id8(self, dxl_id: int) -> None:
         if dxl_id != GRIPPER_DYNAMIXEL_ID:
@@ -568,7 +497,6 @@ class ContinuousDynamixelRobot(DynamixelRobot):
 
     def get_joint_state(self) -> np.ndarray:
         pos = (self._driver.get_joints() - self._joint_offsets) * self._joint_signs
-        self.last_joint_sample_timing = dict(getattr(self._driver, "last_joint_sample_timing", {}))
         if len(pos) != self.num_dofs():
             raise RuntimeError("Unexpected Dynamixel joint count")
 

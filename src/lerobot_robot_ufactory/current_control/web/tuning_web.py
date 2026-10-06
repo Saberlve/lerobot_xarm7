@@ -9,12 +9,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ..config import DeviceProfile, MAX_TUNING_SLEW_A_S, MIN_TUNING_SLEW_A_S
-from ..control.tuning import INITIAL_GAINS, INITIAL_SLEW_A_S, TuningSession
+from ..control.tuning import INITIAL_SLEW_A_S, TuningSession
 from .model_web import render_html, viewer_data
 
 def tuning_page(profile, token):
     data = viewer_data(profile)
-    data["tuning"] = {"constant_damping_a": profile.constant_damping_a.tolist(), "constant_current_a": profile.constant_current_a, "token": token, "initial_gains": INITIAL_GAINS, "max_gain": 1,
+    data["tuning"] = {"constant_damping_a": profile.constant_damping_a.tolist(), "constant_current_a": profile.constant_current_a, "token": token,
                       "initial_slew_a_s": INITIAL_SLEW_A_S,
                       "min_slew_a_s": MIN_TUNING_SLEW_A_S, "max_slew_a_s": MAX_TUNING_SLEW_A_S}
     return render_html(data).encode("utf-8")
@@ -82,9 +82,6 @@ def make_tuning_server(port, page, session, token):
                 elif self.path == "/api/view":
                     session.set_view_mode(body.get("mode"))
                     self.reply(200, session.snapshot())
-                elif self.path == "/api/gains":
-                    session.set_gains(body.get("gains"))
-                    self.reply(200, session.snapshot())
                 elif self.path == "/api/slew":
                     session.set_current_slew(body.get("current_slew_a_s"))
                     self.reply(200, session.snapshot())
@@ -105,7 +102,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--log-dir", default="logs/gravity_tuning")
+    parser.add_argument("--log-dir", default="logs/current_tuning")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("Port must be between 1 and 65535")
@@ -119,7 +116,7 @@ def main():
         for sig in (signal.SIGINT, signal.SIGTERM)
     }
     server.timeout = 0.2
-    print(f"GELLO 重力补偿调参: http://127.0.0.1:{server.server_port}", flush=True)
+    print(f"GELLO 恒流与阻尼调参: http://127.0.0.1:{server.server_port}", flush=True)
     print("网页按钮控制启停；当前未启用电机扭矩。Ctrl+C 卸力并退出。", flush=True)
     try:
         while not stop.is_set():

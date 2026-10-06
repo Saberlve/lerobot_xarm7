@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from lerobot_robot_ufactory.gravity_compensation.models.mesh_mass import (
+from lerobot_robot_ufactory.current_control.models.mesh_mass import (
     combine_properties, read_binary_stl, solid_properties,
 )
 

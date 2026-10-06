@@ -2,7 +2,7 @@
 # Python
 # ============================
 **/logs/**
-/config/gravity/*.jsonl
+/config/current_control/*.jsonl
 __pycache__/
 *.py[cod]
 *$py.class
@@ -86,7 +86,7 @@ runs/
 wandb/
 models/
 # Source code for URDF/STL tools, rather than generated model artifacts.
-!src/lerobot_robot_ufactory/gravity_compensation/models/
+!src/lerobot_robot_ufactory/current_control/models/
 *.onnx
 *.engine
 *.trt

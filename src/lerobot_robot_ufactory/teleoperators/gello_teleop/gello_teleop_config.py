@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 from lerobot.teleoperators import TeleoperatorConfig
-from ...gravity_compensation.config import GravityCompensationConfig
+from ...current_control.config import CurrentControlConfig
 
 @dataclass
 class GelloFeedbackConfig:
@@ -27,7 +27,7 @@ class GelloFeedbackConfig:
 @TeleoperatorConfig.register_subclass("uf::gello_teleop")
 @dataclass
 class GelloTeleopConfig(TeleoperatorConfig):
-    gravity_compensation: GravityCompensationConfig = field(default_factory=GravityCompensationConfig)
+    current_control: CurrentControlConfig = field(default_factory=CurrentControlConfig)
     # Frequency of the independent GELLO -> xArm realtime control loop.
     dynamixel_baudrate: int = 57600
     dynamixel_use_fake_fallback: bool = True
@@ -64,8 +64,8 @@ class GelloTeleopConfig(TeleoperatorConfig):
     torque_joint_ids: Tuple[int, ...] = None  # deprecated
 
     def __post_init__(self):
-        if self.gravity_compensation.enabled and not self.gravity_compensation.profile_path:
-            raise ValueError("gravity_compensation.profile_path is required when enabled")
+        if self.current_control.enabled and not self.current_control.profile_path:
+            raise ValueError("current_control.profile_path is required when enabled")
         self.id = 'gello_teleop' if self.id is None else self.id
         if type(self.dynamixel_baudrate) is not int or self.dynamixel_baudrate <= 0:
             raise ValueError("dynamixel_baudrate must be a positive integer")

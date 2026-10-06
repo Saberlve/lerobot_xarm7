@@ -345,9 +345,9 @@ def teleop_loop(cfg: TeleopConfig):
 
         while not events["exit"]:
             start_loop_t = time.perf_counter()
-            check_gravity = getattr(teleop, "check_gravity_compensation", None)
-            if check_gravity is not None:
-                check_gravity()
+            check_current = getattr(teleop, "check_current_control", None)
+            if check_current is not None:
+                check_current()
 
             if is_evt:
                 if key_dict[keyboard.Key.left] and not key_left_pressed:

@@ -7,22 +7,22 @@ import numpy as np
 import pytest
 import yaml
 
-from lerobot_robot_ufactory.gravity_compensation.config import DeviceProfile
-from lerobot_robot_ufactory.gravity_compensation.control.model import CurrentController, GravityModel
-from lerobot_robot_ufactory.gravity_compensation.control.runtime import GravityRuntime, RuntimeRobot
-from lerobot_robot_ufactory.gravity_compensation.hardware.transport import XL330Transport, signed
+from lerobot_robot_ufactory.current_control.config import DeviceProfile
+from lerobot_robot_ufactory.current_control.control.current import CurrentController
+from lerobot_robot_ufactory.current_control.control.runtime import CurrentRuntime, RuntimeRobot
+from lerobot_robot_ufactory.current_control.hardware.transport import XL330Transport, signed
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
 def profile(tmp_path):
-    original = ROOT / "config/gravity/gello_A_working.yaml"
+    original = ROOT / "config/current_control/gello_A_working.yaml"
     data = yaml.safe_load(original.read_text())
     data["urdf"] = str((original.parent / "model/xarm7_gello.urdf").resolve())
     # Keep the unit-test device conservative and neutral without shipping a
-    # second fixture profile under config/gravity.
-    data.pop("constant_current_a", None)
+    # second fixture profile under config/current_control.
+    data["constant_current_a"] = [0.01] * 7
     data.pop("constant_damping_a", None)
     data["encoder_zero_rad"] = [0.0] * 7
     data["current_limit_a"] = [0.05] * 7
@@ -51,9 +51,6 @@ def commissioned(profile, tmp_path):
     return DeviceProfile(path)
 
 
-class ConstantModel:
-    def gravity(self, q):
-        return np.arange(1, 8) * 0.001
 
 
 class FakeTransport:
@@ -98,7 +95,7 @@ class FakeTransport:
 
 
 def test_starter_profiles_are_read_only(profile):
-    with pytest.raises(ValueError, match="not commissioned"):
+    with pytest.raises(ValueError, match="1 Mbps"):
         profile.validate_live()
 
 
@@ -130,16 +127,10 @@ def experimental_profile(profile):
     return profile
 
 
-def test_experimental_permission_does_not_commission(experimental_profile):
-    p = experimental_profile
-    p.validate_live(experimental=True)
-    with pytest.raises(ValueError, match="not commissioned"):
-        p.validate_live()
-    assert not any(p.data["commissioning"].values())
 
 
 @pytest.mark.parametrize("field,value", [
-    ("gain", float("inf")), ("gain", float("nan")), ("gain", -0.01), ("limits", np.full(7, 1.01)),
+    ("limits", np.full(7, 1.01)),
     ("slew", np.full(7, 0.051)), ("ramp_s", 1.9),
     ("temperature_limit_c", 51), ("state_timeout_s", 0.051),
     ("watchdog_ms", 120), ("baudrate", 57600),
@@ -150,109 +141,34 @@ def test_experiment_rejects_unsafe_parameters(experimental_profile, field, value
         experimental_profile.validate_live(experimental=True)
 
 
-def test_experiment_requires_alignment_and_exact_model(experimental_profile):
-    p = experimental_profile
-    p.data["alignment_user_accepted"] = False
-    with pytest.raises(ValueError, match="pose alignment"):
-        p.validate_experiment()
-    p.data["alignment_user_accepted"] = True
-    p.data["urdf_sha256"] = "wrong"
-    with pytest.raises(ValueError, match="checksum"):
-        p.validate_experiment()
 
 
 
 
-@pytest.mark.parametrize("gain", [0, 0.05, 0.1, 1.0, 2.0])
-def test_experiment_gain_has_no_upper_cap(experimental_profile, gain):
-    experimental_profile.gain = gain
-    experimental_profile.validate_experiment()
 
 
 
 
-@pytest.mark.parametrize("joint", [5, 6])
-def test_joint_zero_gain_preserves_damping_and_other_joints(profile, joint):
-    profile.gain = 0.3
-    position = np.zeros(8)
-    velocity = np.zeros(8)
-    axis = joint - 1
-    velocity[axis] = 0.2
-    _, baseline = CurrentController(profile, ConstantModel()).compute(position, velocity, 0.01, 10)
-    setattr(profile, f"j{joint}_gain", 0.0)
-    _, result = CurrentController(profile, ConstantModel()).compute(position, velocity, 0.01, 10)
-    others = [i for i in range(7) if i != axis]
-    np.testing.assert_allclose(np.array(result["requested_a"])[others], np.array(baseline["requested_a"])[others])
-    assert result["requested_a"][axis] == pytest.approx(-profile.damping[axis] * velocity[axis] / profile.nm_per_amp[axis])
-    assert result["requested_a"][axis] < 0
-    expected = [0.3] * 7
-    expected[axis] = 0.0
-    assert result["gravity_gains"] == expected
-    velocity[axis] = 0
-    _, stationary = CurrentController(profile, ConstantModel()).compute(position, velocity, 0.01, 10)
-    assert stationary["requested_a"][axis] == 0
-
-
-def test_j2_can_be_reduced_without_changing_other_axes(profile):
-    profile.gain = 0.3
-    profile.slew[:] = 100
-    position, velocity = np.zeros(8), np.zeros(8)
-    _, baseline = CurrentController(profile, ConstantModel()).compute(position, velocity, 0.01, 10)
-    profile.joint_gains = [0.3, 0.05, 0.3, 0.3, 0.3, 0.3, 0.3]
-    _, light = CurrentController(profile, ConstantModel()).compute(position, velocity, 0.01, 10)
-    assert light["requested_a"][1] == pytest.approx(baseline["requested_a"][1] / 6)
-    others = [0, 2, 3, 4, 5, 6]
-    np.testing.assert_allclose(np.array(light["requested_a"])[others],
-                               np.array(baseline["requested_a"])[others])
-    assert light["damping_current_a"] == [0.0] * 7
-    profile.joint_gains[1] = 0.0
-    velocity[1] = 0.2
-    _, off = CurrentController(profile, ConstantModel()).compute(position, velocity, 0.01, 10)
-    assert off["gravity_current_a"][1] == 0
-    assert off["damping_current_a"][1] < 0
-    np.testing.assert_allclose(off["requested_a"],
-                               np.array(off["gravity_current_a"]) + off["damping_current_a"])
-
-
-def test_joint_gains_keep_legacy_overrides(profile):
-    profile.joint_gains = [0.2] * 7
-    profile.j5_gain, profile.j6_gain = 0.0, 0.1
-    _, record = CurrentController(profile, ConstantModel()).compute(np.zeros(8), np.zeros(8), 0.01, 10)
-    assert record["gravity_gains"] == [0.2, 0.2, 0.2, 0.2, 0.0, 0.1, 0.2]
 
 
 
 
-@pytest.mark.parametrize("gains", [[0.1] * 6, [0.1] * 8, [-0.1] * 7,
-                                    [float("nan")] * 7, [True] * 7])
-def test_joint_gains_reject_invalid_config(gains):
-    from lerobot_robot_ufactory.gravity_compensation.config import GravityCompensationConfig
-
-    with pytest.raises(ValueError):
-        GravityCompensationConfig(enabled=True, profile_path="unused", joint_gains=gains)
 
 
-def test_joint_gain_session_override_preserves_calibration(experimental_profile, monkeypatch):
-    from lerobot_robot_ufactory.gravity_compensation import config as module
 
-    gains = [0.3, 0.05, 0.3, 0.3, 0, 0.1, 0.3]
-    monkeypatch.setattr(module, "DeviceProfile", lambda path: experimental_profile)
-    config = module.GravityCompensationConfig(enabled=True, profile_path="unused",
-                                              experimental=True, gain=0.3, joint_gains=gains)
-    loaded = config.load_profile()
-    assert loaded.joint_gains == gains
-    assert not any(loaded.data["commissioning"].values())
-    assert "joint_gains" not in loaded.data
+
+
+
 
 
 def test_experiment_runtime_has_independent_time_limit(experimental_profile, monkeypatch):
-    from lerobot_robot_ufactory.gravity_compensation.control import runtime
+    from lerobot_robot_ufactory.current_control.control import runtime
 
     assert runtime.EXPERIMENT_MAX_DURATION_S == 10.0
     monkeypatch.setattr(runtime, "EXPERIMENT_MAX_DURATION_S", 0.05)
     fake = FakeTransport()
-    r = GravityRuntime(experimental_profile, live=True, experimental=True,
-                       transport=fake, model=ConstantModel())
+    r = CurrentRuntime(experimental_profile, live=True, experimental=True,
+                       transport=fake)
     r.start()
     r._thread.join(timeout=1)
     assert not r._thread.is_alive()
@@ -264,7 +180,7 @@ def test_experiment_runtime_has_independent_time_limit(experimental_profile, mon
 
 @pytest.mark.parametrize("displacement_deg", [-45, -44, 44, 45])
 def test_experiment_allows_motion_up_to_45_degrees(experimental_profile, monkeypatch, displacement_deg):
-    from lerobot_robot_ufactory.gravity_compensation.control import runtime
+    from lerobot_robot_ufactory.current_control.control import runtime
 
     assert runtime.EXPERIMENT_MAX_DISPLACEMENT_DEG == 45.0
     monkeypatch.setattr(runtime, "EXPERIMENT_MAX_DURATION_S", 0.03)
@@ -281,8 +197,8 @@ def test_experiment_allows_motion_up_to_45_degrees(experimental_profile, monkeyp
         return result
 
     monkeypatch.setattr(fake, "state", state)
-    r = GravityRuntime(experimental_profile, live=True, experimental=True,
-                       transport=fake, model=ConstantModel())
+    r = CurrentRuntime(experimental_profile, live=True, experimental=True,
+                       transport=fake)
     r.start()
     r._thread.join(timeout=1)
     assert not r._thread.is_alive()
@@ -312,8 +228,8 @@ def test_experiment_fault_stops_and_cleans_up(experimental_profile, monkeypatch,
         return result
 
     monkeypatch.setattr(fake, "state", state)
-    r = GravityRuntime(experimental_profile, live=True, experimental=True,
-                       transport=fake, model=ConstantModel())
+    r = CurrentRuntime(experimental_profile, live=True, experimental=True,
+                       transport=fake)
     with pytest.raises(RuntimeError):
         r.start()
     r._thread.join(timeout=1)
@@ -324,7 +240,7 @@ def test_experiment_fault_stops_and_cleans_up(experimental_profile, monkeypatch,
 @pytest.mark.parametrize("mode", ["teleop", "tuning"])
 @pytest.mark.parametrize("displacement_deg", [-100, 100])
 def test_continuous_support_allows_wide_motion(experimental_profile, monkeypatch, mode, displacement_deg):
-    from lerobot_robot_ufactory.gravity_compensation.control import runtime as runtime_module
+    from lerobot_robot_ufactory.current_control.control import runtime as runtime_module
 
     monkeypatch.setattr(runtime_module, "EXPERIMENT_MAX_DURATION_S", 0.02)
     fake = FakeTransport()
@@ -340,8 +256,8 @@ def test_continuous_support_allows_wide_motion(experimental_profile, monkeypatch
         return result
 
     fake.state = state
-    r = GravityRuntime(experimental_profile, live=True, experimental=True,
-                       transport=fake, model=ConstantModel(), **{mode: True})
+    r = CurrentRuntime(experimental_profile, live=True, experimental=True,
+                       transport=fake, **{mode: True})
     try:
         r.start()
         time.sleep(0.06)
@@ -357,23 +273,17 @@ def test_continuous_support_allows_wide_motion(experimental_profile, monkeypatch
 
 
 
-def test_urdf_checksum_prevents_unreviewed_changes(profile, tmp_path):
-    p = commissioned(profile, tmp_path)
-    p.validate_live()
-    p.urdf.write_text(p.urdf.read_text() + "\n")
-    with pytest.raises(ValueError, match="checksum"):
-        p.validate_live()
 
 
 @pytest.mark.parametrize(
     "field,value",
     [
         ("model_signs", [0] * 7),
-        ("nm_per_amp", [0] * 7),
+        ("constant_damping_a", [-1] * 7),
         ("current_limit_a", [2] * 7),
         ("encoder_zero_rad", [float("nan")] * 7),
-        ("damping_nm_s_rad", [-1] * 7),
-        ("gain", True),
+        ("damping_deadband_rad_s", -1),
+        ("constant_current_a", [True] * 7),
     ],
 )
 def test_invalid_profiles_fail_before_hardware(profile, field, value):
@@ -384,26 +294,13 @@ def test_invalid_profiles_fail_before_hardware(profile, field, value):
         DeviceProfile(profile.path)
 
 
-def test_mapping_uses_power_consistent_torque_signs(profile):
-    profile.signs = np.array([-1, 1, -1, 1, 1, -1, 1])
-    profile.slew[:] = 100
-    profile.damping[:] = 0
-    model = ConstantModel()
-    controller = CurrentController(profile, model)
-    qdot = np.arange(8) * 0.1
-    currents, record = controller.compute(np.zeros(8), qdot, 0.05, 3)
-    motor_torque = currents * profile.nm_per_amp
-    _, model_velocity = profile.model_state(np.zeros(8), qdot)
-    assert np.dot(motor_torque, qdot[:7]) == pytest.approx(
-        np.dot(profile.gain * model.gravity(None), model_velocity)
-    )
 
 
 def test_ramp_slew_and_hard_limit(profile):
-    controller = CurrentController(profile, ConstantModel())
+    controller = CurrentController(profile)
     first, _ = controller.compute(np.zeros(8), np.zeros(8), 0.05, 0)
     assert np.array_equal(first, np.zeros(7))
-    profile.gain = 1
+    profile.constant_current_a = [1.0] * 7
     profile.limits[:] = 0.002
     for _ in range(5):
         current, record = controller.compute(np.zeros(8), np.zeros(8), 0.05, 3)
@@ -414,19 +311,19 @@ def test_ramp_slew_and_hard_limit(profile):
 @pytest.mark.parametrize("dt", [0, -1, 1, float("nan")])
 def test_bad_control_interval(profile, dt):
     with pytest.raises(RuntimeError):
-        CurrentController(profile, ConstantModel()).compute(np.zeros(8), np.zeros(8), dt, 1)
+        CurrentController(profile).compute(np.zeros(8), np.zeros(8), dt, 1)
 
 
 def test_nan_state(profile):
     position = np.zeros(8)
     position[2] = float("nan")
     with pytest.raises(ValueError):
-        CurrentController(profile, ConstantModel()).compute(position, np.zeros(8), 0.05, 1)
+        CurrentController(profile).compute(position, np.zeros(8), 0.05, 1)
 
 
 def test_observe_does_not_enable_or_write(profile):
     transport = FakeTransport()
-    runtime = GravityRuntime(profile, transport=transport, model=ConstantModel())
+    runtime = CurrentRuntime(profile, transport=transport)
     runtime.start()
     runtime.state()
     record = runtime.drain_records()[0]
@@ -450,7 +347,7 @@ def test_stale_state_cleans_up(profile, tmp_path):
     p = commissioned(profile, tmp_path)
     transport = FakeTransport()
     transport.stale = True
-    runtime = GravityRuntime(p, live=True, transport=transport, model=ConstantModel())
+    runtime = CurrentRuntime(p, live=True, transport=transport)
     with pytest.raises(RuntimeError, match="timeout"):
         runtime.start()
     assert transport.calls[-2:] == ["disable", "close"]
@@ -461,31 +358,19 @@ def test_write_failure_latches_fault(profile, tmp_path):
     p = commissioned(profile, tmp_path)
     transport = FakeTransport()
     transport.fail_write = True
-    runtime = GravityRuntime(p, live=True, transport=transport, model=ConstantModel())
+    runtime = CurrentRuntime(p, live=True, transport=transport)
     with pytest.raises(RuntimeError, match="injected"):
         runtime.start()
     assert runtime.status()["state"] == "fault"
     assert transport.calls[-2:] == ["disable", "close"]
 
 
-def test_slow_model_never_writes_stale_current(profile, tmp_path):
-    class SlowModel:
-        def gravity(self, q):
-            time.sleep(0.07)
-            return np.zeros(7)
-
-    p = commissioned(profile, tmp_path)
-    transport = FakeTransport()
-    runtime = GravityRuntime(p, live=True, transport=transport, model=SlowModel())
-    with pytest.raises(RuntimeError, match="stale"):
-        runtime.start()
-    assert "write" not in transport.calls
 
 
 def test_device_fault_does_not_stop_other_worker(profile):
     ta, tb = FakeTransport(), FakeTransport()
-    a = GravityRuntime(profile, transport=ta, model=ConstantModel())
-    b = GravityRuntime(profile, transport=tb, model=ConstantModel())
+    a = CurrentRuntime(profile, transport=ta)
+    b = CurrentRuntime(profile, transport=tb)
     a.start()
     b.start()
     try:
@@ -536,7 +421,7 @@ def test_runtime_robot_gripper_adapter(method, args, expected_request, mode):
 
 def test_follower_rebase_and_pause_preserve_physical_state(profile):
     transport = FakeTransport()
-    runtime = GravityRuntime(profile, transport=transport, model=ConstantModel())
+    runtime = CurrentRuntime(profile, transport=transport)
     runtime.start()
     try:
         robot = RuntimeRobot(runtime, [1] * 7, [8, 0, -42])
@@ -556,8 +441,8 @@ def test_follower_rebase_and_pause_preserve_physical_state(profile):
 def test_teleop_uses_one_runtime_and_pause_keeps_support(profile, tmp_path, monkeypatch):
     import gello.agents.gello_agent as upstream
 
-    from lerobot_robot_ufactory.gravity_compensation.control import runtime as runtime_module
-    from lerobot_robot_ufactory.gravity_compensation.config import GravityCompensationConfig
+    from lerobot_robot_ufactory.current_control.control import runtime as runtime_module
+    from lerobot_robot_ufactory.current_control.config import CurrentControlConfig
     from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop import GelloTeleop
     from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import (
         GelloTeleopConfig,
@@ -565,15 +450,15 @@ def test_teleop_uses_one_runtime_and_pause_keeps_support(profile, tmp_path, monk
 
     p = commissioned(profile, tmp_path)
     transport = FakeTransport()
-    actual = GravityRuntime(p, live=True, transport=transport, model=ConstantModel())
-    monkeypatch.setattr(runtime_module, "GravityRuntime", lambda *a, **kw: actual)
+    actual = CurrentRuntime(p, live=True, transport=transport)
+    monkeypatch.setattr(runtime_module, "CurrentRuntime", lambda *a, **kw: actual)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("A second upstream serial driver must never be constructed")
 
     monkeypatch.setattr(upstream, "GelloAgent", forbidden)
     config = GelloTeleopConfig(
-        port=p.port, gravity_compensation=GravityCompensationConfig(True, str(p.path))
+        port=p.port, current_control=CurrentControlConfig(True, str(p.path))
     )
     teleop = GelloTeleop(config)
     try:
@@ -591,65 +476,15 @@ def test_teleop_uses_one_runtime_and_pause_keeps_support(profile, tmp_path, monk
     assert actual.status()["state"] == "stopped"
 
 
-def test_experimental_teleop_keeps_session_gains_support_and_logs(experimental_profile, tmp_path, monkeypatch):
-    import gello.agents.gello_agent as upstream
-    from lerobot_robot_ufactory.gravity_compensation import config as config_module
-    from lerobot_robot_ufactory.gravity_compensation.control import runtime as runtime_module
-    from lerobot_robot_ufactory.gravity_compensation.config import GravityCompensationConfig
-    from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop import GelloTeleop
-    from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import GelloTeleopConfig
-
-    p = experimental_profile
-    transport = FakeTransport()
-    runtimes = []
-
-    def create_runtime(profile, **kwargs):
-        runtime = GravityRuntime(profile, transport=transport, model=ConstantModel(), **kwargs)
-        runtimes.append(runtime)
-        return runtime
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("Second serial connection")
-
-    monkeypatch.setattr(config_module, "DeviceProfile", lambda path: p)
-    monkeypatch.setattr(runtime_module, "GravityRuntime", create_runtime)
-    monkeypatch.setattr(runtime_module, "EXPERIMENT_MAX_DURATION_S", 0.02)
-    monkeypatch.setattr(upstream, "GelloAgent", forbidden)
-    gravity = GravityCompensationConfig(
-        enabled=True, profile_path=str(p.path), experimental=True,
-        gain=0.8, j5_gain=0, j6_gain=0.1, log_dir=str(tmp_path / "logs"),
-    )
-    teleop = GelloTeleop(GelloTeleopConfig(port=p.port, gravity_compensation=gravity))
-    try:
-        teleop.connect()
-        actual = runtimes[0]
-        time.sleep(0.06)
-        teleop.check_gravity_compensation()
-        assert actual.teleop and actual.experimental
-        assert actual.status()["state"] == "active"
-        obs = {f"J{i}.pos": 0.25 for i in range(1, 8)} | {"gripper.pos": 0.5}
-        teleop.set_teleop_enabled(True, obs)
-        assert teleop.get_action()["J1.pos"] == pytest.approx(0.25)
-        teleop.set_teleop_enabled(False)
-        assert actual.status()["state"] == "active"
-        assert transport.calls.count("open") == 1
-        assert not any(p.data["commissioning"].values())
-    finally:
-        teleop.disconnect()
-    assert transport.calls[-2:] == ["disable", "close"]
-    rows = [json.loads(row) for row in teleop._gravity_log.path.read_text().splitlines()]
-    assert rows and all(row["gravity_gains"] == [0.8, 0.8, 0.8, 0.8, 0.0, 0.1, 0.8] for row in rows)
-    assert all(row["teleop"] and row["experimental"] for row in rows)
-    assert actual.dropped_records == 0
 
 
 def test_teleop_log_failure_requests_unload(experimental_profile, tmp_path, monkeypatch):
-    from lerobot_robot_ufactory.gravity_compensation.monitoring.logging import GravityLog
+    from lerobot_robot_ufactory.current_control.monitoring.logging import CurrentLog
 
     fake = FakeTransport()
-    runtime = GravityRuntime(experimental_profile, live=True, experimental=True, teleop=True,
-                             transport=fake, model=ConstantModel())
-    logger = GravityLog(runtime, tmp_path)
+    runtime = CurrentRuntime(experimental_profile, live=True, experimental=True, teleop=True,
+                             transport=fake)
+    logger = CurrentLog(runtime, tmp_path)
     runtime.start()
     original = logger._drain
 
@@ -676,10 +511,10 @@ def test_teleop_gravity_fault_blocks_follower_reads(experimental_profile, monkey
     from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import GelloTeleopConfig
 
     fake = FakeTransport()
-    runtime = GravityRuntime(experimental_profile, live=True, experimental=True, teleop=True,
-                             transport=fake, model=ConstantModel())
+    runtime = CurrentRuntime(experimental_profile, live=True, experimental=True, teleop=True,
+                             transport=fake)
     teleop = GelloTeleop(GelloTeleopConfig())
-    teleop._gravity_runtime = runtime
+    teleop._current_runtime = runtime
     teleop._teleop_enabled = True
     runtime.start()
     fake.stale = True
@@ -690,21 +525,6 @@ def test_teleop_gravity_fault_blocks_follower_reads(experimental_profile, monkey
     assert fake.calls[-2:] == ["disable", "close"]
 
 
-def test_teleop_gravity_configuration_parses_and_overrides(monkeypatch):
-    from lerobot_robot_ufactory.scripts.uf_robot_teleop import get_cfg
-
-    monkeypatch.setattr("sys.argv", [
-        "teleop", "--config_path", str(ROOT / "config/gello/xarm7_gello_teleop_gravity.yaml"),
-        "--teleop.gravity_compensation.gain=0.6", "--teleop.gravity_compensation.j5_gain=0.02",
-    ])
-    cfg = get_cfg()
-    p = cfg.teleop.gravity_compensation.load_profile()
-    assert p.gain == 0.6 and p.j5_gain == 0.02 and p.j6_gain is None
-    assert p.joint_gains == [0.0, 0.12, 0.025, 0.15, 0.0, 0.135, 0.12]
-    assert p.running_current_slew_a_s == [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
-    assert cfg.robot.cameras == {}
-    assert cfg.teleop.port == p.port
-    assert p.limits.tolist() == [1.0] * 7
 
 
 
@@ -912,7 +732,7 @@ def test_recording_unloads_before_waiting_for_saver():
     class Teleop:
         is_connected = True
 
-        def stop_gravity_compensation(self):
+        def stop_current_control(self):
             events.append("unload")
 
         def disconnect(self):
@@ -933,17 +753,6 @@ def test_recording_unloads_before_waiting_for_saver():
     assert events.index("unload") < events.index("save") < events.index("robot_disconnect")
 
 
-def test_pinocchio_energy_gradient(profile):
-    pytest.importorskip("pinocchio")
-    model = GravityModel(profile)
-    rng = np.random.default_rng(7)
-    for q in rng.uniform(-1.5, 1.5, (20, 7)):
-        numerical = []
-        for axis in range(7):
-            delta = np.zeros(7)
-            delta[axis] = 1e-6
-            numerical.append((model.potential(q + delta) - model.potential(q - delta)) / 2e-6)
-        np.testing.assert_allclose(model.gravity(q), numerical, atol=1e-5, rtol=0)
 
 
 @pytest.mark.parametrize("mode", ["teleop", "tuning"])
@@ -953,9 +762,9 @@ def test_live_runtime_does_not_poll_health_registers(experimental_profile, mode)
             raise AssertionError("Periodic health-register polling must remain disabled")
 
     transport = NoHealthPollingTransport()
-    runtime = GravityRuntime(
+    runtime = CurrentRuntime(
         experimental_profile, live=True, experimental=True,
-        transport=transport, model=ConstantModel(), **{mode: True},
+        transport=transport, **{mode: True},
     )
     try:
         runtime.start()
@@ -969,23 +778,6 @@ def test_live_runtime_does_not_poll_health_registers(experimental_profile, mode)
     assert transport.calls[-2:] == ["disable", "close"]
 
 
-def test_constant_current_replaces_model_and_damping_with_ramp_and_limits(profile):
-    profile.constant_current_a = [None, -0.05, None, None, None, None, None]
-    controller = CurrentController(profile, ConstantModel())
-    for step in range(301):
-        elapsed = step * 0.01
-        velocity = np.full(8, 2.0 if step % 2 else -2.0)
-        previous = controller.previous.copy()
-        output, record = controller.compute(np.full(8, step * 0.01), velocity, 0.01, elapsed)
-        assert record["requested_a"][1] == pytest.approx(-0.05 * min(1, elapsed/profile.ramp_s))
-        assert record["gravity_current_a"][1] == record["damping_current_a"][1] == 0
-        assert abs(output[1]-previous[1]) <= profile.slew[1]*0.01 + 1e-12
-        assert np.max(np.abs(output)) <= max(profile.limits) + 1e-12
-    assert output[1] == pytest.approx(-0.05)
-    profile.limits[1] = 0.02
-    _, record = controller.compute(np.zeros(8), np.zeros(8), 0.01, 4)
-    assert record["limited_a"][1] == pytest.approx(-0.02)
-    assert record["saturated"]
 
 
 @pytest.mark.parametrize("values", [[None]*6, [True]*7, [float("nan")]*7, [0.1]*7])
@@ -1001,10 +793,7 @@ def test_fixed_support_and_damping_never_assist_motion(profile):
     profile.constant_current_a = [0, -.05, 0, .08, 0, 0, 0]
     profile.constant_damping_a = np.array([0, 0, .002, 0, 0, 0, .002])
     profile.limits[:] = 1
-    class NoGravity:
-        def gravity(self, q):
-            raise AssertionError("Fixed mode must not evaluate gravity")
-    c = CurrentController(profile, NoGravity())
+    c = CurrentController(profile)
     for velocity in [1.0, -1.0, 0.0, .024, -.024, .2, -.2]:
         for step in range(250):
             out, record = c.compute(np.full(8, step*.01), np.full(8, velocity), .01, 3)

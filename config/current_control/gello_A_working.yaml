@@ -52,15 +52,6 @@
     1,
     1
   ],
-  "nm_per_amp": [
-    0.35,
-    0.35,
-    0.35,
-    0.35,
-    0.35,
-    0.35,
-    0.35
-  ],
   "current_limit_a": [
     1.0,
     1.0,
@@ -79,22 +70,7 @@
     0.05,
     0.05
   ],
-  "damping_nm_s_rad": [
-    0.001,
-    0.001,
-    0.001,
-    0.001,
-    0.001,
-    0.001,
-    0.001
-  ],
-  "gravity_m_s2": [
-    0,
-    0,
-    -9.81
-  ],
   "rate_hz": 100,
-  "gain": 0.1,
   "ramp_s": 2.0,
   "state_timeout_s": 0.05,
   "watchdog_ms": 100,
@@ -139,7 +115,7 @@
     "target_100hz_verified": true,
     "scope": "10-second read-only observation; occasional single-period overrun observed. Live output timing is not yet tested."
   },
-  "note": "OFFICIAL STL ESTIMATE / NOT COMMISSIONED. Candidate encoder offsets adopted; J3 zero is 0 per user confirmation. All signs +1. All eight motor baud rates verified at 1 Mbps; 10-second read-only observation achieved approximately 100 Hz with FTDI USB latency 1 ms and one single-period overrun. Live output is untested. Mass and current constants remain estimates.",
+  "note": "Fixed current and passive damping profile. URDF and encoder/model alignment are retained for visualization only; no model torque is calculated. J2 -50 mA, J4 +80 mA, J3/J7 2 mA opposing velocity outside 0.05 rad/s deadband.",
   "constant_current_a": [
     0,
     -0.05,

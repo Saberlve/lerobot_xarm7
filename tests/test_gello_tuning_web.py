@@ -11,15 +11,15 @@ import numpy as np
 import pytest
 import yaml
 
-from lerobot_robot_ufactory.gravity_compensation.control import runtime as runtime_module
-from lerobot_robot_ufactory.gravity_compensation.config import DeviceProfile, GravityCompensationConfig, tuning_slew
-from lerobot_robot_ufactory.gravity_compensation.monitoring.encoder_monitor import EncoderMonitor
-from lerobot_robot_ufactory.gravity_compensation.control.model import CurrentController
-from lerobot_robot_ufactory.gravity_compensation.control.runtime import GravityRuntime
-from lerobot_robot_ufactory.gravity_compensation.control.tuning import (
-    INITIAL_GAINS, INITIAL_SLEW_A_S, TuningSession, tuning_gains,
+from lerobot_robot_ufactory.current_control.control import runtime as runtime_module
+from lerobot_robot_ufactory.current_control.config import DeviceProfile, CurrentControlConfig, tuning_slew
+from lerobot_robot_ufactory.current_control.monitoring.encoder_monitor import EncoderMonitor
+from lerobot_robot_ufactory.current_control.control.current import CurrentController
+from lerobot_robot_ufactory.current_control.control.runtime import CurrentRuntime
+from lerobot_robot_ufactory.current_control.control.tuning import (
+    INITIAL_SLEW_A_S, TuningSession,
 )
-from lerobot_robot_ufactory.gravity_compensation.web.tuning_web import make_tuning_server, tuning_page
+from lerobot_robot_ufactory.current_control.web.tuning_web import make_tuning_server, tuning_page
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -64,15 +64,11 @@ class TuningTransport:
         self.call("close")
 
 
-class TuningModel:
-    def gravity(self, q):
-        return np.arange(1, 8) * 0.01
 
 
 @pytest.fixture
 def profile():
-    p = DeviceProfile(ROOT / "config/gravity/gello_A_working.yaml")
-    p.joint_gains = INITIAL_GAINS.copy()
+    p = DeviceProfile(ROOT / "config/current_control/gello_A_working.yaml")
     return p
 
 
@@ -88,20 +84,15 @@ def wait_for(predicate, timeout=2):
 def test_tuning_continues_past_experiment_limit_and_updates_only_on_owner(profile, monkeypatch):
     monkeypatch.setattr(runtime_module, "EXPERIMENT_MAX_DURATION_S", 0.025)
     transport = TuningTransport(profile)
-    runtime = GravityRuntime(profile, live=True, experimental=True, tuning=True,
-                             transport=transport, model=TuningModel())
+    runtime = CurrentRuntime(profile, live=True, experimental=True, tuning=True,
+                             transport=transport)
     try:
         runtime.start()
         time.sleep(0.08)
         assert runtime.status()["state"] == "active"
-        values = [0.3, 0.02, 0.3, 0.3, 0.04, 0.1, 0.3]
-        profile.j5_gain = 0.9
-        assert runtime.set_joint_gains(values) == values
-        wait_for(lambda: runtime.diagnostics()["record"]["gravity_gains"] == values)
-        assert profile.j5_gain is None and profile.j6_gain is None
-        runtime.set_joint_gains([0] * 7)
-        wait_for(lambda: runtime.diagnostics()["record"]["gravity_gains"] == [0] * 7)
-        assert runtime.diagnostics()["record"]["gravity_current_a"] == [0] * 7
+        values = [0.1] * 7
+        assert runtime.set_current_slew(values) == values
+        wait_for(lambda: runtime.diagnostics()["record"]["running_slew_a_s"] == values)
     finally:
         runtime.stop()
     assert len(transport.owners) == 1
@@ -112,8 +103,8 @@ def test_tuning_continues_past_experiment_limit_and_updates_only_on_owner(profil
 def test_tuning_lease_loss_unloads(profile, monkeypatch):
     monkeypatch.setattr(runtime_module, "TUNING_HEARTBEAT_TIMEOUT_S", 0.07)
     transport = TuningTransport(profile)
-    runtime = GravityRuntime(profile, live=True, experimental=True, tuning=True,
-                             transport=transport, model=TuningModel())
+    runtime = CurrentRuntime(profile, live=True, experimental=True, tuning=True,
+                             transport=transport)
     runtime.start()
     wait_for(lambda: runtime.status()["state"] == "fault")
     with pytest.raises(RuntimeError, match="失联"):
@@ -124,8 +115,8 @@ def test_tuning_lease_loss_unloads(profile, monkeypatch):
 def test_tuning_heartbeat_keeps_session_live_across_wide_joint_motion(profile, monkeypatch):
     monkeypatch.setattr(runtime_module, "TUNING_HEARTBEAT_TIMEOUT_S", 0.05)
     transport = TuningTransport(profile)
-    runtime = GravityRuntime(profile, live=True, experimental=True, tuning=True,
-                             transport=transport, model=TuningModel())
+    runtime = CurrentRuntime(profile, live=True, experimental=True, tuning=True,
+                             transport=transport)
     runtime.start()
     for _ in range(6):
         runtime.tuning_heartbeat()
@@ -150,11 +141,6 @@ def test_tuning_heartbeat_keeps_session_live_across_wide_joint_motion(profile, m
     assert transport.calls[-2:] == ["disable", "close"]
 
 
-@pytest.mark.parametrize("values", [[-0.1] * 7, [1.01] * 7, [float("nan")] * 7,
-                                    [True] * 7, [0] * 6, [float("inf")] * 7])
-def test_gain_validation(values):
-    with pytest.raises(ValueError):
-        tuning_gains(values)
 
 
 @pytest.mark.parametrize("values", [[0.049] * 7, [0.201] * 7, [float("nan")] * 7,
@@ -165,19 +151,10 @@ def test_slew_validation_rejects_out_of_range_or_invalid_values(values):
 
 
 def test_running_slew_preserves_startup_ramp_limits_and_reverse_rate(profile):
-    class HighCurrentModel:
-        direction = 1
-
-        def gravity(self, q):
-            return np.ones(7) * 100 * self.direction
-
-    # Exercise slew limiting on every axis, independently of user defaults with zero gain.
-    profile.joint_gains = [0.1] * 7
-    profile.constant_current_a = [None] * 7
+    profile.constant_current_a = [2.0] * 7  # Controller saturation test only.
     profile.constant_damping_a = np.zeros(7)
-    model = HighCurrentModel()
     rates = [0.05, 0.1, 0.2, 0.15, 0.05, 0.1, 0.2]
-    controller = CurrentController(profile, model, running_slew_a_s=rates)
+    controller = CurrentController(profile, running_slew_a_s=rates)
     position = np.r_[profile.zeros, 0]
     dt = 0.01
     current, record = controller.compute(position, np.zeros(8), dt, 1)
@@ -191,7 +168,7 @@ def test_running_slew_preserves_startup_ramp_limits_and_reverse_rate(profile):
     controller.previous = profile.limits.copy()
     current, record = controller.compute(position, np.zeros(8), dt, 3)
     assert np.allclose(current, profile.limits) and record["saturated"]
-    model.direction = -1
+    profile.constant_current_a = [-2.0] * 7
     current, _ = controller.compute(position, np.zeros(8), dt, 3.01)
     assert np.allclose(current, profile.limits - np.asarray(rates) * dt)
     assert np.all(profile.slew == 0.05)
@@ -223,46 +200,46 @@ def test_online_slew_is_owned_by_runtime_and_is_scoped_to_web(profile, tmp_path)
         session.stop()
     assert all(len(t.owners) == 1 for t in transports)
     with pytest.raises(ValueError, match="web tuning"):
-        GravityRuntime(profile, live=True, experimental=True, tuning_slew_a_s=updated)
-    other = GravityRuntime(profile, live=True, experimental=True, transport=TuningTransport(profile), model=TuningModel())
+        CurrentRuntime(profile, live=True, experimental=True, tuning_slew_a_s=updated)
+    other = CurrentRuntime(profile, live=True, experimental=True, transport=TuningTransport(profile))
     with pytest.raises(RuntimeError, match="web tuning"):
         other.set_current_slew(updated)
 
 
-@pytest.mark.parametrize("filename", ["xarm7_gello_teleop_gravity.yaml", "xarm7_gello_record_gravity_config.yaml"])
+@pytest.mark.parametrize("filename", ["xarm7_gello_teleop_current.yaml", "xarm7_gello_record_current_config.yaml"])
 def test_saved_defaults_load_in_teleop_and_preserve_startup_and_short_test_guards(filename, tmp_path):
-    settings = yaml.safe_load((ROOT / "config/gello" / filename).read_text())["teleop"]["gravity_compensation"]
-    profile = GravityCompensationConfig(**settings).load_profile()
+    settings = yaml.safe_load((ROOT / "config/gello" / filename).read_text())["teleop"]["current_control"]
+    profile = CurrentControlConfig(**settings).load_profile()
     session = TuningSession(profile, tmp_path)
-    assert session.snapshot()["tuning"]["gains"] == profile.joint_gains
+    assert session.snapshot()["tuning"]["constant_current_a"] == profile.constant_current_a
     assert session.snapshot()["tuning"]["current_slew_a_s"] == profile.running_current_slew_a_s
     transport = TuningTransport(profile)
-    runtime = GravityRuntime(profile, live=True, experimental=True, teleop=True,
-                             transport=transport, model=TuningModel())
+    runtime = CurrentRuntime(profile, live=True, experimental=True, teleop=True,
+                             transport=transport)
     try:
         runtime.start()
         record = runtime.diagnostics()["record"]
-        assert record["gravity_gains"] == profile.joint_gains
+        assert "gravity_gains" not in record
         assert record["current_slew_a_s"] == [0.05] * 7
         assert record["running_slew_a_s"] == profile.running_current_slew_a_s
         assert runtime.temperature_limit_c == 45
-        controller = CurrentController(profile, TuningModel(), running_slew_a_s=profile.running_current_slew_a_s)
+        controller = CurrentController(profile, running_slew_a_s=profile.running_current_slew_a_s)
         _, running = controller.compute(np.r_[profile.zeros, 0], np.zeros(8), .01, 3)
         assert running["current_slew_a_s"] == profile.running_current_slew_a_s
     finally:
         runtime.stop()
     untouched = TuningTransport(profile)
     with pytest.raises(ValueError, match="continuous live"):
-        GravityRuntime(profile, live=True, experimental=True, transport=untouched, model=TuningModel())
+        CurrentRuntime(profile, live=True, experimental=True, transport=untouched)
     assert untouched.calls == []
     assert np.all(profile.slew == 0.05)
 
 
 def test_running_slew_config_rejects_invalid_values_and_disabled_support():
     with pytest.raises(ValueError, match="0.05"):
-        GravityCompensationConfig(enabled=True, profile_path="unused", running_current_slew_a_s=[.3] * 7)
+        CurrentControlConfig(enabled=True, profile_path="unused", running_current_slew_a_s=[.3] * 7)
     with pytest.raises(ValueError, match="enabled"):
-        GravityCompensationConfig(running_current_slew_a_s=[.1] * 7)
+        CurrentControlConfig(running_current_slew_a_s=[.1] * 7)
 
 
 def test_web_temperature_guard_unloads_at_45_degrees(profile):
@@ -276,8 +253,8 @@ def test_web_temperature_guard_unloads_at_45_degrees(profile):
 
     warm_state.temperature = 44
     transport.state = warm_state
-    runtime = GravityRuntime(profile, live=True, experimental=True, tuning=True,
-                             tuning_slew_a_s=[0.2] * 7, transport=transport, model=TuningModel())
+    runtime = CurrentRuntime(profile, live=True, experimental=True, tuning=True,
+                             tuning_slew_a_s=[0.2] * 7, transport=transport)
     runtime.start()
     assert runtime.status()["state"] == "active"
     warm_state.temperature = 45
@@ -292,7 +269,7 @@ def session_with_fake(profile, tmp_path, transports):
     def factory(p, **kwargs):
         transport = TuningTransport(p)
         transports.append(transport)
-        return GravityRuntime(p, transport=transport, model=TuningModel(), **kwargs)
+        return CurrentRuntime(p, transport=transport, **kwargs)
 
     return TuningSession(profile, tmp_path / "logs", runtime_factory=factory)
 
@@ -300,14 +277,14 @@ def session_with_fake(profile, tmp_path, transports):
 def test_idle_does_not_open_hardware_and_session_logs_and_restarts(profile, tmp_path):
     transports = []
     session = session_with_fake(profile, tmp_path, transports)
-    session.set_gains([0.1] * 7)
+    session.set_current_slew([0.1] * 7)
     assert transports == []
     assert session.snapshot()["tuning"]["state"] == "idle"
     try:
         session.start()
         session.heartbeat()
-        session.set_gains([0.02] * 7)
-        wait_for(lambda: session.snapshot()["tuning"]["applied_gains"] == [0.02] * 7)
+        session.set_current_slew([0.2] * 7)
+        wait_for(lambda: session.snapshot()["tuning"]["running_slew_a_s"] == [0.2] * 7)
         assert session.snapshot()["sample"]["model_q_rad"] == [0] * 7
         session.stop()
         assert session.snapshot()["tuning"]["state"] == "stopped"
@@ -319,7 +296,7 @@ def test_idle_does_not_open_hardware_and_session_logs_and_restarts(profile, tmp_
     assert all(t.calls[-2:] == ["disable", "close"] for t in transports)
     logs = list((tmp_path / "logs").glob("*.jsonl"))
     assert len(logs) == 2
-    assert any(json.loads(line)["gravity_gains"] == [0.02] * 7 for line in logs[0].read_text().splitlines())
+    assert any(json.loads(line)["running_slew_a_s"] == [0.2] * 7 for line in logs[0].read_text().splitlines())
     assert "joint_gains" not in profile.data
 
 
@@ -338,7 +315,7 @@ def test_stop_during_startup_never_enables_torque(profile, tmp_path):
 
         t.open = slow_open
         transports.append(t)
-        return GravityRuntime(p, transport=t, model=TuningModel(), **kwargs)
+        return CurrentRuntime(p, transport=t, **kwargs)
 
     session = TuningSession(profile, tmp_path, runtime_factory=factory)
     starter = threading.Thread(target=session.start)
@@ -394,7 +371,7 @@ def test_http_controls_validate_origin_and_never_auto_start(profile, tmp_path):
         assert transports == []
         with pytest.raises(urllib.error.HTTPError) as exc:
             post("/api/gains", {"gains": [True] * 7})
-        assert exc.value.code == 400
+        assert exc.value.code == 404
         with pytest.raises(urllib.error.HTTPError) as exc:
             post("/api/slew", {"current_slew_a_s": [0.3] * 7})
         assert exc.value.code == 400
@@ -417,7 +394,6 @@ def test_http_controls_validate_origin_and_never_auto_start(profile, tmp_path):
         with pytest.raises(urllib.error.HTTPError) as exc:
             post("/api/view", {"mode": "offline"})
         assert exc.value.code == 503
-        post("/api/gains", {"gains": [0.04] * 7})
         post("/api/slew", {"current_slew_a_s": [0.2] * 7})
         assert post("/api/stop")["tuning"]["state"] == "stopped"
     finally:
@@ -455,7 +431,7 @@ def test_read_only_handoff_closes_reader_before_torque_owner_opens(profile, tmp_
 
         transport.call = call
         controllers.append(transport)
-        return GravityRuntime(p, transport=transport, model=TuningModel(), **kwargs)
+        return CurrentRuntime(p, transport=transport, **kwargs)
 
     session = TuningSession(profile, tmp_path, monitor_factory=monitor_factory,
                             runtime_factory=runtime_factory)
@@ -469,7 +445,7 @@ def test_read_only_handoff_closes_reader_before_torque_owner_opens(profile, tmp_
         assert packet["tuning"]["record"] is None
         assert packet["status"] == "connected"
         assert set(readers[0].calls) == {"open", "state"}
-        session.set_gains([0.03] * 7)
+        session.set_current_slew([0.1] * 7)
         assert controllers == []
         session.start()
         wait_for(lambda: session.snapshot()["tuning"]["record"] is not None)
@@ -537,7 +513,7 @@ def test_stop_during_read_only_handoff_cancels_new_torque_owner(profile, tmp_pat
     def factory(p, **kwargs):
         transport = TuningTransport(p)
         transports.append(transport)
-        return GravityRuntime(p, transport=transport, model=TuningModel(), **kwargs)
+        return CurrentRuntime(p, transport=transport, **kwargs)
 
     session = TuningSession(profile, tmp_path, monitor_factory=lambda _: SlowMonitor(),
                             runtime_factory=factory)

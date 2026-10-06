@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 
-class GravityLog:
+class CurrentLog:
     def __init__(self, runtime, directory):
         self.runtime = runtime
         directory = Path(directory).expanduser()
@@ -16,7 +16,7 @@ class GravityLog:
         self._stream = self.path.open("x", buffering=1)
         self._stop = threading.Event()
         self._error = None
-        self._thread = threading.Thread(target=self._run, name="gello-gravity-log", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="gello-current-log", daemon=True)
 
     def start(self):
         try:

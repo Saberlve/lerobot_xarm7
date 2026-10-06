@@ -1,5 +1,5 @@
 # Run from the project root with:
-# .venv/bin/uf-robot-teleop --config_path config/gello/xarm7_gello_teleop_gravity.yaml
+# .venv/bin/uf-robot-teleop --config_path config/gello/xarm7_gello_teleop_current.yaml
 robot:
   type: uf::robot
   id: uf_robot
@@ -31,18 +31,16 @@ teleop:
   gripper_control_mode: gello
   gripper_open_deg: 198.28125
   gripper_close_deg: 155.75
-  # Session overrides; these do not modify the physical model calibration.
-  # User-approved seven-axis gains from web tuning on 2026-10-06.
-  gravity_compensation:
+  current_control:
     enabled: true
+    profile_path: config/current_control/gello_A_working.yaml
     experimental: true
-    profile_path: config/gravity/gello_A_working.yaml
-    gain: 0.3
-    joint_gains: [0.0, 0.12, 0.025, 0.15, 0.0, 0.135, 0.12]
-    # Running rates only; first 2 seconds keep the original 0.05 A/s.
-    running_current_slew_a_s: [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
-    j5_gain: null
-    j6_gain: null
-    log_dir: logs/gravity_teleop
-
+    running_current_slew_a_s:
+    - 0.17
+    - 0.2
+    - 0.17
+    - 0.17
+    - 0.16
+    - 0.17
+    - 0.17
 fps: 30

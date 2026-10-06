@@ -35,7 +35,7 @@ dependencies = [
 ]
 
 [project.scripts]
-uf-gello-tune-web = "lerobot_robot_ufactory.gravity_compensation.web.tuning_web:main"
+uf-gello-tune-web = "lerobot_robot_ufactory.current_control.web.tuning_web:main"
 uf-robot-teleop = "lerobot_robot_ufactory.scripts.uf_robot_teleop:main"
 uf-lerobot-record = "lerobot_robot_ufactory.scripts.uf_lerobot_record:main"
 record = "lerobot_robot_ufactory.scripts.uf_lerobot_record:main"
@@ -53,7 +53,6 @@ uf-test-gello-gripper-current = "lerobot_robot_ufactory.scripts.uf_test_gello_gr
 uf-test-gripper-force-feedback = "lerobot_robot_ufactory.scripts.uf_test_gripper_force_feedback:main"
 
 [project.optional-dependencies]
-gravity = ["pin>=3.4,<5"]
 # Xense Photon tactile images (inference disabled by default).
 xense = ["xensesdk>=2.0.0,<3"]
 # GELLO 遥操作
@@ -90,7 +89,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "lerobot_robot_ufactory.devices.umi.xvlib" = ["*.so", "*.so.*"]
-"lerobot_robot_ufactory.gravity_compensation.web" = ["viewer_assets/*.html", "viewer_assets/*.js", "viewer_assets/*.txt"]
+"lerobot_robot_ufactory.current_control.web" = ["viewer_assets/*.html", "viewer_assets/*.js", "viewer_assets/*.txt"]
 
 [tool.ruff]
 line-length = 100

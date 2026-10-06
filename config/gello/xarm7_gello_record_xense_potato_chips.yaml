@@ -82,10 +82,22 @@ robot:
   # start_joints: [0, -30, 0, 0, 0, 30, 0]
 # make sure to edit with your correct configurations!
 teleop:
+  current_control:
+    enabled: true
+    profile_path: config/current_control/gello_A_working.yaml
+    experimental: true
+    running_current_slew_a_s:
+    - 0.17
+    - 0.2
+    - 0.17
+    - 0.17
+    - 0.16
+    - 0.17
+    - 0.17
   type: uf::gello_teleop
   id: "gello_teleop"
   # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.
-  realtime_control_fps: 25
+  realtime_control_fps: 30
   port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]

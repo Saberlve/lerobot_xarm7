@@ -473,3 +473,39 @@ def test_mesh_displacement_has_distinct_dataset_key(sdk):
         assert frame.shape == (12, 8, 3)
     finally:
         camera.disconnect()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_deferred_solver_reused_and_released(sdk, tmp_path, monkeypatch, fail):
+    sensor, _ = sdk
+    created = []
+    class Solver:
+        def __init__(self):
+            self.calls = self.releases = 0
+            self.buffer = np.zeros((35,20,3), np.float32)
+        def selectSensorInfo(self, output, rectify_image):
+            self.calls += 1
+            if fail and self.calls == 3:
+                raise RuntimeError("inference failed")
+            self.buffer[:] = self.calls
+            return self.buffer
+        def release(self):
+            self.releases += 1
+    def create(*args, **kwargs):
+        solver = Solver(); created.append(solver); return solver
+    monkeypatch.setattr(sensor, "createSolver", create, raising=False)
+    camera = XensePhotonCamera(config())
+    frames = []
+    try:
+        with camera.deferred_session(tmp_path):
+            for _ in range(5):
+                frames.append(camera.compute_deferred_features(np.zeros((12,8,3), np.uint8), tmp_path))
+    except RuntimeError as exc:
+        assert fail and str(exc) == "inference failed"
+    assert len(created) == 1
+    assert created[0].releases == 1
+    assert camera._solver is None
+    assert np.all(frames[0]["mesh_motion_3d"] == 1)
+    with camera.deferred_session(tmp_path / "next"):
+        camera.compute_deferred_features(np.zeros((12,8,3), np.uint8), tmp_path / "next")
+    assert len(created) == 2 and created[1].releases == 1

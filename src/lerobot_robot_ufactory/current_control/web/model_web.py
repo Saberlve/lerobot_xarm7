@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 
-from ..control.model import GravityModel
 from ..models.geometry import geometry_triangles, vectors
 
 
@@ -32,7 +31,6 @@ def origin_matrix(node):
 
 def export_model(profile):
     """Bake visuals into link coordinates; preserve URDF joint transforms/axes."""
-    GravityModel(profile)  # Validate the model used by the compensation runtime.
     root = ET.parse(profile.urdf).getroot()
     links = []
     for link in root.findall("link"):

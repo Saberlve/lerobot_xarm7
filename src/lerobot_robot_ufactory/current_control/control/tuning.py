@@ -3,34 +3,22 @@
 import copy
 import threading
 
-import numpy as np
-
-from ..config import tuning_slew, vector
-from ..monitoring.logging import GravityLog
+from ..config import tuning_slew
+from ..monitoring.logging import CurrentLog
 from ..monitoring.encoder_monitor import EncoderMonitor
-from .runtime import GravityRuntime, TUNING_TEMPERATURE_LIMIT_C
+from .runtime import CurrentRuntime, TUNING_TEMPERATURE_LIMIT_C
 
-# User-approved GELLO A gains from the web tuning session on 2026-10-06.
-INITIAL_GAINS = [0.0, 0.12, 0.025, 0.15, 0.0, 0.135, 0.12]
 INITIAL_SLEW_A_S = [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
-
-
-def tuning_gains(values):
-    gains = vector(values, "joint_gains", nonnegative=True)
-    if np.any(gains > 1):
-        raise ValueError("七轴增益必须在 0–1 之间")
-    return gains.tolist()
 
 
 class TuningSession:
     """Manage exclusive reader/control owners independently of the HTTP server."""
 
-    def __init__(self, profile, log_dir, *, gains=None, runtime_factory=GravityRuntime,
+    def __init__(self, profile, log_dir, *, runtime_factory=CurrentRuntime,
                  monitor_factory=EncoderMonitor):
         profile.validate_experiment()
         self.profile = profile
         self.log_dir = log_dir
-        self._gains = tuning_gains(INITIAL_GAINS if gains is None else gains)
         self._slew = tuning_slew(INITIAL_SLEW_A_S)
         self._factory = runtime_factory
         self._monitor_factory = monitor_factory
@@ -103,11 +91,10 @@ class TuningSession:
                 if self._phase in ("starting", "stopping") or (
                     self._runtime is not None and self._runtime.status()["state"] == "active"
                 ):
-                    raise RuntimeError("补偿已启动或正在切换状态")
+                    raise RuntimeError("电流控制已启动或正在切换状态")
                 self._cancel.clear()
                 self._phase = "starting"
                 self._error = None
-                gains = self._gains.copy()
                 slew = self._slew.copy()
                 previous = self._runtime
             try:
@@ -117,16 +104,13 @@ class TuningSession:
                     previous.stop(raise_on_fault=False)
                 self._stop_log()
                 profile = copy.copy(self.profile)
-                profile.joint_gains = gains
-                # Explicit seven-axis gains replace the legacy J5/J6 overrides.
-                profile.j5_gain = profile.j6_gain = None
                 runtime = self._factory(profile, live=True, experimental=True, tuning=True, tuning_slew_a_s=slew)
                 with self._lock:
                     self._runtime = runtime
                     self._view_mode = "compensation"
                 if self._cancel.is_set():
                     runtime.request_stop()
-                self._logger = GravityLog(runtime, self.log_dir)
+                self._logger = CurrentLog(runtime, self.log_dir)
                 with self._lock:
                     self._log_path = str(self._logger.path)
                 runtime.start()
@@ -187,23 +171,9 @@ class TuningSession:
             if errors:
                 raise RuntimeError("; ".join(errors))
 
-    def set_gains(self, values):
-        gains = tuning_gains(values)
-        with self._lifecycle:
-            with self._lock:
-                runtime, phase = self._runtime, self._phase
-            if phase in ("starting", "stopping"):
-                raise RuntimeError("请等待启动或卸力完成")
-            if runtime is not None and runtime.status()["state"] == "active":
-                runtime.set_joint_gains(gains)
-            with self._lock:
-                self._gains = gains
-        return gains
-
     def snapshot(self):
         with self._lock:
             runtime, phase, error = self._runtime, self._phase, self._error
-            gains = self._gains.copy()
             slew = self._slew.copy()
             log_path = self._log_path
             monitor, mode = self._monitor, self._view_mode
@@ -236,8 +206,6 @@ class TuningSession:
                 "state": phase,
                 "constant_current_a": self.profile.constant_current_a,
                 "constant_damping_a": self.profile.constant_damping_a.tolist(),
-                "gains": gains,
-                "applied_gains": None if record is None else record["gravity_gains"],
                 "current_slew_a_s": slew,
                 "applied_slew_a_s": None if record is None else record["current_slew_a_s"],
                 "running_slew_a_s": None if record is None else record["running_slew_a_s"],

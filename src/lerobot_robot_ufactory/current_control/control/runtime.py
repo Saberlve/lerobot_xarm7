@@ -8,8 +8,8 @@ from collections import deque
 
 import numpy as np
 
-from ..config import tuning_slew, vector
-from .model import CurrentController, GravityModel
+from ..config import tuning_slew
+from .current import CurrentController
 from ..hardware.transport import XL330Transport
 
 EXPERIMENT_MAX_DURATION_S = 10.0
@@ -18,8 +18,8 @@ TUNING_HEARTBEAT_TIMEOUT_S = 3.0
 TUNING_TEMPERATURE_LIMIT_C = 45.0
 
 
-class GravityRuntime:
-    def __init__(self, profile, *, live=False, transport=None, model=None, experimental=False, teleop=False, tuning=False, tuning_slew_a_s=None):
+class CurrentRuntime:
+    def __init__(self, profile, *, live=False, transport=None, experimental=False, teleop=False, tuning=False, tuning_slew_a_s=None):
         self.profile = profile
         self.live = live
         self.experimental = experimental
@@ -40,7 +40,7 @@ class GravityRuntime:
             raise ValueError("Experimental permission is only valid for live run")
         if live:
             profile.validate_live(experimental=experimental)
-        self.controller = CurrentController(profile, model or GravityModel(profile), running_slew_a_s=running_slew)
+        self.controller = CurrentController(profile, running_slew_a_s=running_slew)
         self.temperature_limit_c = min(profile.temperature_limit_c, TUNING_TEMPERATURE_LIMIT_C) if tuning or running_slew is not None else profile.temperature_limit_c
         self.transport = transport or XL330Transport(profile)
         self._stop = threading.Event()
@@ -104,7 +104,6 @@ class GravityRuntime:
                 tick = time.monotonic()
                 self._service_commands()
                 state = self.transport.state()
-                state["sample_sequence"] = count
                 now = time.monotonic()
                 age = now - state["stamp"]
                 dt = period if count == 0 else tick - previous
@@ -123,7 +122,7 @@ class GravityRuntime:
                     state["position"], state["velocity"], dt, now - start
                 )
                 if time.monotonic() - state["stamp"] > p.state_timeout_s:
-                    raise RuntimeError("Model computation made the encoder state stale")
+                    raise RuntimeError("Current computation made the encoder state stale")
                 if self.experimental and not (self.teleop or self.tuning) and time.monotonic() - start >= EXPERIMENT_MAX_DURATION_S:
                     self._stop.set()
                 if self.live and not self._stop.is_set():
@@ -150,7 +149,6 @@ class GravityRuntime:
                         "experimental": self.experimental,
                         "teleop": self.teleop,
                         "tuning": self.tuning,
-                        "gain": p.gain,
                         "measured_current_a": state["current_a"],
                         "temperature_c": state["temperature_c"],
                         "voltage_v": state["voltage_v"],
@@ -217,13 +215,6 @@ class GravityRuntime:
             with self._lock:
                 self._browser_stamp = time.monotonic()
 
-    def set_joint_gains(self, values):
-        if not self.tuning:
-            raise RuntimeError("Online gain changes require web tuning mode")
-        gains = vector(values, "joint_gains", nonnegative=True)
-        if np.any(gains > 1):
-            raise ValueError("Web tuning gains must be between 0 and 1")
-        return self.request("gains", gains.tolist())
 
     def set_current_slew(self, values):
         if not self.tuning:
@@ -244,17 +235,7 @@ class GravityRuntime:
         except queue.Empty:
             return
         try:
-            if operation == "gains":
-                if not self.tuning:
-                    raise RuntimeError("Online gain changes require web tuning mode")
-                gains = vector(argument, "joint_gains", nonnegative=True)
-                if np.any(gains > 1):
-                    raise ValueError("Web tuning gains must be between 0 and 1")
-                self.profile.joint_gains = gains.tolist()
-                self.profile.j5_gain = None
-                self.profile.j6_gain = None
-                result["value"] = gains.tolist()
-            elif operation == "slew":
+            if operation == "slew":
                 if not self.tuning:
                     raise RuntimeError("Online slew changes require web tuning mode")
                 slew = tuning_slew(argument)
@@ -345,11 +326,7 @@ class GravityRuntime:
 
     # Minimal interface consumed by the existing ContinuousDynamixelRobot.
     def get_joints(self):
-        state = self.state()
-        self.last_joint_sample_timing = {key: state[key] for key in (
-            "sample_sequence", "sample_start_ns", "sample_end_ns"
-        ) if key in state}
-        return state["position"]
+        return self.state()["position"]
 
     def close(self):
         self.stop()
@@ -369,7 +346,6 @@ class RuntimeRobot:
 
     def get_joint_state(self):
         raw = self._driver.get_joints()
-        self.last_joint_sample_timing = dict(getattr(self._driver, "last_joint_sample_timing", {}))
         pos = (raw - self._joint_offsets) * self._joint_signs
         if self._last_pos is not None:
             pos[:7] += 2 * np.pi * np.round((self._last_pos[:7] - pos[:7]) / (2 * np.pi))
@@ -383,8 +359,8 @@ class RuntimeRobot:
 
     def set_torque_mode(self, enabled):
         if enabled:
-            raise RuntimeError("Position torque mode is unavailable during gravity compensation")
-        # Pausing the follower does not alter gravity support. close() is explicit unload.
+            raise RuntimeError("Position torque mode is unavailable during current control")
+        # Pausing the follower does not alter current support. close() is explicit unload.
 
     def probe_gripper_dynamixel(self):
         from ...teleoperators.gello_teleop.gello_adapter import GripperDynamixelInfo
