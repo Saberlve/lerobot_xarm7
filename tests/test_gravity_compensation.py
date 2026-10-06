@@ -22,6 +22,8 @@ def profile(tmp_path):
     data["urdf"] = str((original.parent / "model/xarm7_gello.urdf").resolve())
     # Keep the unit-test device conservative and neutral without shipping a
     # second fixture profile under config/gravity.
+    data.pop("constant_current_a", None)
+    data.pop("constant_damping_a", None)
     data["encoder_zero_rad"] = [0.0] * 7
     data["current_limit_a"] = [0.05] * 7
     data["baudrate"] = 57600
@@ -698,8 +700,8 @@ def test_teleop_gravity_configuration_parses_and_overrides(monkeypatch):
     cfg = get_cfg()
     p = cfg.teleop.gravity_compensation.load_profile()
     assert p.gain == 0.6 and p.j5_gain == 0.02 and p.j6_gain is None
-    assert p.joint_gains == [0.065, 0.15, 0.115, 0.15, 0.06, 0.1, 0.12]
-    assert p.running_current_slew_a_s == [0.05, 0.12, 0.05, 0.12, 0.05, 0.05, 0.05]
+    assert p.joint_gains == [0.0, 0.12, 0.025, 0.15, 0.0, 0.135, 0.12]
+    assert p.running_current_slew_a_s == [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
     assert cfg.robot.cameras == {}
     assert cfg.teleop.port == p.port
     assert p.limits.tolist() == [1.0] * 7
@@ -942,3 +944,76 @@ def test_pinocchio_energy_gradient(profile):
             delta[axis] = 1e-6
             numerical.append((model.potential(q + delta) - model.potential(q - delta)) / 2e-6)
         np.testing.assert_allclose(model.gravity(q), numerical, atol=1e-5, rtol=0)
+
+
+@pytest.mark.parametrize("mode", ["teleop", "tuning"])
+def test_live_runtime_does_not_poll_health_registers(experimental_profile, mode):
+    class NoHealthPollingTransport(FakeTransport):
+        def health(self):
+            raise AssertionError("Periodic health-register polling must remain disabled")
+
+    transport = NoHealthPollingTransport()
+    runtime = GravityRuntime(
+        experimental_profile, live=True, experimental=True,
+        transport=transport, model=ConstantModel(), **{mode: True},
+    )
+    try:
+        runtime.start()
+        # Cross the old 0.5-second health polling interval.
+        time.sleep(0.6)
+        runtime.raise_if_failed()
+        assert runtime.status()["state"] == "active"
+        assert transport.calls.count("write") > 1
+    finally:
+        runtime.stop()
+    assert transport.calls[-2:] == ["disable", "close"]
+
+
+def test_constant_current_replaces_model_and_damping_with_ramp_and_limits(profile):
+    profile.constant_current_a = [None, -0.05, None, None, None, None, None]
+    controller = CurrentController(profile, ConstantModel())
+    for step in range(301):
+        elapsed = step * 0.01
+        velocity = np.full(8, 2.0 if step % 2 else -2.0)
+        previous = controller.previous.copy()
+        output, record = controller.compute(np.full(8, step * 0.01), velocity, 0.01, elapsed)
+        assert record["requested_a"][1] == pytest.approx(-0.05 * min(1, elapsed/profile.ramp_s))
+        assert record["gravity_current_a"][1] == record["damping_current_a"][1] == 0
+        assert abs(output[1]-previous[1]) <= profile.slew[1]*0.01 + 1e-12
+        assert np.max(np.abs(output)) <= max(profile.limits) + 1e-12
+    assert output[1] == pytest.approx(-0.05)
+    profile.limits[1] = 0.02
+    _, record = controller.compute(np.zeros(8), np.zeros(8), 0.01, 4)
+    assert record["limited_a"][1] == pytest.approx(-0.02)
+    assert record["saturated"]
+
+
+@pytest.mark.parametrize("values", [[None]*6, [True]*7, [float("nan")]*7, [0.1]*7])
+def test_constant_current_profile_validation(profile, values):
+    data = profile.data.copy()
+    data["constant_current_a"] = values
+    profile.path.write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError):
+        DeviceProfile(profile.path)
+
+
+def test_fixed_support_and_damping_never_assist_motion(profile):
+    profile.constant_current_a = [0, -.05, 0, .08, 0, 0, 0]
+    profile.constant_damping_a = np.array([0, 0, .002, 0, 0, 0, .002])
+    profile.limits[:] = 1
+    class NoGravity:
+        def gravity(self, q):
+            raise AssertionError("Fixed mode must not evaluate gravity")
+    c = CurrentController(profile, NoGravity())
+    for velocity in [1.0, -1.0, 0.0, .024, -.024, .2, -.2]:
+        for step in range(250):
+            out, record = c.compute(np.full(8, step*.01), np.full(8, velocity), .01, 3)
+            assert out[2]*velocity <= 0 and out[6]*velocity <= 0
+            assert np.all(out[[0,4,5]] == 0)
+            if abs(velocity) <= .05:
+                assert out[2] == out[6] == 0
+        expected = -.002*np.sign(velocity) if abs(velocity)>.05 else 0
+        assert out[2] == pytest.approx(expected)
+        assert out[6] == pytest.approx(expected)
+        assert out[1] == pytest.approx(-.05)
+        assert out[3] == pytest.approx(.08)

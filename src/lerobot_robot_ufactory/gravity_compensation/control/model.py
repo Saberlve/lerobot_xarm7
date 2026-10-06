@@ -64,7 +64,8 @@ class CurrentController:
         if not np.isfinite(position).all() or not np.isfinite(velocity).all():
             raise ValueError("Non-finite encoder state")
         q, dq = p.model_state(position, velocity)
-        gravity = self.model.gravity(q)
+        constant = getattr(p, "constant_current_a", [None] * 7)
+        gravity = self.model.gravity(q) if any(v is None for v in constant) else np.zeros(7)
         ramp = min(1.0, elapsed / p.ramp_s)
         gains = np.full(7, p.gain, dtype=float)
         joint_gains = getattr(p, "joint_gains", None)
@@ -78,7 +79,19 @@ class CurrentController:
                 gains[joint - 1] = joint_gain
         gravity_current = p.signs * ramp * gains * gravity / p.nm_per_amp
         damping_current = -p.signs * ramp * p.damping * dq / p.nm_per_amp
-        requested = gravity_current + damping_current
+        constant = getattr(p, "constant_current_a", [None] * 7)
+        constant_current = np.zeros(7)
+        for i, value in enumerate(constant):
+            if value is not None:
+                # A constant target replaces BOTH model and damping terms.
+                gravity_current[i] = damping_current[i] = 0.0
+                constant_current[i] = ramp * value
+        fixed_damping = np.asarray(getattr(p, "constant_damping_a", np.zeros(7)))
+        deadband = getattr(p, "damping_deadband_rad_s", 0.05)
+        direction = np.where(np.abs(velocity[:7]) > deadband, np.sign(velocity[:7]), 0.0)
+        friction_current = -ramp * fixed_damping * direction
+        damping_current += friction_current
+        requested = gravity_current + damping_current + constant_current
         if not np.isfinite(requested).all():
             raise ValueError("Non-finite model torque")
         limited = np.clip(requested, -p.limits, p.limits)
@@ -87,6 +100,12 @@ class CurrentController:
         if self.running_slew_a_s is not None and elapsed >= p.ramp_s:
             slew = np.asarray(tuning_slew(self.running_slew_a_s))
         output = self.previous + np.clip(limited - self.previous, -slew * dt, slew * dt)
+        # Pure damping must not push along motion after reversal or at rest.
+        # Unload old damping immediately, then slew into the new opposing sign.
+        for i, value in enumerate(constant):
+            if value == 0 and fixed_damping[i] > 0:
+                if direction[i] == 0 or output[i] * direction[i] > 0:
+                    output[i] = 0.0
         self.previous = output.copy()
         return output, {
             "q": q.tolist(),
@@ -94,6 +113,7 @@ class CurrentController:
             "gravity_gains": gains.tolist(),
             "gravity_current_a": gravity_current.tolist(),
             "damping_current_a": damping_current.tolist(),
+            "constant_current_a": constant_current.tolist(),
             "requested_a": requested.tolist(),
             "limited_a": limited.tolist(),
             "target_a": output.tolist(),

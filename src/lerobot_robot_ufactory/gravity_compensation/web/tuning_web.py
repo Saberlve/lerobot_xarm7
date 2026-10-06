@@ -14,7 +14,7 @@ from .model_web import render_html, viewer_data
 
 def tuning_page(profile, token):
     data = viewer_data(profile)
-    data["tuning"] = {"token": token, "initial_gains": INITIAL_GAINS, "max_gain": 1,
+    data["tuning"] = {"constant_damping_a": profile.constant_damping_a.tolist(), "constant_current_a": profile.constant_current_a, "token": token, "initial_gains": INITIAL_GAINS, "max_gain": 1,
                       "initial_slew_a_s": INITIAL_SLEW_A_S,
                       "min_slew_a_s": MIN_TUNING_SLEW_A_S, "max_slew_a_s": MAX_TUNING_SLEW_A_S}
     return render_html(data).encode("utf-8")

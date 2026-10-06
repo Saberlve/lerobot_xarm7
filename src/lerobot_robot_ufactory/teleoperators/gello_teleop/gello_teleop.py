@@ -73,6 +73,8 @@ class GelloTeleop(UFBaseTeleop):
                 "joint_ids": self.config.joint_ids,
                 "joint_signs": self.config.joint_signs,
                 "joint_offsets": joint_offsets,
+                "baudrate": self.config.dynamixel_baudrate,
+                "use_fake_fallback": self.config.dynamixel_use_fake_fallback,
                 "gripper_config": gripper_config
         }
         self._dynamixel_robo_config = PatchedDynamixelRobotConfig(**param_dict)
@@ -538,6 +540,10 @@ class GelloTeleop(UFBaseTeleop):
                                 1.0,
                             )
             return self._keyboard_gripper_target
+
+    def get_action_sample_timing(self):
+        """Timing for the raw sample consumed by the most recent get_action call."""
+        return dict(getattr(self.gello_agent._robot, "last_joint_sample_timing", {}))
 
     def get_action(self) -> dict[str, np.ndarray]:
         self.check_gravity_compensation()

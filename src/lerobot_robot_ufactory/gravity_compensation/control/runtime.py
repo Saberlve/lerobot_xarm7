@@ -90,7 +90,6 @@ class GravityRuntime:
                     self.transport.enable()
             start = previous = time.monotonic()
             deadline = start
-            health_at = start
             count = 0
             self._status = "active" if self.live else "observe"
             while not self._stop.is_set():
@@ -105,6 +104,7 @@ class GravityRuntime:
                 tick = time.monotonic()
                 self._service_commands()
                 state = self.transport.state()
+                state["sample_sequence"] = count
                 now = time.monotonic()
                 age = now - state["stamp"]
                 dt = period if count == 0 else tick - previous
@@ -129,9 +129,8 @@ class GravityRuntime:
                 if self.live and not self._stop.is_set():
                     gripper = self._gripper_a if now - self._gripper_stamp < 0.1 else 0.0
                     self.transport.currents(current, gripper)
-                    if now >= health_at:
-                        self.transport.health()
-                        health_at = now + 0.5
+                    # Periodic health-register polling is disabled: its serial burst
+                    # delays publishing fresh angles. State-based checks remain above.
                 end = time.monotonic()
                 if end - tick > p.state_timeout_s:
                     raise RuntimeError("GELLO control transaction exceeded timeout")
@@ -346,7 +345,11 @@ class GravityRuntime:
 
     # Minimal interface consumed by the existing ContinuousDynamixelRobot.
     def get_joints(self):
-        return self.state()["position"]
+        state = self.state()
+        self.last_joint_sample_timing = {key: state[key] for key in (
+            "sample_sequence", "sample_start_ns", "sample_end_ns"
+        ) if key in state}
+        return state["position"]
 
     def close(self):
         self.stop()
@@ -366,6 +369,7 @@ class RuntimeRobot:
 
     def get_joint_state(self):
         raw = self._driver.get_joints()
+        self.last_joint_sample_timing = dict(getattr(self._driver, "last_joint_sample_timing", {}))
         pos = (raw - self._joint_offsets) * self._joint_signs
         if self._last_pos is not None:
             pos[:7] += 2 * np.pi * np.round((self._last_pos[:7] - pos[:7]) / (2 * np.pi))

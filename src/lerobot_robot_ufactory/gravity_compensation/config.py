@@ -141,6 +141,24 @@ class DeviceProfile:
         self.limits = vector(d["current_limit_a"], "current_limit_a", positive=True)
         if np.any(self.limits > 1.75):
             raise ValueError("XL330 current_limit_a exceeds the model maximum")
+        # Motor-coordinate amperes; None retains model-based gravity/damping.
+        values = d.get("constant_current_a", [None] * 7)
+        if not isinstance(values, (list, tuple)) or len(values) != 7:
+            raise ValueError("constant_current_a must contain seven numbers or nulls")
+        currents = vector([0 if v is None else v for v in values], "constant_current_a")
+        if np.any(np.abs(currents) > self.limits):
+            raise ValueError("constant_current_a exceeds current_limit_a")
+        self.constant_current_a = list(values)
+        self.constant_damping_a = vector(d.get("constant_damping_a", [0.0] * 7),
+                                         "constant_damping_a", nonnegative=True)
+        if np.any(np.abs(currents) + self.constant_damping_a > self.limits):
+            raise ValueError("Constant current plus damping exceeds current_limit_a")
+        self.damping_deadband_rad_s = d.get("damping_deadband_rad_s", 0.05)
+        if (isinstance(self.damping_deadband_rad_s, bool)
+                or not isinstance(self.damping_deadband_rad_s, (int, float))
+                or not math.isfinite(self.damping_deadband_rad_s)
+                or self.damping_deadband_rad_s < 0):
+            raise ValueError("damping_deadband_rad_s must be finite and nonnegative")
         self.slew = vector(d["current_slew_a_s"], "current_slew_a_s", positive=True)
         self.damping = vector(d["damping_nm_s_rad"], "damping_nm_s_rad", nonnegative=True)
         self.gravity = vector(d.get("gravity_m_s2", [0, 0, -9.81]), "gravity_m_s2", 3)

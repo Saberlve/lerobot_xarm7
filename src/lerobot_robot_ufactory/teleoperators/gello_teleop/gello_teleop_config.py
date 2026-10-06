@@ -29,6 +29,8 @@ class GelloFeedbackConfig:
 class GelloTeleopConfig(TeleoperatorConfig):
     gravity_compensation: GravityCompensationConfig = field(default_factory=GravityCompensationConfig)
     # Frequency of the independent GELLO -> xArm realtime control loop.
+    dynamixel_baudrate: int = 57600
+    dynamixel_use_fake_fallback: bool = True
     realtime_control_fps: int = 30
     # Port to connect to the gello dummy arm
     port: str = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAJZYC7-if00-port0"
@@ -65,6 +67,8 @@ class GelloTeleopConfig(TeleoperatorConfig):
         if self.gravity_compensation.enabled and not self.gravity_compensation.profile_path:
             raise ValueError("gravity_compensation.profile_path is required when enabled")
         self.id = 'gello_teleop' if self.id is None else self.id
+        if type(self.dynamixel_baudrate) is not int or self.dynamixel_baudrate <= 0:
+            raise ValueError("dynamixel_baudrate must be a positive integer")
         if self.realtime_control_fps <= 0:
             raise ValueError("realtime_control_fps must be positive")
         if len(self.joint_ids) != len(self.joint_signs):

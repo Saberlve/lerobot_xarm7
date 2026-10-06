@@ -11,8 +11,8 @@ from ..monitoring.encoder_monitor import EncoderMonitor
 from .runtime import GravityRuntime, TUNING_TEMPERATURE_LIMIT_C
 
 # User-approved GELLO A gains from the web tuning session on 2026-10-06.
-INITIAL_GAINS = [0.065, 0.15, 0.115, 0.15, 0.06, 0.1, 0.12]
-INITIAL_SLEW_A_S = [0.05, 0.12, 0.05, 0.12, 0.05, 0.05, 0.05]
+INITIAL_GAINS = [0.0, 0.12, 0.025, 0.15, 0.0, 0.135, 0.12]
+INITIAL_SLEW_A_S = [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
 
 
 def tuning_gains(values):
@@ -234,6 +234,8 @@ class TuningSession:
             "sample": sample,
             "tuning": {
                 "state": phase,
+                "constant_current_a": self.profile.constant_current_a,
+                "constant_damping_a": self.profile.constant_damping_a.tolist(),
                 "gains": gains,
                 "applied_gains": None if record is None else record["gravity_gains"],
                 "current_slew_a_s": slew,

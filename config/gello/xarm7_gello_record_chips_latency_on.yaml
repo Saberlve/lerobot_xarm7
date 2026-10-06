@@ -1,0 +1,120 @@
+# Full-load chips A/B test; 30 Hz teleoperation, original sensor and dataset rates.
+robot:
+  type: uf::robot
+  id: uf_robot
+  robot_dof: 7
+  control_space: joint
+  record_space: both
+  robot_ip: 192.168.1.245
+  gripper_type: 2
+  gripper_speed: 50
+  gripper_command_interval_s: 0.03334
+  gripper_current_monitor: true
+  gripper_current_monitor_frequency_hz: 250
+  enable_logs: false
+  joint_command_mode: 6
+  max_joint_velocity: 120
+  min_tcp_z_mm: 2
+  tcp_z_guard_backend: local_projection
+  tcp_z_soft_margin_mm: 0.5
+  local_kinematics_max_error_mm: 2.0
+  controller_safety_boundary: true
+  gripper_error_log_path: logs/xarm7_gripper_errors.log
+  cameras:
+    wrist_camera:
+      type: intelrealsense
+      serial_number_or_name: '242622070583'
+      width: 640
+      height: 480
+      fps: 15
+    third_camera:
+      type: intelrealsense
+      serial_number_or_name: '148522072685'
+      width: 640
+      height: 480
+      fps: 15
+    photon_right:
+      type: photon
+      serial_number: OG001931
+      width: 400
+      height: 700
+      fps: 60
+      output_type: Rectify
+      color_mode: rgb
+      disable_infer: true
+      save_marker_motion_3d: false
+      motion_3d_output: Mesh3DFlow
+      infer_mode: fast
+      marker_rows: 35
+      marker_cols: 20
+    photon_left:
+      type: photon
+      serial_number: OG001932
+      width: 400
+      height: 700
+      fps: 60
+      output_type: Rectify
+      color_mode: rgb
+      disable_infer: true
+      save_marker_motion_3d: false
+      motion_3d_output: Mesh3DFlow
+      infer_mode: fast
+      marker_rows: 35
+      marker_cols: 20
+teleop:
+  type: uf::gello_teleop
+  id: gello_teleop
+  realtime_control_fps: 30
+  port: /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0
+  joint_ids:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  joint_signs:
+  - 1
+  - 1
+  - 1
+  - 1
+  - 1
+  - 1
+  - 1
+  gripper_id: 8
+  gripper_control_mode: keyboard
+  gripper_keyboard_hold_delay_s: 0.0
+  gripper_keyboard_step_mm: 1.0
+  gripper_open_deg: 198.28125
+  gripper_close_deg: 155.75
+  dynamixel_baudrate: 1000000
+  dynamixel_use_fake_fallback: false
+  gravity_compensation:
+    enabled: true
+    experimental: true
+    profile_path: config/gravity/gello_A_working.yaml
+    gain: 0.3
+    joint_gains: [0.0, 0.12, 0.025, 0.15, 0.0, 0.135, 0.12]
+    running_current_slew_a_s: [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
+    j5_gain: null
+    j6_gain: null
+    log_dir: logs/gravity_latency_chips_on
+web_preview:
+  enabled: false
+  host: 0.0.0.0
+  port: 8769
+  fps: 8
+  width: 480
+  jpeg_quality: 65
+synchronize: true
+offline_mesh3dflow: false
+dataset:
+  root: datasets/gravity_latency_chips_on
+  repo_id: ufactory/gravity_latency_chips_on
+  single_task: Put the potato chips into the cup
+  fps: 15
+  episode_time_s: 60
+  reset_time_s: 20
+  push_to_hub: false
+  num_episodes: 3

@@ -72,6 +72,7 @@ def make_driver(handler=None):
     driver._gripper_current_spec = None
     driver._gripper_restore_operating_mode = None
     driver._joint_angles = np.zeros(8, dtype=int)
+    driver._timed_joint_sample = (driver._joint_angles, {})
     return driver
 
 

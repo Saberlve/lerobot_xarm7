@@ -67,9 +67,9 @@ teleop:
     profile_path: config/gravity/gello_A_working.yaml
     # User-approved seven-axis gains from web tuning on 2026-10-06.
     gain: 0.3
-    joint_gains: [0.065, 0.15, 0.115, 0.15, 0.06, 0.1, 0.12]
+    joint_gains: [0.0, 0.12, 0.025, 0.15, 0.0, 0.135, 0.12]
     # Running rates only; first 2 seconds keep the original 0.05 A/s.
-    running_current_slew_a_s: [0.05, 0.12, 0.05, 0.12, 0.05, 0.05, 0.05]
+    running_current_slew_a_s: [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
     j5_gain: null
     j6_gain: null
     log_dir: logs/gravity_record

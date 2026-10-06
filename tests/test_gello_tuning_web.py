@@ -171,6 +171,10 @@ def test_running_slew_preserves_startup_ramp_limits_and_reverse_rate(profile):
         def gravity(self, q):
             return np.ones(7) * 100 * self.direction
 
+    # Exercise slew limiting on every axis, independently of user defaults with zero gain.
+    profile.joint_gains = [0.1] * 7
+    profile.constant_current_a = [None] * 7
+    profile.constant_damping_a = np.zeros(7)
     model = HighCurrentModel()
     rates = [0.05, 0.1, 0.2, 0.15, 0.05, 0.1, 0.2]
     controller = CurrentController(profile, model, running_slew_a_s=rates)

@@ -227,6 +227,6 @@ def test_default_teleop_configuration_parses_saved_gains_and_running_rates():
     configured = yaml.safe_load((ROOT / "config/gello/xarm7_gello_teleop_gravity.yaml").read_text())
     parsed = draccus.decode(TeleoperatorConfig, configured["teleop"])
     assert isinstance(parsed, GelloTeleopConfig)
-    assert parsed.gravity_compensation.joint_gains == [0.065, 0.15, 0.115, 0.15, 0.06, 0.1, 0.12]
-    assert parsed.gravity_compensation.running_current_slew_a_s == [0.05, 0.12, 0.05, 0.12, 0.05, 0.05, 0.05]
+    assert parsed.gravity_compensation.joint_gains == [0.0, 0.12, 0.025, 0.15, 0.0, 0.135, 0.12]
+    assert parsed.gravity_compensation.running_current_slew_a_s == [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
     assert parsed.gravity_compensation.load_profile().joint_gains == parsed.gravity_compensation.joint_gains

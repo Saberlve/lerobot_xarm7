@@ -109,7 +109,15 @@
   },
   "direction_verification": {
     "model_signs_verified": true,
-    "model_signs": [1, 1, 1, 1, 1, 1, 1],
+    "model_signs": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
     "urdf_sha256": "635b0466b54c287439fb30b257b102993ffb7092c9581cf65e8859781822bf5d",
     "source": "User confirmed J1-J7 positive directions all map to +1 after checking the revised model.",
     "encoder_zero_verified": false
@@ -131,5 +139,24 @@
     "target_100hz_verified": true,
     "scope": "10-second read-only observation; occasional single-period overrun observed. Live output timing is not yet tested."
   },
-  "note": "OFFICIAL STL ESTIMATE / NOT COMMISSIONED. Candidate encoder offsets adopted; J3 zero is 0 per user confirmation. All signs +1. All eight motor baud rates verified at 1 Mbps; 10-second read-only observation achieved approximately 100 Hz with FTDI USB latency 1 ms and one single-period overrun. Live output is untested. Mass and current constants remain estimates."
+  "note": "OFFICIAL STL ESTIMATE / NOT COMMISSIONED. Candidate encoder offsets adopted; J3 zero is 0 per user confirmation. All signs +1. All eight motor baud rates verified at 1 Mbps; 10-second read-only observation achieved approximately 100 Hz with FTDI USB latency 1 ms and one single-period overrun. Live output is untested. Mass and current constants remain estimates.",
+  "constant_current_a": [
+    0,
+    -0.05,
+    0,
+    0.08,
+    0,
+    0,
+    0
+  ],
+  "constant_damping_a": [
+    0,
+    0,
+    0.002,
+    0,
+    0,
+    0,
+    0.002
+  ],
+  "damping_deadband_rad_s": 0.05
 }

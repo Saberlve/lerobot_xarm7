@@ -23,6 +23,18 @@ thermalSummary.textContent='温度 — · 40°C 起提示，45°C 自动卸力';
 document.querySelector('.live-panel h2').textContent='实时姿态与电机读数';
 updateLiveNote();
 const tuneConfig=MODEL.tuning;
+const constantCurrents=tuneConfig.constant_current_a||Array(7).fill(null);
+const constantDamping=tuneConfig.constant_damping_a||Array(7).fill(0);
+function fixedModeLabel(i){return constantDamping[i]>0?`J${i+1} 恒定阻尼 ${constantDamping[i]*1000} mA（反向于运动，静止为零）`:`J${i+1} 恒流 ${constantCurrents[i]*1000} mA`; }
+const constantNote=document.createElement('div');constantNote.className='tune-small';
+constantNote.textContent=constantCurrents.map((v,i)=>v===null?'':fixedModeLabel(i)).filter(Boolean).join('；');
+tuneToolbar.append(constantNote);
+if(constantCurrents.every(v=>v!==null)){
+ tuneBoard.querySelector('summary').textContent='恒流与阻尼参数';
+ tuneBoard.querySelector('.tune-small').textContent='当前关闭模型重力补偿，使用固定电流和定幅阻尼；静止死区内阻尼为零。';
+ for(const id of ['tune-j2-off','tune-lower','tune-defaults','tune-export'])$(id).hidden=true;
+}
+
 let draftGains=tuneConfig.initial_gains.slice(),pendingGains=null,sendingGains=false,dirtyGains=false;
 let draftSlew=tuneConfig.initial_slew_a_s.slice(),pendingSlew=null,sendingSlew=false,dirtySlew=false;
 let tunePhase='idle',tuneBusy=false,lastTunePacket=null;
@@ -107,9 +119,10 @@ function updateControls(){
  $('tune-stop').disabled=$('tune-stop').disabled&&tunePhase!=='reading';
  $('tune-stop').textContent=tunePhase==='reading'?'停止读取':'立即卸力';
  for(const id of ['view-offline','view-read'])$(id).disabled=changing||tunePhase==='active';
+ $('tune-j2-off').hidden=constantCurrents[1]!==null;
  $('view-offline').classList.toggle('active',MODEL.live.mode==='offline');
  $('view-read').classList.toggle('active',MODEL.live.mode==='read_only');
- gainCards.forEach((card,i)=>{card.classList.toggle('selected',i===selected);card.querySelectorAll('input').forEach(input=>input.disabled=changing);});
+ gainCards.forEach((card,i)=>{card.classList.toggle('selected',i===selected);card.querySelectorAll('input').forEach(input=>input.disabled=changing||(constantCurrents[i]!==null&&(input.classList.contains('gain-number')||input.classList.contains('gain-slider'))));});
  for(const id of ['tune-j2-off','tune-lower','tune-defaults','slew-slow','slew-defaults'])$(id).disabled=changing;
 }
 for(const [id,mode] of [['view-offline','offline'],['view-read','read_only']])$(id).onclick=async()=>{
@@ -146,7 +159,7 @@ window.addEventListener('gello-state',event=>{
  const temperatures=packet.view_mode==='read_only'?packet.sample?.temperature_c:record?.temperature_c;
  const temperatureNote=active?'':packet.view_mode==='read_only'?(packet.status==='connected'?'':' · 最后读数'):' · 停机时读数';
  gainCards.forEach((card,i)=>{
-  card.querySelector('.applied').textContent=active&&packet.tuning.applied_gains?`生效 ${packet.tuning.applied_gains[i].toFixed(3)}`:'待启动';
+  card.querySelector('.applied').textContent=constantCurrents[i]!==null?fixedModeLabel(i):active&&packet.tuning.applied_gains?`生效 ${packet.tuning.applied_gains[i].toFixed(3)}`:'待启动';
   card.querySelector('.command').textContent=active&&record?`命令 ${(record.target_a[i]*1000).toFixed(0)} mA`:'命令 —';
   card.querySelector('.measured').textContent=active&&record?`实测 ${(record.measured_current_a[i]*1000).toFixed(0)} mA`:'实测 —';
   card.querySelector('.gain-meter div').style.width=active&&record?`${Math.min(100,Math.abs(record.target_a[i])/packet.tuning.current_limit_a[i]*100)}%`:'0%';
