@@ -1,9 +1,16 @@
 """Supervised tuning session and read-only/compensation ownership handoff."""
 
 import copy
+import json
+import os
+import stat
+import tempfile
 import threading
 
-from ..config import tuning_slew
+import numpy as np
+import yaml
+
+from ..config import DeviceProfile, current_targets, tuning_slew
 from ..monitoring.logging import CurrentLog
 from ..monitoring.encoder_monitor import EncoderMonitor
 from .runtime import CurrentRuntime, TUNING_TEMPERATURE_LIMIT_C
@@ -19,7 +26,8 @@ class TuningSession:
         profile.validate_experiment()
         self.profile = profile
         self.log_dir = log_dir
-        self._slew = tuning_slew(INITIAL_SLEW_A_S)
+        self._slew = tuning_slew(getattr(profile, "running_current_slew_a_s", None)
+                                 or profile.default_running_current_slew_a_s or INITIAL_SLEW_A_S)
         self._factory = runtime_factory
         self._monitor_factory = monitor_factory
         self._monitor = None
@@ -32,6 +40,9 @@ class TuningSession:
         self._log_path = None
         self._phase = "idle"
         self._error = None
+        self._saved_targets = current_targets(profile.constant_current_a,
+                                             profile.constant_damping_a.tolist(), profile.limits)
+        self._saved_slew = self._slew.copy()
 
     def heartbeat(self):
         with self._lock:
@@ -177,6 +188,10 @@ class TuningSession:
             slew = self._slew.copy()
             log_path = self._log_path
             monitor, mode = self._monitor, self._view_mode
+            targets = current_targets(self.profile.constant_current_a,
+                                      self.profile.constant_damping_a.tolist(), self.profile.limits)
+            unsaved = targets != self._saved_targets
+            unsaved_settings = unsaved or slew != self._saved_slew
         diagnostic = {"record": None, "age_ms": None}
         if runtime is not None and mode in ("compensation", "stopped"):
             status = runtime.status()
@@ -204,8 +219,11 @@ class TuningSession:
             "sample": sample,
             "tuning": {
                 "state": phase,
-                "constant_current_a": self.profile.constant_current_a,
-                "constant_damping_a": self.profile.constant_damping_a.tolist(),
+                **targets,
+                "unsaved_currents": unsaved,
+                "unsaved_settings": unsaved_settings,
+                "auto_save": True,
+                "profile_path": str(self.profile.path),
                 "current_slew_a_s": slew,
                 "applied_slew_a_s": None if record is None else record["current_slew_a_s"],
                 "running_slew_a_s": None if record is None else record["running_slew_a_s"],
@@ -221,7 +239,7 @@ class TuningSession:
                 packet["error"] = error
         return packet
 
-    def set_current_slew(self, values):
+    def set_current_slew(self, values, *, persist=False):
         slew = tuning_slew(values)
         with self._lifecycle:
             with self._lock:
@@ -232,4 +250,75 @@ class TuningSession:
                 runtime.set_current_slew(slew)
             with self._lock:
                 self._slew = slew
+            if persist:
+                self._persist_applied_settings()
         return slew
+
+    def set_current_targets(self, currents, damping, *, persist=False):
+        targets = current_targets(currents, damping, self.profile.limits)
+        with self._lifecycle:
+            with self._lock:
+                runtime, phase = self._runtime, self._phase
+            if phase in ("starting", "stopping"):
+                raise RuntimeError("请等待启动或卸力完成")
+            if runtime is not None and runtime.status()["state"] == "active":
+                runtime.set_current_targets(targets["constant_current_a"],
+                                            targets["constant_damping_a"])
+            with self._lock:
+                self.profile.constant_current_a = targets["constant_current_a"]
+                self.profile.constant_damping_a = np.asarray(targets["constant_damping_a"])
+            if persist:
+                self._persist_applied_settings()
+        return targets
+
+    def save_current_targets(self):
+        """Persist all three tuning fields; retain the existing API name."""
+        with self._lifecycle:
+            return self._save_settings()
+
+    def _persist_applied_settings(self):
+        try:
+            self._save_settings()
+        except Exception as exc:
+            raise RuntimeError(f"参数已应用，但同步配置失败：{exc}；请点击重新同步参数到配置") from exc
+
+    def _save_settings(self):
+        """Caller holds the lifecycle lock; filesystem I/O stays off the serial owner."""
+        with self._lock:
+            if self._phase in ("starting", "stopping"):
+                raise RuntimeError("请等待启动或卸力完成")
+            targets = current_targets(self.profile.constant_current_a,
+                                      self.profile.constant_damping_a.tolist(), self.profile.limits)
+            slew = self._slew.copy()
+        path = self.profile.path
+        original = path.read_text()
+        data = yaml.safe_load(original)
+        data.update(targets)
+        data["running_current_slew_a_s"] = slew
+        data["note"] = "Fixed currents, passive damping and continuous-mode current slew tuned from the web. Geometry is used for visualization only."
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent,
+                                             prefix=".current-tuning-", suffix=".yaml",
+                                             delete=False) as stream:
+                temporary = stream.name
+                stream.write(json.dumps(data, indent=2) + "\n" if original.lstrip().startswith("{")
+                             else yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+                stream.flush()
+                os.fsync(stream.fileno())
+            candidate = DeviceProfile(temporary)
+            candidate.validate_experiment()
+            if candidate.serial != self.profile.serial or not np.array_equal(candidate.limits, self.profile.limits):
+                raise RuntimeError("配置在调参期间发生变化，请重新加载网页服务")
+            os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                os.unlink(temporary)
+        with self._lock:
+            self.profile.data = data
+            self.profile.default_running_current_slew_a_s = slew
+            self._saved_targets = targets
+            self._saved_slew = slew
+        return str(path)

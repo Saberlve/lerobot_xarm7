@@ -8,7 +8,7 @@ from collections import deque
 
 import numpy as np
 
-from ..config import tuning_slew
+from ..config import current_targets, tuning_slew
 from .current import CurrentController
 from ..hardware.transport import XL330Transport
 
@@ -221,6 +221,12 @@ class CurrentRuntime:
             raise RuntimeError("Online slew changes require web tuning mode")
         return self.request("slew", tuning_slew(values))
 
+    def set_current_targets(self, currents, damping):
+        if not self.tuning:
+            raise RuntimeError("Online current changes require web tuning mode")
+        targets = current_targets(currents, damping, self.profile.limits)
+        return self.request("currents", targets)
+
     def diagnostics(self):
         """Read the last completed control record without consuming the log queue."""
         with self._lock:
@@ -241,6 +247,16 @@ class CurrentRuntime:
                 slew = tuning_slew(argument)
                 self.controller.running_slew_a_s = slew
                 result["value"] = slew.copy()
+            elif operation == "currents":
+                if not self.tuning:
+                    raise RuntimeError("Online current changes require web tuning mode")
+                targets = current_targets(argument["constant_current_a"],
+                                          argument["constant_damping_a"], self.profile.limits)
+                # Replace both targets on the serial owner, before the next compute.
+                # Keep controller.previous so normal output slew still applies.
+                self.profile.constant_current_a = targets["constant_current_a"]
+                self.profile.constant_damping_a = np.asarray(targets["constant_damping_a"])
+                result["value"] = targets
             elif operation == "probe":
                 result["value"] = self.transport.gripper_info()
             elif operation == "enable":

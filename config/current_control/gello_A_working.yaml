@@ -115,24 +115,33 @@
     "target_100hz_verified": true,
     "scope": "10-second read-only observation; occasional single-period overrun observed. Live output timing is not yet tested."
   },
-  "note": "Fixed current and passive damping profile. URDF and encoder/model alignment are retained for visualization only; no model torque is calculated. J2 -50 mA, J4 +80 mA, J3/J7 2 mA opposing velocity outside 0.05 rad/s deadband.",
+  "note": "Fixed currents, passive damping and continuous-mode current slew tuned from the web. Geometry is used for visualization only.",
   "constant_current_a": [
-    0,
-    -0.05,
-    0,
-    0.08,
-    0,
-    0,
-    0
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
   ],
   "constant_damping_a": [
-    0,
-    0,
-    0.002,
-    0,
-    0,
-    0,
+    0.003,
+    0.03,
+    0.003,
+    0.02,
+    0.003,
+    0.003,
     0.002
   ],
-  "damping_deadband_rad_s": 0.05
+  "damping_deadband_rad_s": 0.05,
+  "running_current_slew_a_s": [
+    0.17,
+    0.2,
+    0.17,
+    0.17,
+    0.16,
+    0.17,
+    0.17
+  ]
 }

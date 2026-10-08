@@ -242,6 +242,136 @@ def test_running_slew_config_rejects_invalid_values_and_disabled_support():
         CurrentControlConfig(running_current_slew_a_s=[.1] * 7)
 
 
+def test_online_currents_use_owner_thread_and_slew_and_survive_restart(profile, tmp_path):
+    transports = []
+    session = session_with_fake(profile, tmp_path, transports)
+    currents = [0, -0.045, 0, 0.070, 0, 0, 0]
+    damping = [0, 0, .002, 0, 0, .001, .002]
+    session.set_current_targets(currents, damping)
+    assert transports == []
+    assert session.snapshot()["tuning"]["unsaved_currents"]
+    try:
+        session.start()
+        runtime = session._runtime
+        controller = CurrentController(session.profile, running_slew_a_s=INITIAL_SLEW_A_S)
+        controller.previous = np.asarray(currents, dtype=float)
+        reversed_currents = [0, .045, 0, -.070, 0, 0, 0]
+        session.set_current_targets(reversed_currents, damping)
+        wait_for(lambda: runtime.diagnostics()["record"]["requested_a"][1] > 0)
+        # A sign change does not jump straight to the new target.
+        output, record = controller.compute(np.r_[profile.zeros, 0], np.zeros(8), .01, 3)
+        assert output[1] < 0 < record["requested_a"][1]
+        assert abs(output[1] - currents[1]) <= INITIAL_SLEW_A_S[1] * .01 + 1e-12
+        before = session.snapshot()["tuning"]
+        for bad_currents, bad_damping in (([True] * 7, damping), (currents, [-.001] * 7),
+                                         ([float('nan')] * 7, damping), ([1] * 7, [.001] * 7)):
+            with pytest.raises(ValueError):
+                session.set_current_targets(bad_currents, bad_damping)
+        assert runtime.status()["state"] == "active"
+        assert session.snapshot()["tuning"]["constant_current_a"] == before["constant_current_a"]
+        session.stop()
+        session.start()
+        assert session.snapshot()["tuning"]["constant_current_a"] == reversed_currents
+    finally:
+        session.stop()
+    assert all(len(t.owners) == 1 for t in transports)
+    other = CurrentRuntime(profile, live=True, experimental=True, teleop=True,
+                           transport=TuningTransport(profile))
+    with pytest.raises(RuntimeError, match="web tuning"):
+        other.set_current_targets(currents, damping)
+
+
+def test_save_currents_preserves_other_profile_fields_and_loads_in_teleop(profile, tmp_path):
+    original = profile.data.copy()
+    original["urdf"] = str(profile.urdf)
+    path = tmp_path / "device.yaml"
+    path.write_text(yaml.safe_dump(original))
+    profile = DeviceProfile(path)
+    transports = []
+    session = session_with_fake(profile, tmp_path, transports)
+    currents, damping = [0, -.045, 0, .07, 0, 0, 0], [0, 0, .002, 0, 0, .001, .002]
+    session.set_current_targets(currents, damping)
+    assert yaml.safe_load(path.read_text())["constant_current_a"] == original["constant_current_a"]
+    assert session.save_current_targets() == str(path)
+    saved = yaml.safe_load(path.read_text())
+    assert saved["constant_current_a"] == currents
+    assert saved["constant_damping_a"] == damping
+    for key in original.keys() - {"constant_current_a", "constant_damping_a", "note"}:
+        assert saved[key] == original[key]
+    assert not session.snapshot()["tuning"]["unsaved_currents"]
+    loaded = CurrentControlConfig(enabled=True, profile_path=str(path)).load_profile()
+    assert loaded.constant_current_a == currents
+    assert loaded.constant_damping_a.tolist() == damping
+    assert transports == []
+    assert not list(tmp_path.glob('.current-tuning-*'))
+    # Do not overwrite a profile whose electrical limits changed externally.
+    saved["current_limit_a"] = [.5] * 7
+    path.write_text(yaml.safe_dump(saved))
+    with pytest.raises(RuntimeError, match="配置"):
+        session.save_current_targets()
+    assert yaml.safe_load(path.read_text())["current_limit_a"] == [.5] * 7
+    assert not list(tmp_path.glob('.current-tuning-*'))
+
+
+def test_auto_sync_targets_and_slew_survive_restart_and_load_in_teleop(profile, tmp_path):
+    original = profile.data.copy()
+    original["urdf"] = str(profile.urdf)
+    path = tmp_path / "auto-device.yaml"
+    path.write_text(yaml.safe_dump(original))
+    profile = DeviceProfile(path)
+    transports = []
+    session = session_with_fake(profile, tmp_path, transports)
+    currents, damping = [0, -.04, 0, .075, 0, 0, 0], [0, 0, .002, 0, 0, .001, .002]
+    rates = [.15, .18, .15, .16, .15, .16, .15]
+    session.set_current_targets(currents, damping, persist=True)
+    session.set_current_slew(rates, persist=True)
+    saved = yaml.safe_load(path.read_text())
+    assert saved["constant_current_a"] == currents
+    assert saved["constant_damping_a"] == damping
+    assert saved["running_current_slew_a_s"] == rates
+    for key in original.keys() - {"constant_current_a", "constant_damping_a", "running_current_slew_a_s", "note"}:
+        assert saved[key] == original[key]
+    assert not session.snapshot()["tuning"]["unsaved_settings"]
+    restarted = TuningSession(DeviceProfile(path), tmp_path)
+    assert restarted.snapshot()["tuning"]["current_slew_a_s"] == rates
+    loaded = CurrentControlConfig(enabled=True, profile_path=str(path)).load_profile()
+    assert loaded.constant_current_a == currents
+    assert loaded.constant_damping_a.tolist() == damping
+    assert loaded.running_current_slew_a_s == rates
+    override = CurrentControlConfig(enabled=True, profile_path=str(path), running_current_slew_a_s=[.05]*7).load_profile()
+    assert override.running_current_slew_a_s == [.05]*7
+    # Merely loading a profile does not enable running slew in short experiments.
+    short = CurrentRuntime(DeviceProfile(path), live=True, experimental=True,
+                           transport=TuningTransport(profile))
+    assert short.controller.running_slew_a_s is None
+    assert transports == []
+
+
+def test_auto_sync_failure_is_reported_and_preserves_config(profile, tmp_path, monkeypatch):
+    from lerobot_robot_ufactory.current_control.control import tuning
+    data = profile.data.copy()
+    data["urdf"] = str(profile.urdf)
+    path = tmp_path / "failure-device.yaml"
+    path.write_text(yaml.safe_dump(data))
+    session = TuningSession(DeviceProfile(path), tmp_path)
+    original = path.read_bytes()
+    original_replace = tuning.os.replace
+    def fail_replace(*args):
+        raise OSError("injected write failure")
+    monkeypatch.setattr(tuning.os, "replace", fail_replace)
+    currents = [0, -.03, 0, .07, 0, 0, 0]
+    with pytest.raises(RuntimeError, match="已应用，但同步配置失败"):
+        session.set_current_targets(currents, [0]*7, persist=True)
+    assert path.read_bytes() == original
+    assert session.snapshot()["tuning"]["constant_current_a"] == currents
+    assert session.snapshot()["tuning"]["unsaved_settings"]
+    assert not list(tmp_path.glob('.current-tuning-*'))
+    monkeypatch.setattr(tuning.os, "replace", original_replace)
+    session.save_current_targets()
+    assert not session.snapshot()["tuning"]["unsaved_settings"]
+    assert DeviceProfile(path).constant_current_a == currents
+
+
 def test_web_temperature_guard_unloads_at_45_degrees(profile):
     transport = TuningTransport(profile)
     original_state = transport.state
@@ -333,6 +463,11 @@ def test_stop_during_startup_never_enables_torque(profile, tmp_path):
 
 
 def test_http_controls_validate_origin_and_never_auto_start(profile, tmp_path):
+    data = profile.data.copy()
+    data["urdf"] = str(profile.urdf)
+    profile_path = tmp_path / "http-device.yaml"
+    profile_path.write_text(yaml.safe_dump(data))
+    profile = DeviceProfile(profile_path)
     transports = []
     session = session_with_fake(profile, tmp_path, transports)
     token = "test-only-token"
@@ -365,9 +500,10 @@ def test_http_controls_validate_origin_and_never_auto_start(profile, tmp_path):
         assert transports == []
         for headers in ({"X-Gello-Token": "bad"}, {"Origin": "https://example.com"},
                         {"Host": "evil.example"}):
-            with pytest.raises(urllib.error.HTTPError) as exc:
-                post("/api/start", **headers)
-            assert exc.value.code == 403
+            for route in ("/api/start", "/api/currents", "/api/save-currents"):
+                with pytest.raises(urllib.error.HTTPError) as exc:
+                    post(route, **headers)
+                assert exc.value.code == 403
         assert transports == []
         with pytest.raises(urllib.error.HTTPError) as exc:
             post("/api/gains", {"gains": [True] * 7})
@@ -375,6 +511,20 @@ def test_http_controls_validate_origin_and_never_auto_start(profile, tmp_path):
         with pytest.raises(urllib.error.HTTPError) as exc:
             post("/api/slew", {"current_slew_a_s": [0.3] * 7})
         assert exc.value.code == 400
+        assert transports == []
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            post("/api/currents", {"constant_current_a": [1] * 7,
+                                   "constant_damping_a": [.001] * 7})
+        assert exc.value.code == 400
+        currents = [0, -.045, 0, .070, 0, 0, 0]
+        dampings = [0, 0, .002, 0, 0, .001, .002]
+        packet = post("/api/currents", {"constant_current_a": currents,
+                                        "constant_damping_a": dampings})
+        assert packet["tuning"]["constant_current_a"] == currents
+        assert not packet["tuning"]["unsaved_currents"]
+        assert not packet["tuning"]["unsaved_settings"]
+        assert not post("/api/save-currents")["tuning"]["unsaved_currents"]
+        assert DeviceProfile(profile_path).constant_current_a == currents
         assert transports == []
         with pytest.raises(urllib.error.HTTPError) as exc:
             post("/api/view", {"mode": "read_only"}, **{"X-Gello-Token": "bad"})
@@ -388,6 +538,7 @@ def test_http_controls_validate_origin_and_never_auto_start(profile, tmp_path):
         assert transports == []
         updated = post("/api/slew", {"current_slew_a_s": [0.1] * 7})
         assert updated["tuning"]["current_slew_a_s"] == [0.1] * 7
+        assert DeviceProfile(profile_path).default_running_current_slew_a_s == [.1] * 7
         post("/api/heartbeat")
         assert post("/api/start")["tuning"]["state"] == "active"
         assert readers[0].calls[-1] == "close"
@@ -395,6 +546,11 @@ def test_http_controls_validate_origin_and_never_auto_start(profile, tmp_path):
             post("/api/view", {"mode": "offline"})
         assert exc.value.code == 503
         post("/api/slew", {"current_slew_a_s": [0.2] * 7})
+        currents[1] = -.040
+        packet = post("/api/currents", {"constant_current_a": currents,
+                                        "constant_damping_a": dampings})
+        assert packet["tuning"]["constant_current_a"][1] == -.040
+        wait_for(lambda: session._runtime.diagnostics()["record"]["requested_a"][1] > -.045)
         assert post("/api/stop")["tuning"]["state"] == "stopped"
     finally:
         session.stop()

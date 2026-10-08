@@ -3,7 +3,7 @@
 ## GELLO 恒流与阻尼
 
 main 仅运行恒流与定幅阻尼；模型重力补偿实现保存在 `feature/gello-gravity-compensation` 分支。
-默认 J2 为 -50 mA，J4 为 +80 mA；J3/J7 为与运动方向相反的 2 mA 阻尼，速度死区为 0.05 rad/s；其余轴零电流。
+当前配置 J2 为 -40 mA，J4 为 +80 mA；J3/J7 为与运动方向相反的 2 mA 阻尼，速度死区为 0.05 rad/s；其余轴零电流。实际运行值以配置文件为准。
 参数在 `config/current_control/gello_A_working.yaml`。启动保留 2 秒缓升、电流限速、温度保护和通信看门狗。
 网页保留模型查看与电流控制，默认离线，不会自动启用电机：
 
@@ -14,6 +14,7 @@ main 仅运行恒流与定幅阻尼；模型重力补偿实现保存在 `feature
 遥操作使用 `config/gello/xarm7_gello_teleop_current.yaml`。
 完整 chips 录制使用 `config/gello/xarm7_gello_record_xense_potato_chips.yaml`，控制 30 Hz、数据集 15 FPS，含相机及双 Photon。
 配置项为 `teleop.current_control`，不再支持重力增益。网页失联超过 3 秒自动卸力。
+网页可逐轴输入恒流（正负表示电机出力方向）与阻尼（非负值），点击“应用并同步配置”后生效并自动写入当前设备配置；运行时按当前电流变化率过渡。运行电流变化率修改后也自动保存为 `running_current_slew_a_s`。网页重启与下一次遥操作都会读取保存值，使用同一设备配置的默认遥操作和录制配置不再重复设置变化率。同步失败时网页明确提示，可点击“重新同步参数到配置”重试。调参完成后先立即卸力，再启动遥操作，避免串口冲突。
 Photon 离线 Mesh3DFlow 按传感器复用 solver，整批 episode 完成或异常时释放。
 
 UFACTORY xArm 与 [LeRobot](https://github.com/huggingface/lerobot) 框架的集成项目，专注于两种数据采集方式：

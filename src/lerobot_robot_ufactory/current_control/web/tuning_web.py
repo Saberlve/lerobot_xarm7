@@ -15,7 +15,9 @@ from .model_web import render_html, viewer_data
 def tuning_page(profile, token):
     data = viewer_data(profile)
     data["tuning"] = {"constant_damping_a": profile.constant_damping_a.tolist(), "constant_current_a": profile.constant_current_a, "token": token,
-                      "initial_slew_a_s": INITIAL_SLEW_A_S,
+                      "current_limit_a": profile.limits.tolist(),
+                      "damping_deadband_rad_s": profile.damping_deadband_rad_s,
+                      "initial_slew_a_s": profile.default_running_current_slew_a_s or INITIAL_SLEW_A_S,
                       "min_slew_a_s": MIN_TUNING_SLEW_A_S, "max_slew_a_s": MAX_TUNING_SLEW_A_S}
     return render_html(data).encode("utf-8")
 
@@ -83,7 +85,14 @@ def make_tuning_server(port, page, session, token):
                     session.set_view_mode(body.get("mode"))
                     self.reply(200, session.snapshot())
                 elif self.path == "/api/slew":
-                    session.set_current_slew(body.get("current_slew_a_s"))
+                    session.set_current_slew(body.get("current_slew_a_s"), persist=True)
+                    self.reply(200, session.snapshot())
+                elif self.path == "/api/currents":
+                    session.set_current_targets(body.get("constant_current_a"),
+                                                body.get("constant_damping_a"), persist=True)
+                    self.reply(200, session.snapshot())
+                elif self.path in ("/api/save-currents", "/api/save-settings"):
+                    session.save_current_targets()
                     self.reply(200, session.snapshot())
                 else:
                     self.reply(404, {"error": "Unknown route"})

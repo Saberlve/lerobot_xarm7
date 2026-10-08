@@ -40,7 +40,9 @@ class CurrentControlConfig:
 
     def load_profile(self):
         profile = DeviceProfile(self.profile_path)
-        profile.running_current_slew_a_s = self.running_current_slew_a_s
+        profile.running_current_slew_a_s = (self.running_current_slew_a_s
+                                          if self.running_current_slew_a_s is not None
+                                          else profile.default_running_current_slew_a_s)
         profile.validate_live(experimental=self.experimental)
         return profile
 
@@ -58,6 +60,16 @@ def vector(value, name, length=7, *, positive=False, nonnegative=False):
     if nonnegative and np.any(arr < 0):
         raise ValueError(f"{name} must be non-negative")
     return arr
+
+
+def current_targets(currents, damping, limits):
+    """Validate a complete pair before applying either current setting."""
+    constant = vector(currents, "constant_current_a")
+    passive = vector(damping, "constant_damping_a", nonnegative=True)
+    if np.any(np.abs(constant) + passive > limits):
+        raise ValueError("每轴恒流绝对值与阻尼之和不能超过该轴电流上限")
+    return {"constant_current_a": constant.tolist(),
+            "constant_damping_a": passive.tolist()}
 
 
 class DeviceProfile:
@@ -124,6 +136,9 @@ class DeviceProfile:
                 or self.damping_deadband_rad_s < 0):
             raise ValueError("damping_deadband_rad_s must be finite and nonnegative")
         self.slew = vector(d["current_slew_a_s"], "current_slew_a_s", positive=True)
+        saved_slew = d.get("running_current_slew_a_s")
+        # Saved continuous-mode defaults do not affect short commissioning runs.
+        self.default_running_current_slew_a_s = None if saved_slew is None else tuning_slew(saved_slew)
         for key, default in [
             ("rate_hz", 100),
             ("ramp_s", 2),

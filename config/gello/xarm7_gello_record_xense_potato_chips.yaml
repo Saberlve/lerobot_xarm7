@@ -86,14 +86,7 @@ teleop:
     enabled: true
     profile_path: config/current_control/gello_A_working.yaml
     experimental: true
-    running_current_slew_a_s:
-    - 0.17
-    - 0.2
-    - 0.17
-    - 0.17
-    - 0.16
-    - 0.17
-    - 0.17
+    # Running current slew is loaded from the shared device profile.
   type: uf::gello_teleop
   id: "gello_teleop"
   # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.

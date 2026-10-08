@@ -179,6 +179,8 @@ def test_default_teleop_configuration_parses_saved_gains_and_running_rates():
     configured = yaml.safe_load((ROOT / "config/gello/xarm7_gello_teleop_current.yaml").read_text())
     parsed = draccus.decode(TeleoperatorConfig, configured["teleop"])
     assert isinstance(parsed, GelloTeleopConfig)
-    assert parsed.current_control.load_profile().constant_current_a == [0, -.05, 0, .08, 0, 0, 0]
-    assert parsed.current_control.running_current_slew_a_s == [0.17, 0.2, 0.17, 0.17, 0.16, 0.17, 0.17]
-    assert parsed.current_control.load_profile().constant_damping_a.tolist() == [0, 0, .002, 0, 0, 0, .002]
+    loaded = parsed.current_control.load_profile()
+    assert loaded.constant_current_a == loaded.data["constant_current_a"]
+    assert parsed.current_control.running_current_slew_a_s is None
+    assert loaded.running_current_slew_a_s == loaded.data["running_current_slew_a_s"]
+    assert loaded.constant_damping_a.tolist() == loaded.data["constant_damping_a"]
