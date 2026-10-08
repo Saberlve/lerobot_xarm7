@@ -186,6 +186,31 @@ uv run record --config_path config/gello/xarm7_gello_record_config.yaml -a
 
 Controls: `Space` start the episode, `→` save it, `←` discard and re-record it, `Esc` stop recording. The arm resets to its initial point between episodes.
 
+`defer_processing` defaults to `true`. Each completed episode checkpoints its
+actions, states, tasks, timestamps and image references under
+`raw_episodes/episode_XXXXXX/`, and publishes its raw tactile streams. Camera
+PNGs stay in `images/`. Pressing `Esc` or reaching the episode limit disconnects
+the recording devices, then encodes videos and computes offline Mesh3DFlow
+when enabled. After successful conversion and dataset publication, temporary
+camera PNGs in `images/` are deleted. Failed conversions retain their PNGs for
+retry. Checkpoints and full-rate raw tactile streams remain available.
+
+A synchronization timeout discards only the active episode and waits for
+`Space` (or `Enter` without a keyboard listener) to retry. Other errors still
+exit; completed raw episodes remain available. Retry processing with the same
+configuration, without connecting the recording devices:
+
+```bash
+uv run record --config_path config/gello/xarm7_gello_record_xense_photon_config.yaml --postprocess-only
+```
+
+Resuming continues after saved raw episode indices; the next normal recording
+exit processes any remaining episodes. Set `defer_processing: false` with
+offline Mesh3DFlow disabled to restore immediate LeRobot episode saves.
+If unprocessed raw episodes remain, resuming with deferred processing disabled
+is blocked before devices are created. Run `--postprocess-only` first, or keep
+`defer_processing: true` when resuming.
+
 The xArm7 GELLO example also enables a lightweight browser camera preview at
 `http://127.0.0.1:8765/` (or `http://<recorder-ip>:8765/` from another machine).
 It reuses frames already captured by the recorder: JPEG encoding and HTTP

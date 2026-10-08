@@ -13,6 +13,8 @@ from uuid import uuid4
 import numpy as np
 from dataclasses import dataclass, field
 from pathlib import Path
+from functools import wraps
+from inspect import signature
 import lerobot_robot_ufactory # patch
 from lerobot.scripts.lerobot_record import *
 from lerobot.scripts.lerobot_record import RecordConfig as LeRobotRecordConfig
@@ -23,6 +25,9 @@ from lerobot_robot_ufactory.utils.realtime_teleop import RealtimeTeleopControlle
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 from lerobot_robot_ufactory.utils.web_preview import RecordingWebPreview, WebPreviewConfig
 from lerobot_robot_ufactory.utils.episode_images import discard_episode_images, validate_episode_images
+from lerobot_robot_ufactory.utils.raw_episodes import (
+    RawEpisodeStore, open_recording_dataset, postprocess_raw_episodes, recover_postprocessing,
+)
 
 
 @dataclass
@@ -34,6 +39,8 @@ class UFRecordConfig(LeRobotRecordConfig):
     # available by default for GELLO recording.
     synchronize: bool = True
     offline_mesh3dflow: bool = False
+    # Checkpoint raw episodes immediately; encode/infer only when recording ends.
+    defer_processing: bool = True
 
     def __post_init__(self):
         self.web_preview.validate()
@@ -399,6 +406,7 @@ class EpisodeSynchronization:
         episode_index: int,
         *,
         defer_commit: bool = False,
+        extra_items: list[tuple[Path, Path]] | None = None,
     ) -> None:
         """Prepare then transactionally publish tactile streams and their sidecars."""
         import pyarrow as pa
@@ -437,8 +445,12 @@ class EpisodeSynchronization:
                 raise ValueError("Deferred synchronization commit requires tactile streams")
             output_dir.mkdir(parents=True, exist_ok=True)
             try:
-                for path in sidecar_paths:
-                    os.replace(path, output_dir / path.name)
+                for source, destination in [
+                    *((path, output_dir / path.name) for path in sidecar_paths),
+                    *(extra_items or []),
+                ]:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(source, destination)
             finally:
                 if staging_dir.exists():
                     shutil.rmtree(staging_dir)
@@ -459,7 +471,7 @@ class EpisodeSynchronization:
         )
         self.tactile_recorder.publish_episode(
             episode_index,
-            [(path, output_dir / path.name) for path in sidecar_paths],
+            [*(extra_items or []), *((path, output_dir / path.name) for path in sidecar_paths)],
             commit_marker=(commit_path, output_dir / commit_path.name),
             defer_commit_marker=defer_commit,
         )
@@ -614,8 +626,9 @@ def _create_next_episode_buffer(dataset, current_episode_buffer):
 class AsyncEpisodeSaver:
     _STOP = object()
 
-    def __init__(self, dataset):
+    def __init__(self, dataset, raw_store=None):
         self.dataset = dataset
+        self.raw_store = raw_store
         self._queue = queue.Queue()
         self._total_cnts = 0
         self._finish_cnts = 0
@@ -658,6 +671,9 @@ class AsyncEpisodeSaver:
                     return
                 episode_index, episode_buffer, synchronization = item
                 print(f'[Async] saving episode {episode_index}')
+                if self.raw_store is not None:
+                    self.raw_store.save(episode_buffer, synchronization)
+                    continue
                 try:
                     validate_episode_images(self.dataset, episode_buffer)
                     has_tactile_transaction = (
@@ -808,9 +824,59 @@ class _RecordingCleanup:
         finally:
             _disconnect_recording_resources(self.robot, self.teleop, self.listener)
         return False
+
+
+class _RawDatasetFinalize:
+    """Close writers without deleting committed raw PNGs on capture failure."""
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            self.dataset.stop_image_writer()
+        finally:
+            self.dataset.finalize()
+        return False
     
 
-@safe_stop_image_writer
+def _safe_stop_recording_image_writer(func):
+    """Keep the shared image writer alive after a recoverable capture timeout."""
+    parameters = signature(func)
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except TimeoutError:
+            raise
+        except Exception:
+            dataset = parameters.bind(*args, **kwargs).arguments.get("dataset")
+            image_writer = getattr(dataset, "image_writer", None)
+            if image_writer is not None:
+                print("Waiting for image writer to terminate...")
+                image_writer.stop()
+            raise
+
+    return wrapper
+
+
+def _discard_current_episode(dataset, async_episode_saver=None):
+    """Discard only the active buffer, including incomplete first-frame writes."""
+    if async_episode_saver is not None:
+        async_episode_saver.wait_idle()
+    episode_buffer = _get_episode_buffer(dataset)
+    episode_index = _episode_buffer_index(episode_buffer)
+    discard_episode_images(dataset, episode_index)
+    _set_episode_buffer(
+        dataset, _create_empty_episode_buffer(dataset, episode_index, episode_buffer)
+    )
+
+
+@_safe_stop_recording_image_writer
 def record_loop(
     robot: Robot,
     events: dict,
@@ -1354,6 +1420,7 @@ def _missing_dataset_files(root: Path) -> list[str]:
 def _prepare_dataset_root(cfg: UFRecordConfig) -> None:
     """Prepare an existing dataset root without pre-creating a new one."""
     root = Path(cfg.dataset.root)
+    recover_postprocessing(root)
     existed = root.exists()
 
     if not existed:
@@ -1362,7 +1429,8 @@ def _prepare_dataset_root(cfg: UFRecordConfig) -> None:
         return
 
     missing = _missing_dataset_files(root)
-    if missing:
+    has_raw = bool(RawEpisodeStore.checkpoints(root)) and (root / "meta/info.json").is_file()
+    if missing and not has_raw:
         missing_text = ", ".join(missing)
         message = (
             f"Dataset directory is incomplete and cannot be resumed: {root}\n"
@@ -1409,15 +1477,19 @@ def _prepare_dataset_root(cfg: UFRecordConfig) -> None:
         raise SystemExit("Recording cancelled.")
 
 
-def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
+def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool = False) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
         init_rerun(session_name="recording")
 
+    defer_processing = getattr(cfg, "defer_processing", True) or cfg.offline_mesh3dflow
+    if defer_processing:
+        cfg.dataset.video_encoding_batch_size = 1
+    if postprocess_only:
+        cfg.resume = True
+
     if cfg.offline_mesh3dflow:
-        if async_save:
-            raise ValueError('offline_mesh3dflow requires synchronous saving; remove --async_save/-a')
         if not cfg.dataset.video:
             raise ValueError('offline_mesh3dflow requires video recording')
         cfg.dataset.video_encoding_batch_size = 1
@@ -1432,6 +1504,20 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
         for camera in tactile_configs:
             camera.configure_deferred_processing()
     _prepare_dataset_root(cfg)
+
+    if cfg.resume and not defer_processing and not postprocess_only:
+        root = Path(cfg.dataset.root)
+        info = json.loads((root / "meta/info.json").read_text())
+        pending = [
+            path for path in RawEpisodeStore.checkpoints(root)
+            if json.loads(path.read_text())["episode_index"] >= info["total_episodes"]
+        ]
+        if pending:
+            raise RuntimeError(
+                f"Cannot resume with defer_processing=false: {len(pending)} raw episode(s) "
+                f"still need processing in {root}. Run --postprocess-only with the recording "
+                "configuration first, or enable defer_processing=true before resuming."
+            )
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
@@ -1469,7 +1555,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                     }
 
     if cfg.resume:
-        dataset = LeRobotDataset(
+        dataset = open_recording_dataset(
             cfg.dataset.repo_id,
             root=cfg.dataset.root,
             batch_encoding_size=cfg.dataset.video_encoding_batch_size,
@@ -1502,6 +1588,13 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     from lerobot_robot_ufactory.tactile.persistence import cleanup_stale_tactile_staging
 
     cleanup_stale_tactile_staging(Path(dataset.root))
+
+    if postprocess_only:
+        from lerobot_robot_ufactory.tactile import TactileCamera
+        cameras = {name: cam for name, cam in robot.cameras.items() if isinstance(cam, TactileCamera)}
+        with _RawDatasetFinalize(dataset):
+            result = postprocess_raw_episodes(dataset, cameras)
+        return result
 
     # Load pretrained policy
     policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
@@ -1572,6 +1665,8 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
     is_evt = not is_headless()
     is_uf_teleop = isinstance(teleop, UFBaseTeleop)
     is_recorded = False
+    waiting_for_retry = False
+    wait_for_start_release = False
     key_dict = {}
     manual_gripper_keys = {"close": False, "open": False}
     listener = None
@@ -1628,18 +1723,33 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
         print('\n********** Episode Record Loop Start **********')
 
     frame_callback = None
-    async_episode_saver = AsyncEpisodeSaver(dataset) if async_save else None
-    deferred_offline_episodes = []
+    raw_store = (
+        RawEpisodeStore(dataset, runtime_dir=runtime_dir, offline_mesh_fields=offline_mesh_fields)
+        if defer_processing else None
+    )
+    if raw_store is not None:
+        episode_buffer = _get_episode_buffer(dataset)
+        _set_episode_buffer(dataset, _create_empty_episode_buffer(
+            dataset, raw_store.next_episode_index(), episode_buffer
+        ))
+        # A previous crash can leave PNGs from an uncommitted active episode.
+        # Its index follows all committed raw episodes, so only these are reset.
+        _discard_current_episode(dataset)
+        print("Raw episodes are saved immediately; video encoding and Mesh3DFlow run after recording.")
+    async_episode_saver = AsyncEpisodeSaver(dataset, raw_store=raw_store) if async_save else None
     if async_episode_saver is not None:
         print('Async episode saving is enabled.')
 
     episode_owner = _EpisodeSynchronizationOwner()
-    with _RecordingCleanup(
+    # Close pending async saves before VideoEncodingManager finalizes Parquet
+    # writers, including when capture or device cleanup raises an exception.
+    dataset_cleanup = _RawDatasetFinalize(dataset) if raw_store is not None else VideoEncodingManager(dataset)
+    with dataset_cleanup, _RecordingCleanup(
         robot, teleop, listener, async_episode_saver, web_preview
-    ), VideoEncodingManager(dataset), episode_owner:
+    ), episode_owner:
         # num_episodes is a dataset-wide limit.  Count existing episodes so a
         # resumed recording cannot exceed it by recording another full batch.
-        recorded_episodes = dataset.num_episodes
+        recorded_episodes = raw_store.next_episode_index() if raw_store is not None else dataset.num_episodes
         if recorded_episodes >= cfg.dataset.num_episodes:
             print(
                 f"Episode limit already reached ({recorded_episodes}/"
@@ -1648,10 +1758,14 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
             time.sleep(0.01)
             if is_evt:
-                if not is_recorded and key_dict[keyboard.Key.space]:
+                if wait_for_start_release:
+                    wait_for_start_release = bool(key_dict[keyboard.Key.space])
+                elif not is_recorded and key_dict[keyboard.Key.space]:
                     is_recorded = True
 
             if teleop is not None and isinstance(teleop, UFMockTeleop):
+                if waiting_for_retry and not is_recorded:
+                    continue
                 if events["stop_recording"]:
                     continue
                 teleop.configure(events=events)
@@ -1665,39 +1779,52 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                 is_recorded = True
 
             if is_recorded:
+                waiting_for_retry = False
                 events["rerecord_episode"] = False
                 events["exit_early"] = False
-                if is_uf_teleop or manual_mode:
-                    _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode)
-                log_say(f"Recording episode {_current_episode_index(dataset)}", cfg.play_sounds)
-                episode_synchronization = record_loop(
-                    robot=robot,
-                    events=events,
-                    fps=cfg.dataset.fps,
-                    teleop_action_processor=teleop_action_processor,
-                    robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                    teleop=teleop,
-                    policy=policy,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                    dataset=dataset,
-                    control_time_s=cfg.dataset.episode_time_s,
-                    single_task=cfg.dataset.single_task,
-                    display_data=cfg.display_data,
-                    frame_callback=frame_callback,
-                    manual_mode=manual_mode,
-                    manual_gripper_keys=manual_gripper_keys,
-                    manual_gripper_speed=getattr(cfg.robot, "manual_gripper_speed", 0.5),
-                    web_preview=web_preview,
-                    synchronize=cfg.synchronize,
-                    synchronization_owner=episode_owner,
-                )
+                episode_synchronization = None
+                episode_timed_out = False
+                try:
+                    if is_uf_teleop or manual_mode:
+                        _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode)
+                    log_say(f"Recording episode {_current_episode_index(dataset)}", cfg.play_sounds)
+                    episode_synchronization = record_loop(
+                        robot=robot,
+                        events=events,
+                        fps=cfg.dataset.fps,
+                        teleop_action_processor=teleop_action_processor,
+                        robot_action_processor=robot_action_processor,
+                        robot_observation_processor=robot_observation_processor,
+                        teleop=teleop,
+                        policy=policy,
+                        preprocessor=preprocessor,
+                        postprocessor=postprocessor,
+                        dataset=dataset,
+                        control_time_s=cfg.dataset.episode_time_s,
+                        single_task=cfg.dataset.single_task,
+                        display_data=cfg.display_data,
+                        frame_callback=frame_callback,
+                        manual_mode=manual_mode,
+                        manual_gripper_keys=manual_gripper_keys,
+                        manual_gripper_speed=getattr(cfg.robot, "manual_gripper_speed", 0.5),
+                        web_preview=web_preview,
+                        synchronize=cfg.synchronize,
+                        synchronization_owner=episode_owner,
+                    )
+                except TimeoutError as exc:
+                    logging.warning(
+                        "Episode %s synchronization timed out; discarding this episode: %s",
+                        _current_episode_index(dataset), exc,
+                    )
+                    episode_timed_out = True
+                    events["rerecord_episode"] = True
                 episode_owner.track(episode_synchronization)
             else:
                 continue
-            if events['stop_recording']:
+            if events['stop_recording'] and not events["rerecord_episode"]:
                 episode_owner.discard(episode_synchronization)
+                if raw_store is not None:
+                    _discard_current_episode(dataset, async_episode_saver)
                 break
             if events["rerecord_episode"]:
                 log_say("Re-record episode", cfg.play_sounds)
@@ -1706,16 +1833,14 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                 if is_uf_teleop:
                     teleop.set_teleop_enabled(False)
                 episode_owner.discard(episode_synchronization)
-                episode_buffer = _get_episode_buffer(dataset)
-                if _episode_buffer_size(episode_buffer) > 0:
-                    if async_episode_saver is not None:
-                        async_episode_saver.wait_idle()
-                    episode_index = _episode_buffer_index(episode_buffer)
-                    discard_episode_images(dataset, episode_index)
-                    empty_episode_buffer = _create_empty_episode_buffer(dataset, episode_index, episode_buffer)
-                    _set_episode_buffer(dataset, empty_episode_buffer)
+                _discard_current_episode(dataset, async_episode_saver)
                 is_recorded = False
+                if events["stop_recording"]:
+                    break
                 if is_evt:
+                    if episode_timed_out:
+                        waiting_for_retry = True
+                        wait_for_start_release = bool(key_dict[keyboard.Key.space])
                     _print_record_controls(is_recorded, manual_mode)
                 else:
                     input('\n⌨   Press Enter to rerecord this episode >>>>> ')
@@ -1730,17 +1855,16 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
                 if async_episode_saver is None:
                     try:
                         validate_episode_images(dataset, _get_episode_buffer(dataset))
-                        if cfg.offline_mesh3dflow:
+                        if raw_store is not None:
                             episode_buffer = _get_episode_buffer(dataset)
+                            raw_store.save(episode_buffer, episode_synchronization)
+                            episode_owner.release(episode_synchronization)
                             next_episode_buffer = _create_next_episode_buffer(
                                 dataset, episode_buffer
                             )
                             _set_episode_buffer(dataset, next_episode_buffer)
-                            deferred_offline_episodes.append(
-                                (episode_index, episode_buffer, episode_synchronization)
-                            )
                             log_say(
-                                f"[Deferred] Save episode {episode_index} after recording",
+                                f"[RawSaved] Episode {episode_index}; processing after recording",
                                 cfg.play_sounds,
                             )
                         else:
@@ -1789,56 +1913,12 @@ def record(cfg: UFRecordConfig, async_save: bool = False) -> LeRobotDataset:
             print('Waiting for pending async episode saves.')
             async_episode_saver.close()
 
-        if deferred_offline_episodes:
-            # Mesh inference may take much longer than recording cleanup. Release
-            # hardware first; _RecordingCleanup safely tolerates a second call.
+        if raw_store is not None:
+            # All completed episodes are already checkpointed. Release devices
+            # before expensive processing; failures leave those checkpoints intact.
             _disconnect_recording_resources(robot, teleop, listener)
             listener = None
-            from lerobot_robot_ufactory.tactile.deferred import compute_episode_mesh, deferred_sessions
-
-            total = len(deferred_offline_episodes)
-            print(f"Computing offline Mesh3DFlow for {total} episode(s).")
-            with deferred_sessions(tactile_cameras, runtime_dir):
-                for ordinal, (episode_index, episode_buffer, synchronization) in enumerate(
-                    deferred_offline_episodes, start=1
-                ):
-                    logging.info(
-                        "Computing offline Mesh3DFlow episode %s (%s/%s)",
-                        episode_index,
-                        ordinal,
-                        total,
-                    )
-                    try:
-                        compute_episode_mesh(
-                            dataset,
-                            tactile_cameras,
-                            runtime_dir,
-                            episode_index,
-                            episode_buffer=episode_buffer,
-                        )
-                        has_tactile_transaction = (
-                            synchronization is not None
-                            and synchronization.tactile_recorder is not None
-                        )
-                        if has_tactile_transaction:
-                            synchronization.write(
-                                Path(dataset.root),
-                                episode_index,
-                                defer_commit=True,
-                            )
-                        dataset.save_episode(episode_data=episode_buffer)
-                        if has_tactile_transaction:
-                            synchronization.commit()
-                        discard_episode_images(dataset, episode_index)
-                        if synchronization is not None and not has_tactile_transaction:
-                            synchronization.write(Path(dataset.root), episode_index)
-                        if synchronization is not None:
-                            log_say(synchronization.summary(), cfg.play_sounds)
-                            episode_owner.release(synchronization)
-                        log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
-                    except BaseException:
-                        episode_owner.discard(synchronization)
-                        raise
+            dataset = postprocess_raw_episodes(dataset, tactile_cameras)
 
     print("\n********** Episode Record Loop Exit **********")
 
@@ -1862,6 +1942,8 @@ def main():
                        action='store_true',
                        default=False,
                        help='Enable async background saving (default: False)')
+    parser.add_argument('--postprocess-only', '--postprocess_only', action='store_true',
+                       help='Process saved raw episodes without connecting recording devices')
     args, unknown = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + unknown
     register_third_party_plugins()
@@ -1869,7 +1951,7 @@ def main():
     if args.r:
         cfg.resume = True
     cfg.play_sounds = False
-    record(cfg, async_save=args.async_save)
+    record(cfg, async_save=args.async_save, postprocess_only=args.postprocess_only)
 
 
 if __name__ == "__main__":
