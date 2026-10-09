@@ -35,19 +35,39 @@ def test_dataset_robot_type_preserves_non_xarm_robot_name():
     assert _dataset_robot_type(robot) == "other_robot"
 
 
-@pytest.mark.parametrize("robot_dof", [5, 6, 7])
+@pytest.mark.parametrize("robot_dof", [7])
 def test_uf_robot_type_matches_concrete_xarm_model(robot_dof, tmp_path):
     robot = UFRobot(
         UFRobotConfig(
             id="test_robot_type",
             calibration_dir=tmp_path,
             robot_dof=robot_dof,
+            min_tcp_z_mm=10.0,
             gripper_type=0,
         )
     )
 
     assert robot.robot_type == f"xarm{robot_dof}"
     assert _dataset_robot_type(robot) == robot.robot_type
+
+
+@pytest.mark.parametrize("robot_dof", [5, 6])
+def test_local_projection_rejects_unsupported_arm_models(robot_dof, tmp_path):
+    with pytest.raises(ValueError, match="requires joint control on an xArm7"):
+        UFRobotConfig(calibration_dir=tmp_path, robot_dof=robot_dof, min_tcp_z_mm=10.0)
+
+
+@pytest.fixture(autouse=True)
+def fake_controller_kinematics(monkeypatch):
+    # These tests exercise teaching, reset and gripper APIs. Provide the
+    # controller calibration/forward-kinematics double required by today's
+    # connect path; keep guard initialization and boundary readback active.
+    from lerobot_robot_ufactory.robots.uf_robot import uf_robot as module
+    monkeypatch.setattr(module, "read_xarm7_kinematics", lambda ip: ())
+    def initialize(robot):
+        robot._local_kinematics = SimpleNamespace(
+            tcp_position=lambda joints: np.array([0.0, 0.0, 300.0]))
+    monkeypatch.setattr(module.UFRobot, "_initialize_local_kinematics", initialize)
 
 
 def test_synchronization_defaults_to_enabled():
@@ -495,10 +515,10 @@ class FakeXArm:
     def __init__(self, robot_ip):
         self.robot_ip = robot_ip
         self.connected = True
-        self.axis = 6
+        self.axis = 7
         self.error_code = 0
         self.mode = 0
-        self.initial_point = [0.0, -30.0, 0.0, 0.0, 0.0, 30.0]
+        self.initial_point = [0.0, -30.0, 0.0, 0.0, 0.0, 30.0, 0.0]
         self._arm = type("FakeArmTransport", (), {"_baud_checkset": False})()
         self.gripper_position = 800
         self.gripper_g2_position = 84
@@ -573,9 +593,20 @@ class FakeXArm:
         return 0, []
 
     def get_joint_states(self, is_radian=True, num=3):
-        positions = np.arange(6, dtype=np.float64)
-        velocities = np.zeros(6, dtype=np.float64)
+        positions = np.arange(7, dtype=np.float64)
+        velocities = np.zeros(7, dtype=np.float64)
         return 0, [positions, velocities, velocities]
+
+    def set_reduced_tcp_boundary(self, boundary):
+        self.boundary = list(boundary)
+        return 0
+
+    def set_fence_mode(self, enabled):
+        self.fence = enabled
+        return 0
+
+    def get_reduced_states(self, **kwargs):
+        return 0, [0, self.boundary]
 
     def disconnect(self):
         self.calls.append(("disconnect",))
@@ -593,7 +624,8 @@ def test_manual_mode_robot_enters_teaching_mode_without_sending_actions(monkeypa
         id="test_manual_robot",
         calibration_dir=tmp_path,
         robot_ip=arm.robot_ip,
-        robot_dof=6,
+        robot_dof=7,
+        min_tcp_z_mm=10.0,
         control_space="joint",
         gripper_type=0,
         manual_mode=True,
@@ -651,7 +683,8 @@ def test_robot_reset_uses_sdk_initial_point_in_normal_mode(monkeypatch, tmp_path
         id="test_normal_robot",
         calibration_dir=tmp_path,
         robot_ip=arm.robot_ip,
-        robot_dof=6,
+        robot_dof=7,
+        min_tcp_z_mm=10.0,
         control_space="joint",
         gripper_type=0,
     )
@@ -676,6 +709,23 @@ def test_robot_reset_uses_sdk_initial_point_in_normal_mode(monkeypatch, tmp_path
     robot.disconnect()
 
 
+def test_web_connect_waits_for_start_without_arm_or_gripper_motion(monkeypatch, tmp_path):
+    from lerobot_robot_ufactory.robots.uf_robot import uf_robot as module
+    arm = FakeXArm("192.168.1.245")
+    monkeypatch.setattr(module, "XArmAPI", lambda ip: arm)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    robot = UFRobot(UFRobotConfig(calibration_dir=tmp_path, robot_dof=7,
+                                  min_tcp_z_mm=10.0, gripper_type=2))
+    robot.connect(defer_motion=True)
+    assert robot.is_connected
+    assert robot._last_safe_joint_target.shape == (7,)
+    assert arm.fence and arm.boundary[-1] == 10
+    assert ("set_state", 3) in arm.calls
+    assert not any(call[0] in ("set_servo_angle", "set_gripper_position",
+                               "set_gripper_g2_position") for call in arm.calls)
+    robot.disconnect()
+
+
 def test_normal_mode_waits_for_gripper_to_open_before_control(monkeypatch, tmp_path):
     from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
 
@@ -688,7 +738,8 @@ def test_normal_mode_waits_for_gripper_to_open_before_control(monkeypatch, tmp_p
         id="test_wait_for_gripper",
         calibration_dir=tmp_path,
         robot_ip=arm.robot_ip,
-        robot_dof=6,
+        robot_dof=7,
+        min_tcp_z_mm=10.0,
         control_space="joint",
         gripper_type=1,
     )
@@ -725,7 +776,8 @@ def test_discard_reset_waits_for_gripper_before_arm_motion(
     monkeypatch.setattr(uf_robot_module, "XArmAPI", lambda robot_ip: arm)
     monkeypatch.setattr(uf_robot_module.time, "sleep", lambda _: None)
     robot = UFRobot(UFRobotConfig(
-        calibration_dir=tmp_path, robot_ip=arm.robot_ip, robot_dof=6,
+        calibration_dir=tmp_path, robot_ip=arm.robot_ip, robot_dof=7,
+        min_tcp_z_mm=10.0,
         gripper_type=gripper_type, manual_mode=True, gripper_error_log_path=None,
     ))
     robot.connect()
@@ -770,7 +822,8 @@ def test_keyboard_gripper_stop_reads_actual_position_without_monitor(monkeypatch
     monkeypatch.setattr(uf_robot_module, "XArmAPI", lambda robot_ip: arm)
     monkeypatch.setattr(uf_robot_module.time, "sleep", lambda _: None)
     robot = uf_robot_module.UFRobot(UFRobotConfig(
-        calibration_dir=tmp_path, robot_ip=arm.robot_ip, robot_dof=6,
+        calibration_dir=tmp_path, robot_ip=arm.robot_ip, robot_dof=7,
+        min_tcp_z_mm=10.0,
         gripper_type=gripper_type, gripper_current_monitor=False,
         gripper_command_threshold=1.0, gripper_command_interval_s=60.0,
         gripper_error_log_path=None,
@@ -802,7 +855,8 @@ def test_gripper_rs485_commands_are_rate_limited(monkeypatch, tmp_path):
         id="test_gripper_rate_limit",
         calibration_dir=tmp_path,
         robot_ip=arm.robot_ip,
-        robot_dof=6,
+        robot_dof=7,
+        min_tcp_z_mm=10.0,
         control_space="joint",
         gripper_type=1,
         gripper_command_interval_s=0.1,
@@ -838,7 +892,8 @@ def test_xarm_gripper_g2_uses_sdk_units_and_dedicated_api(monkeypatch, tmp_path,
         id="test_gripper_g2",
         calibration_dir=tmp_path,
         robot_ip=arm.robot_ip,
-        robot_dof=6,
+        robot_dof=7,
+        min_tcp_z_mm=10.0,
         control_space="joint",
         gripper_type=2,
         gripper_speed=gripper_speed,
@@ -895,7 +950,8 @@ def test_xarm_gripper_g2_rejects_legacy_speed_and_invalid_force(tmp_path):
         UFRobotConfig(
             id="test_gripper_g2_speed",
             calibration_dir=tmp_path,
-            robot_dof=6,
+            robot_dof=7,
+            min_tcp_z_mm=10.0,
             gripper_type=2,
             gripper_speed=1500,
         )
@@ -904,7 +960,8 @@ def test_xarm_gripper_g2_rejects_legacy_speed_and_invalid_force(tmp_path):
         UFRobotConfig(
             id="test_gripper_g2_force",
             calibration_dir=tmp_path,
-            robot_dof=6,
+            robot_dof=7,
+            min_tcp_z_mm=10.0,
             gripper_type=2,
             gripper_force=0,
         )
@@ -912,13 +969,15 @@ def test_xarm_gripper_g2_rejects_legacy_speed_and_invalid_force(tmp_path):
 
 def test_gello_configs_select_xarm_gripper_g2():
     config_dir = Path("config/gello")
-    config_paths = sorted(config_dir.glob("*.yaml"))
+    config_paths = sorted(config_dir.rglob("*.yaml"))
     assert config_paths
 
     for config_path in config_paths:
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert config["robot"]["gripper_type"] == 2, config_path
-        assert 15 <= config["robot"]["gripper_speed"] <= 225, config_path
+        robot_fields = UFRobotConfig.__dataclass_fields__
+        assert config["robot"].get("gripper_type", robot_fields["gripper_type"].default) == 2, config_path
+        speed = config["robot"].get("gripper_speed", robot_fields["gripper_speed"].default)
+        assert speed == -1 or 15 <= speed <= 225, config_path
         gripper_force = config["robot"].get("gripper_force", -1)
         assert gripper_force == -1 or 1 <= gripper_force <= 100, config_path
 
@@ -928,7 +987,8 @@ def test_manual_mode_config_rejects_cartesian_control(tmp_path):
         UFRobotConfig(
             id="test_manual_robot",
             calibration_dir=tmp_path,
-            robot_dof=6,
+            robot_dof=7,
+            min_tcp_z_mm=10.0,
             control_space="cartesian",
             manual_mode=True,
         )
@@ -938,7 +998,8 @@ def test_manual_gripper_speed_is_configurable_and_non_negative(tmp_path):
     config = UFRobotConfig(
         id="test_manual_robot",
         calibration_dir=tmp_path,
-        robot_dof=6,
+        robot_dof=7,
+        min_tcp_z_mm=10.0,
         manual_mode=True,
         manual_gripper_speed=0.25,
     )
@@ -948,7 +1009,8 @@ def test_manual_gripper_speed_is_configurable_and_non_negative(tmp_path):
         UFRobotConfig(
             id="test_manual_robot",
             calibration_dir=tmp_path,
-            robot_dof=6,
+            robot_dof=7,
+            min_tcp_z_mm=10.0,
             manual_mode=True,
             manual_gripper_speed=-0.1,
         )
@@ -995,7 +1057,8 @@ def test_manual_mode_initializes_gripper_without_opening_and_sends_only_gripper(
         id="test_manual_gripper_robot",
         calibration_dir=tmp_path,
         robot_ip=arm.robot_ip,
-        robot_dof=6,
+        robot_dof=7,
+        min_tcp_z_mm=10.0,
         control_space="joint",
         gripper_type=1,
         manual_mode=True,
@@ -1029,7 +1092,8 @@ def test_gripper_command_is_only_sent_after_target_changes(monkeypatch, tmp_path
         id="test_gripper_command_threshold",
         calibration_dir=tmp_path,
         robot_ip=arm.robot_ip,
-        robot_dof=6,
+        robot_dof=7,
+        min_tcp_z_mm=10.0,
         control_space="joint",
         gripper_type=1,
         manual_mode=True,
@@ -1049,8 +1113,15 @@ def test_gripper_command_is_only_sent_after_target_changes(monkeypatch, tmp_path
     robot.disconnect()
 
 
-def test_manual_record_config_has_no_teleop(monkeypatch):
-    config_path = Path("config/manual_mode/xarm7_manual_record_config.yaml").resolve()
+def test_manual_record_config_has_no_teleop(monkeypatch, tmp_path):
+    template = Path("config/manual_mode/xarm7_manual_record_config.yaml")
+    raw = yaml.safe_load(template.read_text(encoding="utf-8"))
+    # The shipped template predates the mandatory deployment-specific floor.
+    # Supply a synthetic value for parser coverage without choosing a physical
+    # table height for the user's robot.
+    raw["robot"]["min_tcp_z_mm"] = 10.0
+    config_path = tmp_path / "manual.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     monkeypatch.setattr(
         sys,
         "argv",

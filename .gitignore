@@ -100,3 +100,7 @@ experiment/**
 # the main package so the repository does not depend on a modified submodule.
 third_party/gello_software/
 **/real2sim/**
+
+# Web recording runtime and recoverable configuration deletions
+.web-record/
+config/gello/.web-trash/

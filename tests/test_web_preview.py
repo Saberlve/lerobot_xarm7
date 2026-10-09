@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import yaml
 
-from lerobot_robot_ufactory.utils.web_preview import (
+from lerobot_robot_ufactory.utils.webapp.web_preview import (
     RecordingWebPreview,
     WebPreviewConfig,
     _WEB_PAGE,
@@ -48,7 +48,7 @@ def test_embedded_page_has_parseable_camera_signature_expression():
 
 
 def test_gello_record_config_enables_low_rate_web_preview():
-    config_path = Path("config/gello/xarm7_gello_record_config.yaml")
+    config_path = Path("config/gello/xarm7_gello_base.yaml")
     config = yaml.safe_load(config_path.read_text())
 
     assert config["web_preview"]["enabled"] is True

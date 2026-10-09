@@ -380,3 +380,8 @@ lerobot_xarm7/
 ## License
 
 This project is released under the Apache License 2.0. See [LICENSE](LICENSE).
+
+
+## GELLO web recording console
+
+Run `.venv/bin/uf-lerobot-record-web --port 8769` for configuration management, recording control, and preview on one page. Browser shortcuts and J7-only mode are supported; Photon previews are opt-in. See the [web recording guide](docs/recording_web_en.md).

@@ -1,7 +1,7 @@
-# Task: 拧松螺母
+# Task: 从三个不同颜色的螺柱中识别带螺母的螺柱，将螺母旋下取离
 # Settings aligned with the whiteboard_erase config; this is a standalone config.
 # Run from the project root:
-# .venv/bin/uf-lerobot-record --config_path config/gello/tasks/nut_loosen/xarm7_gello_nut_loosen.yaml
+# .venv/bin/uf-lerobot-record --config_path config/gello/tasks/nut_removal/xarm7_gello_nut_removal.yaml
 
 synchronize: true
 # Save each episode with video encoding and offline Mesh3DFlow before the next recording.
@@ -73,6 +73,8 @@ teleop:
   id: "gello_teleop"
   # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.
   realtime_control_fps: 30
+  # Press S to hold J1-J6 and control only J7; press S again for all joints.
+  joint7_only_mode_enabled: true
   port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
@@ -98,10 +100,10 @@ dataset:
   num_image_writer_processes: 1
   num_image_writer_threads_per_camera: 1
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_tasks/nut_loosen"
-  repo_id: "ufactory/xarm7_gello_nut_loosen"
+  root: "datasets/xarm7_gello_tasks/nut_removal"
+  repo_id: "ufactory/xarm7_gello_nut_removal"
   # Task description stored in the dataset.
-  single_task: "Align and engage the tool with the nut on a fixed bolt, maintain axial contact, loosen the nut to the specified angle or degree of looseness, then withdraw the tool."
+  single_task: "Find the stud with a nut and unscrew the nut completely."
   fps: 15
   episode_time_s: 960  # max duration for one episode
   push_to_hub: False

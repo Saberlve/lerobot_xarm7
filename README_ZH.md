@@ -398,3 +398,8 @@ lerobot_xarm7/
 ## 许可证
 
 本项目基于 Apache License 2.0 发布，详见 [LICENSE](LICENSE) 文件。
+
+
+## GELLO 网页录制工作台
+
+使用 `.venv/bin/uf-lerobot-record-web --port 8769` 启动统一配置管理、录制控制和相机预览。支持浏览器键盘与仅 J7 模式，Photon 预览默认关闭。参见 [网页录制说明](docs/recording_web.md)。

@@ -27,8 +27,9 @@ from lerobot_robot_ufactory.utils.realtime_teleop import (
     apply_pending_gello_joint_mode,
     update_gello_joint_mode_key,
 )
+from lerobot_robot_ufactory.utils.recording_lock import exclusive_recording
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
-from lerobot_robot_ufactory.utils.web_preview import RecordingWebPreview, WebPreviewConfig
+from lerobot_robot_ufactory.utils.webapp.web_preview import RecordingWebPreview, WebPreviewConfig
 from lerobot_robot_ufactory.utils.episode_images import discard_episode_images, validate_episode_images
 from lerobot_robot_ufactory.utils.raw_episodes import (
     RawEpisodeStore, open_recording_dataset, postprocess_raw_episodes, recover_postprocessing,
@@ -914,6 +915,7 @@ def record_loop(
     web_preview: RecordingWebPreview | None = None,
     synchronize: bool = True,
     synchronization_owner: _EpisodeSynchronizationOwner | None = None,
+    recording_control=None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -986,6 +988,10 @@ def record_loop(
                 initial_observation=last_robot_cmd,
                 record_timing=record_auxiliary_timing,
             )
+            if recording_control is not None:
+                recording_control.realtime_controller = realtime_controller
+                if events.get('pause_recording'):
+                    realtime_controller.request_pause()
             realtime_controller.start()
             if diagnostic_logs_enabled:
                 sync_log_dir = Path("logs")
@@ -1053,6 +1059,8 @@ def record_loop(
             )
             previous_loop_start_t = start_loop_t
 
+            if recording_control is not None:
+                recording_control.watchdog()
             if events["exit_early"]:
                 events["exit_early"] = False
                 break
@@ -1344,6 +1352,9 @@ def record_loop(
                 )
 
             sync_frame_index += 1
+            if recording_control is not None:
+                recording_control.progress(frames=sync_frame_index,
+                    elapsed=time.perf_counter() - start_episode_t, has_unsaved=True)
 
             if display_data:
                 log_rerun_data(
@@ -1358,9 +1369,17 @@ def record_loop(
         record_loop_succeeded = True
         if synchronization_owner is not None:
             synchronization_owner.track(episode_synchronization)
+    except InterruptedError:
+        if not events.get('pause_recording'):
+            raise
+        record_loop_succeeded = True
+        if synchronization_owner is not None:
+            synchronization_owner.track(episode_synchronization)
     finally:
         try:
             if realtime_controller is not None:
+                if events.get('pause_recording'):
+                    realtime_controller.request_pause()
                 # Preserve the capture exception instead of replacing it with
                 # the same latched control fault during worker cleanup.
                 if sys.exc_info()[0] is None:
@@ -1368,6 +1387,10 @@ def record_loop(
                 else:
                     realtime_controller.stop(raise_on_fault=False)
         finally:
+            if recording_control is not None:
+                recording_control.realtime_controller = None
+            if realtime_controller is None and events.get('pause_recording'):
+                robot.pause_motion()
             if sync_log_file is not None:
                 sync_log_file.close()
             if not record_loop_succeeded and episode_synchronization is not None:
@@ -1375,7 +1398,10 @@ def record_loop(
     return episode_synchronization
 
 
-def _reset_recording_robot(robot, *, open_gripper_first=False):
+def _reset_recording_robot(robot, *, open_gripper_first=False, cancel_check=None):
+    if cancel_check is not None and cancel_check():
+        robot.pause_motion()
+        raise InterruptedError('Reset cancelled before motion')
     if open_gripper_first:
         open_gripper = getattr(robot, "open_gripper", None)
         if open_gripper is not None:
@@ -1384,16 +1410,19 @@ def _reset_recording_robot(robot, *, open_gripper_first=False):
     reset = getattr(robot, "reset_to_initial", None)
     if reset is None:
         reset = robot.configure
-    reset()
+    if cancel_check is None:
+        reset()
+    else:
+        reset(cancel_check=cancel_check)
 
 
-def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode, *, reset_robot=True):
+def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode, *, reset_robot=True, cancel_check=None):
     if is_uf_teleop:
         # Stop teleop output before handing control to the xArm reset motion.
         teleop.set_teleop_enabled(False)
 
     if reset_robot and (is_uf_teleop or manual_mode):
-        _reset_recording_robot(robot)
+        _reset_recording_robot(robot, cancel_check=cancel_check)
 
     if is_uf_teleop:
         obs = robot.get_observation()
@@ -1503,7 +1532,8 @@ def _prepare_dataset_root(cfg: UFRecordConfig) -> None:
         raise SystemExit("Recording cancelled.")
 
 
-def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool = False) -> LeRobotDataset:
+@exclusive_recording
+def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool = False, recording_control=None) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
@@ -1528,6 +1558,8 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
             raise ValueError('offline_mesh3dflow requires at least one tactile sensor')
         for camera in tactile_configs:
             camera.configure_deferred_processing()
+    if recording_control is not None:
+        recording_control.prepare_dataset()
     _prepare_dataset_root(cfg)
 
     if cfg.resume and not postprocess_only:
@@ -1652,7 +1684,10 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
 
     web_preview = None
     try:
-        robot.connect()
+        if recording_control is None:
+            robot.connect()
+        else:
+            robot.connect(defer_motion=True)
         if runtime_dir is not None:
             manifest = {
                 "created_unix_s": time.time(),
@@ -1670,8 +1705,12 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
             if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
                 speed, stroke = robot.get_gripper_motion_parameters()
                 teleop.set_gripper_motion_parameters(speed, stroke)
-        if cfg.web_preview.enabled:
-            web_preview = RecordingWebPreview(cfg.web_preview)
+        if recording_control is not None:
+            web_preview = recording_control.preview
+            web_preview.start_encoder()
+        elif cfg.web_preview.enabled:
+            web_preview = RecordingWebPreview(cfg.web_preview,
+                camera_types={name: camera.type for name, camera in cfg.robot.cameras.items()})
             web_preview.start()
             print(f"Camera web preview: {web_preview.url}")
             if cfg.web_preview.host == "0.0.0.0":
@@ -1686,6 +1725,12 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
         except BaseException:
             logging.exception("Failed to clean up after recording device connection failure")
         raise
+
+    if recording_control is not None:
+        from lerobot_robot_ufactory.utils.webapp.recording_control import controlled_recording
+        return controlled_recording(cfg, robot, teleop, dataset, recording_control, web_preview,
+            teleop_action_processor, robot_action_processor, robot_observation_processor,
+            runtime_dir, tactile_cameras)
 
     is_evt = not is_headless()
     is_uf_teleop = isinstance(teleop, UFBaseTeleop)

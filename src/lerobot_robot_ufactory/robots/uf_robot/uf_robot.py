@@ -393,7 +393,7 @@ class UFRobot(Robot, Thread):
     def _needs_local_kinematics(self) -> bool:
         return self._min_tcp_z_mm is not None or self._record_space in ("tcp", "both")
 
-    def connect(self, calibrate: bool = True) -> None:
+    def connect(self, calibrate: bool = True, *, defer_motion: bool = False) -> None:
         if self._needs_local_kinematics():
             self._local_joint_origins = read_xarm7_kinematics(self.config.robot_ip)
         self.real_arm = XArmAPI(self.config.robot_ip)
@@ -443,18 +443,22 @@ class UFRobot(Robot, Thread):
 
         if self.config.manual_mode:
             self.configure()
+        elif defer_motion:
+            self.configure(move_gripper_to_open=False)
         else:
             self.reset_to_initial()
         # reset_to_initial clears any pre-existing controller error before
         # configuring APIs that may otherwise be rejected with code 1.
         if self.config.controller_safety_boundary:
             self._configure_controller_safety_boundary()
-        if self._min_tcp_z_mm is not None and self.config.manual_mode:
+        if self._min_tcp_z_mm is not None and (self.config.manual_mode or defer_motion):
             self._initialize_tcp_z_guard()
         if calibrate:  
             self.calibrate()
 
         self.real_arm.set_linear_spd_limit_factor(2.0)
+        if defer_motion:
+            self._check_motion_code('web standby set_state(3)', self.real_arm.set_state(3))
 
         self._is_connected = True
 
@@ -695,6 +699,15 @@ class UFRobot(Robot, Thread):
             if "capture_monotonic_s" in timing:
                 timing["pair_skew_ms"] = pair_skew_ms
 
+    def pause_motion(self) -> None:
+        """Pause controller motion and cancel any active gripper target."""
+        if not self._is_connected or self.real_arm is None:
+            return
+        code = self.real_arm.set_state(3)
+        self._check_motion_code('web pause set_state(3)', code)
+        if self._gripper_type in (GripperType.xArmGripper, GripperType.xArmGripperG2):
+            self.stop_gripper_at_current_position()
+
     def open_gripper(self) -> None:
         """Open the configured gripper before a recording reset."""
         if not self._is_connected or self.real_arm is None:
@@ -702,11 +715,14 @@ class UFRobot(Robot, Thread):
         if self._gripper_type > GripperType.NoGripper:
             self._configure_gripper(move_to_open=True)
 
-    def reset_to_initial(self) -> None:
+    def reset_to_initial(self, cancel_check=None) -> None:
         if not self._is_connected or self.real_arm is None:
             raise ConnectionError("UF Robot is not connected")
         if self._initial_point is None:
             raise RuntimeError("xArm initial point has not been loaded")
+        if cancel_check is not None and cancel_check():
+            self.pause_motion()
+            raise InterruptedError("Reset cancelled before motion")
 
         code = self.real_arm.motion_enable(enable=True)
         self._check_motion_code("motion_enable", code)
@@ -720,10 +736,26 @@ class UFRobot(Robot, Thread):
             angle=self._initial_point,
             speed=ROBOT_RESET_SPEED_DEG,
             is_radian=False,
-            wait=True,
+            wait=cancel_check is None,
         )
         if code != 0:
             raise RuntimeError(f"Failed to move to xArm initial point, code={code}")
+        if cancel_check is not None:
+            deadline = time.monotonic() + 60.0
+            stable = 0
+            while stable < 3:
+                if cancel_check():
+                    self.pause_motion()
+                    raise InterruptedError("Web reset interrupted by disconnect")
+                code, angles = self.real_arm.get_servo_angle(is_radian=False)
+                self._check_motion_code("reset feedback", code)
+                arrived = np.max(np.abs(np.asarray(angles[:self._dof]) -
+                    np.asarray(self._initial_point[:self._dof]))) < 0.5
+                stable = stable + 1 if arrived else 0
+                if time.monotonic() >= deadline:
+                    self.pause_motion()
+                    raise TimeoutError("Web reset did not reach the initial pose")
+                time.sleep(0.05)
 
         self.configure()
         if self._min_tcp_z_mm is not None:
@@ -960,7 +992,7 @@ class UFRobot(Robot, Thread):
             return False
         return True
 
-    def configure(self) -> None:
+    def configure(self, *, move_gripper_to_open: bool = True) -> None:
         self.real_arm.motion_enable()
         self.real_arm.clean_error()
         self.real_arm.set_mode(0)  # set to idle mode
@@ -972,7 +1004,7 @@ class UFRobot(Robot, Thread):
             raise RuntimeError(f"Failed to set correct state to UF robot! Controller Error code: {err_warn[0]} !")
 
         if self._gripper_type > GripperType.NoGripper:
-            self._configure_gripper(move_to_open=not self.config.manual_mode)
+            self._configure_gripper(move_to_open=move_gripper_to_open and not self.config.manual_mode)
         self._configure_g2_current_monitor()
 
         if self.config.manual_mode:

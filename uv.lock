@@ -1224,6 +1224,7 @@ name = "lerobot-robot-ufactory"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "lerobot", extra = ["intelrealsense"] },
     { name = "msgpack" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }, marker = "python_full_version < '3.11'" },
@@ -1258,6 +1259,7 @@ xense = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.14.3,<4" },
     { name = "dynamixel-sdk", marker = "extra == 'gello'", specifier = ">=4.0.5" },
     { name = "gello", marker = "extra == 'gello'", git = "https://github.com/xArm-Developer/gello_software.git" },
     { name = "lerobot", extras = ["intelrealsense"], specifier = "==0.4.3" },

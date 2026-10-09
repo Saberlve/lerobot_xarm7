@@ -87,12 +87,16 @@ class _PreviewFeed:
 class RecordingWebPreview:
     """Serve a lossy, asynchronous preview of recording observations."""
 
-    def __init__(self, config: WebPreviewConfig) -> None:
+    def __init__(self, config: WebPreviewConfig, camera_types=None) -> None:
         config.validate()
         self.config = config
+        self.camera_types = camera_types or {}
+        self.jpeg_sink = None
+        self._subscriptions = set()
         self._condition = threading.Condition()
         self._latest_frames: dict[str, np.ndarray] = {}
         self._source_generation = 0
+        self._source_timestamp = 0.0
         self._encoded_frames = 0
         self._last_encode_ms = 0.0
         self._max_encode_ms = 0.0
@@ -115,25 +119,33 @@ class RecordingWebPreview:
             (self.config.host, self.config.port), handler
         )
         self._server.daemon_threads = True
+        self.start_encoder()
+        self._server_thread = threading.Thread(
+            target=self._server.serve_forever, name='uf-recording-preview-http', daemon=True)
+        self._server_thread.start()
+
+    def start_encoder(self) -> None:
+        if self._encoder_thread is not None:
+            return
         self._encoder_thread = threading.Thread(
             target=self._encode_loop,
             name="uf-recording-preview-encoder",
             daemon=True,
         )
-        self._server_thread = threading.Thread(
-            target=self._server.serve_forever,
-            name="uf-recording-preview-http",
-            daemon=True,
-        )
         self._encoder_thread.start()
-        self._server_thread.start()
+
+    def set_subscriptions(self, cameras) -> None:
+        with self._condition:
+            self._subscriptions = set(cameras)
+            self._condition.notify_all()
 
     def publish(self, observation: dict[str, Any]) -> None:
         """Non-blockingly replace the latest previewable image references."""
         frames = {
             key: value
             for key, value in observation.items()
-            if isinstance(value, np.ndarray) and value.ndim == 3 and value.shape[2] in (3, 4)
+            if (not self.camera_types or key in self.camera_types)
+            and isinstance(value, np.ndarray) and value.ndim == 3 and value.shape[2] in (3, 4)
         }
         if not frames:
             return
@@ -142,6 +154,7 @@ class RecordingWebPreview:
             for name in frames:
                 self._feeds.setdefault(name, _PreviewFeed(name))
             self._source_generation += 1
+            self._source_timestamp = time.time()
             self._condition.notify()
 
     def camera_names(self) -> list[str]:
@@ -166,7 +179,8 @@ class RecordingWebPreview:
             }
 
     def _has_clients(self) -> bool:
-        return any(feed.clients > 0 for feed in self._feeds.values())
+        return bool(self._subscriptions.intersection(self._latest_frames)) or any(
+            feed.clients > 0 for feed in self._feeds.values())
 
     def _encode_loop(self) -> None:
         last_generation = 0
@@ -184,6 +198,9 @@ class RecordingWebPreview:
                 )
                 if self._stop_event.is_set():
                     return
+                if self._source_generation <= last_generation or not self._has_clients():
+                    continue
+                timestamp = self._source_timestamp
                 generation = self._source_generation
                 frames = dict(self._latest_frames)
 
@@ -195,7 +212,7 @@ class RecordingWebPreview:
 
             for name, frame in frames.items():
                 feed = self.feed(name)
-                if feed is None or feed.clients == 0:
+                if feed is None or (feed.clients == 0 and name not in self._subscriptions):
                     continue
                 try:
                     encode_started = time.perf_counter()
@@ -205,6 +222,11 @@ class RecordingWebPreview:
                     logger.exception("Failed to encode web preview frame for %s", name)
                     continue
                 feed.publish_jpeg(jpeg)
+                if self.jpeg_sink is not None:
+                    try:
+                        self.jpeg_sink(name, jpeg, timestamp)
+                    except (OSError, EOFError):
+                        return
                 with self._condition:
                     self._encoded_frames += 1
                     self._last_encode_ms = encode_ms
@@ -261,8 +283,9 @@ header{padding:14px 18px;background:#191c20;border-bottom:1px solid #333}h1{marg
 let signature='';async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});const p=await r.json();
 document.getElementById('status').textContent=p.cameras.length?`${p.cameras.length} 路相机 · 预览 ${p.fps} FPS · 采集优先，预览允许丢帧`:'正在等待相机帧…';
 const next=p.cameras.join('|');if(next!==signature){signature=next;const grid=document.getElementById('grid');grid.replaceChildren();
-for(const name of p.cameras){const tile=document.createElement('section');tile.className='tile';const h=document.createElement('h2');h.textContent=name;
-const img=document.createElement('img');img.alt=name;img.src='/stream?camera='+encodeURIComponent(name);tile.append(h,img);grid.appendChild(tile);}}}catch(e){document.getElementById('status').textContent='预览服务不可用：'+e}}
+for(const name of p.cameras){const tile=document.createElement('section');tile.className='tile';const h=document.createElement('h2');
+const toggle=document.createElement('input');toggle.type='checkbox';toggle.checked=(p.camera_types[name]||'')!=='photon'&&!name.startsWith('photon');h.append(toggle,document.createTextNode(name));
+const img=document.createElement('img');img.alt=name;function update(){if(toggle.checked){img.src='/stream?camera='+encodeURIComponent(name)}else{img.removeAttribute('src')}}toggle.onchange=update;update();tile.append(h,img);grid.appendChild(tile);}}}catch(e){document.getElementById('status').textContent='预览服务不可用：'+e}}
 refresh();setInterval(refresh,2000);</script></body></html>""".encode()
 
 
@@ -275,7 +298,8 @@ class _PreviewHandler(http.server.BaseHTTPRequestHandler):
             self._send(200, "text/html; charset=utf-8", _WEB_PAGE)
         elif parsed.path == "/api/status":
             body = json.dumps(
-                {"ok": True, "cameras": self.preview.camera_names(), "fps": self.preview.config.fps}
+                {"ok": True, "cameras": self.preview.camera_names(), "fps": self.preview.config.fps,
+                 "camera_types": self.preview.camera_types}
             ).encode()
             self._send(200, "application/json; charset=utf-8", body)
         elif parsed.path == "/stream":

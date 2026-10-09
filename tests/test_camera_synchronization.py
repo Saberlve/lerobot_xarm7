@@ -136,7 +136,7 @@ def test_gripper_delay_does_not_move_arm_state_anchor(monkeypatch, tmp_path):
     from lerobot_robot_ufactory.robots.uf_robot import uf_robot
     from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 
-    robot = uf_robot.UFRobot(UFRobotConfig(id="sync", calibration_dir=tmp_path, robot_dof=7, gripper_type=2))
+    robot = uf_robot.UFRobot(UFRobotConfig(id="sync", calibration_dir=tmp_path, robot_dof=7, min_tcp_z_mm=10.0, gripper_type=2))
     clock = [100.0]
     monkeypatch.setattr(uf_robot, "time", SimpleNamespace(perf_counter=lambda: clock[0]))
     robot._log_controller_error_if_changed = lambda *args: None
@@ -167,7 +167,7 @@ def test_latest_state_before_action_is_strictly_causal(tmp_path):
         UFRobotConfig(
             id="state-sync",
             calibration_dir=tmp_path,
-            robot_dof=7,
+            robot_dof=7, min_tcp_z_mm=10.0,
             gripper_type=0,
         )
     )

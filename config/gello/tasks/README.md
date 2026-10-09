@@ -2,7 +2,7 @@
 
 每个任务一个子文件夹。配置是当前 `../xarm7_gello_base.yaml` 的独立副本；后续修改 base 不会自动同步。
 
-共享设置与擦白板配置对齐，仅数据集路径、repo_id 和语言指令因任务而异。控制 30 Hz，RGB/数据集 15 Hz，Photon 60 Hz；记录关节和 TCP（both）；关闭 GELLO 电流控制；夹爪由键盘控制，夹爪监测关闭；开启网页预览；最多录制 75 段，图像写入使用 1 个进程、每相机 1 个线程；结束录制后计算并保存 Mesh3DFlow。
+共享设置与擦白板配置对齐，数据集路径、repo_id 和语言指令因任务而异；旋下螺母配置额外启用 J7 模式切换。控制 30 Hz，RGB/数据集 15 Hz，Photon 60 Hz；记录关节和 TCP（both）；关闭 GELLO 电流控制；夹爪由键盘控制，夹爪监测关闭；开启网页预览；最多录制 75 段，图像写入使用 1 个进程、每相机 1 个线程；结束录制后计算并保存 Mesh3DFlow。
 
 | 任务 | 配置 | 数据集保存路径 | repo_id |
 |---|---|---|---|
@@ -12,7 +12,7 @@
 | 齿轮装配 | [xarm7_gello_gear_assembly.yaml](gear_assembly/xarm7_gello_gear_assembly.yaml) | `datasets/xarm7_gello_tasks/gear_assembly` | `ufactory/xarm7_gello_gear_assembly` |
 | 擦白板 | [xarm7_gello_whiteboard_erase.yaml](whiteboard_erase/xarm7_gello_whiteboard_erase.yaml) | `datasets/xarm7_gello_tasks/whiteboard_erase` | `ufactory/xarm7_gello_whiteboard_erase` |
 | 弹簧小车 | [xarm7_gello_spring_cart.yaml](spring_cart/xarm7_gello_spring_cart.yaml) | `datasets/xarm7_gello_tasks/spring_cart` | `ufactory/xarm7_gello_spring_cart` |
-| 拧松螺母 | [xarm7_gello_nut_loosen.yaml](nut_loosen/xarm7_gello_nut_loosen.yaml) | `datasets/xarm7_gello_tasks/nut_loosen` | `ufactory/xarm7_gello_nut_loosen` |
+| 旋下螺母 | [xarm7_gello_nut_removal.yaml](nut_removal/xarm7_gello_nut_removal.yaml) | `datasets/xarm7_gello_tasks/nut_removal` | `ufactory/xarm7_gello_nut_removal` |
 | 大号 USB 插入 | [xarm7_gello_usb_insert.yaml](usb_insert/xarm7_gello_usb_insert.yaml) | `datasets/xarm7_gello_tasks/usb_insert` | `ufactory/xarm7_gello_usb_insert` |
 
 从项目根目录启动，例如：

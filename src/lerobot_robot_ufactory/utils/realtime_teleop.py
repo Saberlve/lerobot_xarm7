@@ -460,6 +460,7 @@ class RealtimeTeleopController:
         self._lock = threading.Lock()
         self._action_condition = threading.Condition(self._lock)
         self._stop = threading.Event()
+        self._pause_requested = threading.Event()
         self._first_action = threading.Event()
         self._thread = threading.Thread(target=self._run, name="uf-servoj-control", daemon=True)
 
@@ -528,6 +529,12 @@ class RealtimeTeleopController:
             self.raise_if_failed()
             raise RuntimeError("Timed out waiting for the first realtime joint action")
         self.raise_if_failed()
+
+    def request_pause(self) -> None:
+        """Pause the physical arm on its existing I/O owner thread."""
+        self._pause_requested.set()
+        with self._action_condition:
+            self._action_condition.notify_all()
 
     def stop(self, *, raise_on_fault: bool = True) -> None:
         self._stop.set()
@@ -600,6 +607,8 @@ class RealtimeTeleopController:
         deadline = time.perf_counter() + wait_s
         with self._action_condition:
             while True:
+                if self._pause_requested.is_set():
+                    raise InterruptedError('Browser control paused')
                 eligible = [
                     sample
                     for sample in self._action_history
@@ -710,6 +719,8 @@ class RealtimeTeleopController:
         next_tick = time.perf_counter()
         try:
             while not self._stop.is_set():
+                if self._pause_requested.is_set():
+                    break
                 with self._lock:
                     observation = self._observation
                     heartbeat = self._heartbeat
@@ -780,4 +791,12 @@ class RealtimeTeleopController:
             self._first_action.set()
             self._stop.set()
         finally:
-            self._safe_stop_feedback_output()
+            try:
+                if self._pause_requested.is_set():
+                    self.robot.pause_motion()
+            except BaseException as exc:
+                if self._exception is None:
+                    self._exception = exc
+            finally:
+                self._first_action.set()
+                self._safe_stop_feedback_output()

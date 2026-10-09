@@ -31,10 +31,12 @@ dependencies = [
     "xarm-python-sdk",
     "opencv-python==4.11.0.86",
     "websockets",
+    "aiohttp>=3.14.3,<4",
     "msgpack",
 ]
 
 [project.scripts]
+uf-lerobot-record-web = "lerobot_robot_ufactory.utils.webapp.uf_lerobot_record_web:main"
 uf-gello-tune-web = "lerobot_robot_ufactory.current_control.web.tuning_web:main"
 uf-robot-teleop = "lerobot_robot_ufactory.scripts.uf_robot_teleop:main"
 uf-lerobot-record = "lerobot_robot_ufactory.scripts.uf_lerobot_record:main"
@@ -88,6 +90,7 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
+"lerobot_robot_ufactory.utils.webapp" = ["recording_web_assets/*.html"]
 "lerobot_robot_ufactory.devices.umi.xvlib" = ["*.so", "*.so.*"]
 "lerobot_robot_ufactory.current_control.web" = ["viewer_assets/*.html", "viewer_assets/*.js", "viewer_assets/*.txt"]
 
