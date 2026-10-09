@@ -1,3 +1,13 @@
+# Base recording config: both joint/TCP states, Photon tactile streams and GELLO joint current control.
+# Run from the project root:
+# .venv/bin/uf-lerobot-record --config_path config/gello/xarm7_gello_base_wzy_10_test.yaml
+
+synchronize: true
+# Checkpoint raw images/data during recording; process episodes after recording ends.
+defer_processing: true
+# Compute Mesh3DFlow from saved Rectify images and write the results to the dataset:
+# observation.photon_right.mesh_motion_3d / observation.photon_left.mesh_motion_3d.
+# This offline output is enabled even though save_marker_motion_3d above is false.
 robot:
   type: uf::robot
   id: "uf_robot"
@@ -6,26 +16,19 @@ robot:
   # Saved dataset representation: "joint" records J1..J7 (rad); "tcp" records
   # the FK-converted TCP pose (mm; continuous 6D rotation, Zhou et al. CVPR 2019);
   # "both" records joints and TCP pose side by side. Control stays in joint space.
-  # This config exists for TCP-recording validation: "both" keeps the joints so
-  # scripts/verify_local_tcp.py can check recorded pose.* against FK(joints).
   record_space: "both"
   robot_ip: "192.168.1.245"
   # 2: xArm Gripper G2 (0-84 mm opening range).
   gripper_type: 2
-  enable_logs: false
-  # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
-  gripper_speed: 100
-  # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
-  gripper_force: 50
-  # Phase 1: cache G2 actual Q-axis current from TCP 30000; no GELLO output yet.
+  gripper_speed: 50
+  gripper_command_interval_s: 0.03334
   gripper_current_monitor: false
-  gripper_current_monitor_frequency_hz: 250
-  gripper_current_stale_timeout_s: 0.25
+  enable_logs: false
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
   joint_command_mode: 6
   max_joint_velocity: 120
   # TCP z floor in the xArm base coordinate system (mm).
-  min_tcp_z_mm: -2.0
+  min_tcp_z_mm: 2
   # CPU-local FK/Jacobian projection keeps mode-6 commands free of synchronous SDK queries.
   tcp_z_guard_backend: "local_projection"
   tcp_z_soft_margin_mm: 0.5
@@ -34,22 +37,32 @@ robot:
   # Append gripper initialization/read/write failures here.
   gripper_error_log_path: "logs/xarm7_gripper_errors.log"
   cameras:
-    camera:
+    wrist_camera:
       type: intelrealsense
       serial_number_or_name: "242622070583"
       width: 640
       height: 480
-      fps: 30
-    camera2:
+      # Select the latest host-received frame at/before each action send-start.
+      fps: 15
+    third_camera:
       type: intelrealsense
       serial_number_or_name: "148522072685"
       width: 640
       height: 480
-      fps: 30
+      fps: 15
+    # Physical left/right mapping verified by pressing the left sensor: OG001932.
+    # These dimensions are saved image sizes, not a Photon hardware mode.
+    
+      # config_path: /absolute/path/to/xense/calibrations
   # Redundant args, indicating the initial pose of xarm7. Set by 192.168.1.245:18333
   # start_joints: [0, -30, 0, 0, 0, 30, 0]
 # make sure to edit with your correct configurations!
 teleop:
+  current_control:
+    enabled: true
+    profile_path: config/current_control/gello_A_working.yaml
+    experimental: false
+    # Running current slew is loaded from the shared device profile.
   type: uf::gello_teleop
   id: "gello_teleop"
   # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.
@@ -58,30 +71,32 @@ teleop:
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
   gripper_id: 8
-  gripper_control_mode: gello
+  gripper_control_mode: gello  # or gello
+  gripper_keyboard_hold_delay_s: 0.0
+  gripper_keyboard_step_mm: 1.0
   gripper_open_deg: 198.28125
   gripper_close_deg: 155.75
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are
-# dropped instead of delaying the 30 Hz recorder or GELLO control loop.
+# dropped instead of delaying the 15 Hz recorder or 30 Hz GELLO control loop.
 web_preview:
-  enabled: true
+  enabled: false
   host: "0.0.0.0"
-  port: 8765
+  port: 8769
   fps: 8
   width: 480
   jpeg_quality: 65
 
-synchronize: true
+
 
 dataset:
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_tcp_verify"
-  repo_id: "ufactory/xarm7_gello_tcp_verify"
-  single_task: "TCP recording validation episode."
-  # Cameras and the independent GELLO control loop run at 30 Hz.
-  fps: 30
-  episode_time_s: 20  # one short validation episode is enough
+  root: "datasets/wzy_test"
+  repo_id: "ufactory/wzy_test"
+  # Set the task and dataset paths for each recording project.
+  single_task: "TODO_wzy_TASK"
+  fps: 15
+  episode_time_s: 960  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes
   push_to_hub: False

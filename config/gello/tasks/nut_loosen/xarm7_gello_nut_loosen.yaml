@@ -30,7 +30,7 @@ robot:
   joint_command_mode: 6
   max_joint_velocity: 120
   # TCP z floor in the xArm base coordinate system (mm).
-  min_tcp_z_mm: 99
+  min_tcp_z_mm: 2
   # CPU-local FK/Jacobian projection keeps mode-6 commands free of synchronous SDK queries.
   tcp_z_guard_backend: "local_projection"
   tcp_z_soft_margin_mm: 0.5

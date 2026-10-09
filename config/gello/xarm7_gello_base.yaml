@@ -29,7 +29,7 @@ robot:
   joint_command_mode: 6
   max_joint_velocity: 120
   # TCP z floor in the xArm base coordinate system (mm).
-  min_tcp_z_mm: 99
+  min_tcp_z_mm: 2
   # CPU-local FK/Jacobian projection keeps mode-6 commands free of synchronous SDK queries.
   tcp_z_guard_backend: "local_projection"
   tcp_z_soft_margin_mm: 0.5
@@ -106,7 +106,7 @@ teleop:
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
   gripper_id: 8
-  gripper_control_mode: keyboard
+  gripper_control_mode: keyboard  # or gello
   gripper_keyboard_hold_delay_s: 0.0
   gripper_keyboard_step_mm: 1.0
   gripper_open_deg: 198.28125
