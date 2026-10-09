@@ -32,7 +32,10 @@ from lerobot.utils.utils import (
 from lerobot_robot_ufactory.configs import parser
 from lerobot_robot_ufactory.utils.utils import is_headless, init_keyboard_listener
 from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
-from lerobot_robot_ufactory.utils.realtime_teleop import RealtimeTeleopController
+from lerobot_robot_ufactory.utils.realtime_teleop import (
+    RealtimeTeleopController,
+    apply_keyboard_gripper_stop,
+)
 
 
 @dataclass
@@ -431,6 +434,7 @@ def teleop_loop(cfg: TeleopConfig):
                     act = teleop.get_action()
                     act_processed_teleop = teleop_action_processor((act, obs))
                     robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+                    robot_action_to_send = apply_keyboard_gripper_stop(robot, teleop, robot_action_to_send)
                     robot.send_action(robot_action_to_send)
                     dt_s = time.perf_counter() - start_loop_t
                     precise_sleep(max(sleep_time_s - dt_s, 0.0))

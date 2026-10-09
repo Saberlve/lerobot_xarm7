@@ -1,7 +1,7 @@
-# Task: 齿轮装配
-# Settings copied from config/gello/xarm7_gello_base.yaml; this is a standalone config.
+# Task: chip 抓取
+# Settings copied from config/gello/tasks/egg_pick/xarm7_gello_egg_pick.yaml; this is a standalone config.
 # Run from the project root:
-# .venv/bin/uf-lerobot-record --config_path config/gello/tasks/gear_assembly/xarm7_gello_gear_assembly.yaml
+# .venv/bin/uf-lerobot-record --config_path config/gello/tasks/chip_pick/xarm7_gello_chip_pick.yaml
 
 synchronize: true
 # Checkpoint raw images/data during recording; process episodes after recording ends.
@@ -107,7 +107,7 @@ teleop:
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
   gripper_id: 8
-  gripper_control_mode: gello
+  gripper_control_mode: keyboard
   gripper_keyboard_hold_delay_s: 0.0
   gripper_keyboard_step_mm: 1.0
   gripper_open_deg: 198.28125
@@ -127,11 +127,15 @@ web_preview:
 
 
 dataset:
+  # Background dataset image writers: 1 thread per camera, 4 threads total.
+  # Tactile stream writers are configured independently.
+  num_image_writer_processes: 0
+  num_image_writer_threads_per_camera: 1
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_tasks/gear_assembly"
-  repo_id: "ufactory/xarm7_gello_gear_assembly"
+  root: "datasets/xarm7_gello_tasks/chip_pick"
+  repo_id: "ufactory/xarm7_gello_chip_pick"
   # Task description stored in the dataset.
-  single_task: "Grasp the gear, align its bore with the fixed shaft, adjust the alignment during contact, insert it to the target depth, then release the gear and withdraw."
+  single_task: "Gently grasp a chip, lift it, hold it stably, transfer it to the target area, and place it down without damaging or dropping it."
   fps: 15
   episode_time_s: 960  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes

@@ -195,7 +195,7 @@ def test_keyboard_gripper_hold_continues_after_delay(monkeypatch):
     assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.72)
 
 
-def test_keyboard_gripper_quick_tap_within_one_cycle_still_steps(monkeypatch):
+def test_keyboard_gripper_quick_tap_within_one_cycle_cancels_step(monkeypatch):
     teleop, clock = _make_keyboard_gripper_teleop(monkeypatch)
 
     teleop._keyboard_gripper_action(0.5)  # initialize target
@@ -203,7 +203,43 @@ def test_keyboard_gripper_quick_tap_within_one_cycle_still_steps(monkeypatch):
     teleop.set_gripper_keyboard_state(close=True, open=False)
     teleop.set_gripper_keyboard_state(close=False, open=False)
     clock["now"] += 0.05
-    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.6)
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.5)
+    assert teleop.consume_gripper_stop_request() is True
+    assert teleop.consume_gripper_stop_request() is False
+
+
+@pytest.mark.parametrize("direction", ["close", "open"])
+def test_keyboard_release_overrides_goal_already_computed_for_send(monkeypatch, direction):
+    teleop, clock = _make_keyboard_gripper_teleop(monkeypatch, hold_delay_s=0.0)
+    teleop._keyboard_gripper_action(0.5)
+    teleop.set_gripper_keyboard_state(close=direction == "close", open=direction == "open")
+    clock["now"] += 0.1
+    teleop.get_action = lambda: {"gripper.pos": teleop._keyboard_gripper_action(0.5)}
+    robot = FakeRobot()
+    stops = []
+
+    def stop_gripper():
+        stops.append(True)
+        return 0.62
+
+    robot.stop_gripper_at_current_position = stop_gripper
+
+    def release_during_processing(value):
+        # The owner observation still contains the old commanded endpoint.
+        teleop.update_gripper_observation(1.0 if direction == "close" else 0.0)
+        teleop.set_gripper_keyboard_state(close=False, open=False)
+        return value[0]
+
+    controller = RealtimeTeleopController(
+        robot, teleop, release_during_processing, identity_action_processor,
+        fps=100, initial_observation={"gripper.pos": 0.5},
+    )
+    controller.start()
+    controller.stop()
+    assert stops == [True]
+    assert robot.actions[0]["gripper.pos"] == pytest.approx(0.62)
+    teleop.update_gripper_observation(1.0)
+    assert teleop._keyboard_gripper_action(0.5) == pytest.approx(0.62)
 
 
 def test_keyboard_gripper_release_rebases_when_fresh_observation_arrives(monkeypatch):

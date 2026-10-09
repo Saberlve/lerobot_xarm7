@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 GRIPPER_CURRENT_FEEDBACK_KEY = "gripper.current_ma"
 
 
+def apply_keyboard_gripper_stop(robot, teleop, command: dict) -> dict:
+    """Handle release after action processing, on the robot I/O owner thread."""
+    consume_stop = getattr(teleop, "consume_gripper_stop_request", None)
+    if not callable(consume_stop) or not consume_stop():
+        return command
+    position = robot.stop_gripper_at_current_position()
+    teleop.set_gripper_keyboard_hold_position(position)
+    # Discard any goal computed before the release callback.
+    command = dict(command)
+    command[f"{getattr(robot, 'prefix', '')}gripper.pos"] = position
+    return command
+
+
 def map_gripper_current_feedback(
     sample,
     *,
@@ -688,6 +701,7 @@ class RealtimeTeleopController:
                 processed = self.teleop_action_processor((action, observation))
                 command = self.robot_action_processor((processed, observation))
                 send_start_ns = time.perf_counter_ns()
+                command = apply_keyboard_gripper_stop(self.robot, self.teleop, command)
                 sent = self.robot.send_action(command)
                 send_end_ns = time.perf_counter_ns()
                 effective = sent if isinstance(sent, dict) else command

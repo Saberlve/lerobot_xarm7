@@ -672,6 +672,37 @@ def test_normal_mode_waits_for_gripper_to_open_before_control(monkeypatch, tmp_p
     robot.disconnect()
 
 
+@pytest.mark.parametrize("gripper_type, physical_position", [(1, 400), (2, 42)])
+def test_keyboard_gripper_stop_reads_actual_position_without_monitor(monkeypatch, tmp_path,
+                                                                    gripper_type, physical_position):
+    from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
+
+    arm = FakeXArm("192.168.1.245")
+    monkeypatch.setattr(uf_robot_module, "XArmAPI", lambda robot_ip: arm)
+    monkeypatch.setattr(uf_robot_module.time, "sleep", lambda _: None)
+    robot = uf_robot_module.UFRobot(UFRobotConfig(
+        calibration_dir=tmp_path, robot_ip=arm.robot_ip, robot_dof=6,
+        gripper_type=gripper_type, gripper_current_monitor=False,
+        gripper_command_threshold=1.0, gripper_command_interval_s=60.0,
+        gripper_error_log_path=None,
+    ))
+    robot.connect()
+    # The previous goal is fully closed, but the gripper is only halfway there.
+    robot._last_gripper_command = 1.0
+    robot._last_gripper_command_attempt_s = uf_robot_module.time.perf_counter()
+    arm.gripper_position = physical_position
+    arm.gripper_g2_position = physical_position
+    api = "set_gripper_g2_position" if gripper_type == 2 else "set_gripper_position"
+    before = len([call for call in arm.calls if call[0] == api])
+    assert robot.stop_gripper_at_current_position() == pytest.approx(0.5)
+    writes = [call for call in arm.calls if call[0] == api]
+    assert len(writes) == before + 1
+    assert writes[-1][1] == physical_position
+    assert writes[-1][2]["wait"] is False
+    assert robot._last_gripper_command == pytest.approx(0.5)
+    robot.disconnect()
+
+
 def test_gripper_rs485_commands_are_rate_limited(monkeypatch, tmp_path):
     from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
 

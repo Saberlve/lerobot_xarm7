@@ -365,6 +365,115 @@ def test_write_failure_latches_fault(profile, tmp_path):
     assert transport.calls[-2:] == ["disable", "close"]
 
 
+@pytest.mark.parametrize("delay_phase", ["idle", "read", "write"])
+def test_delayed_control_tick_unloads(experimental_profile, monkeypatch, delay_phase):
+    from types import SimpleNamespace
+    from lerobot_robot_ufactory.current_control.control import runtime as runtime_module
+
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(runtime_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+
+    class StopEvent:
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def wait(self, timeout):
+            clock.now += timeout + (0.055 if delay_phase == "idle" else 0)
+
+    class TimedTransport(FakeTransport):
+        reads = 0
+        writes = 0
+
+        def state(self):
+            self.reads += 1
+            stamp = clock.now
+            state = super().state()
+            state["stamp"] = stamp
+            clock.now += 0.060 if delay_phase == "read" and self.reads == 2 else 0.004
+            return state
+
+        def currents(self, current, gripper=None):
+            self.writes += 1
+            super().currents(current, gripper)
+            if delay_phase == "write" and self.writes == 2:
+                clock.now += 0.060
+
+    transport = TimedTransport()
+    runtime = CurrentRuntime(experimental_profile, live=True, teleop=True, transport=transport)
+    runtime._stop = StopEvent()
+    # Run deterministically without a physical device or wall-clock sleeps.
+    runtime._run()
+    assert runtime.status()["state"] == "fault"
+    assert transport.calls[-2:] == ["disable", "close"]
+    if delay_phase == "idle":
+        assert transport.reads == transport.writes == 1
+        assert "Invalid or stale control interval" in runtime.status()["error"]
+    elif delay_phase == "read":
+        assert transport.writes == 1
+        assert "state read exceeded timeout" in runtime.status()["error"]
+    else:
+        assert "control transaction exceeded timeout" in runtime.status()["error"]
+    # Closing is idempotent, while reads and explicit fault checks still fail.
+    runtime.close()
+    runtime.close()
+    with pytest.raises(RuntimeError):
+        runtime.state()
+
+
+@pytest.mark.parametrize("failure_phase", ["disable", "close"])
+def test_cleanup_failure_is_not_suppressed_by_close(profile, failure_phase):
+    class BrokenCleanupTransport(FakeTransport):
+        def disable(self):
+            super().disable()
+            if failure_phase == "disable":
+                raise RuntimeError("injected unload failure")
+
+        def close(self):
+            super().close()
+            if failure_phase == "close":
+                raise RuntimeError("injected close failure")
+
+    transport = BrokenCleanupTransport()
+    runtime = CurrentRuntime(profile, transport=transport)
+    runtime.start()
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        runtime.close()
+    assert transport.calls[-2:] == ["disable", "close"]
+
+
+def test_teleop_fault_cleanup_does_not_resubmit_gripper_requests(experimental_profile, caplog):
+    from lerobot_robot_ufactory.current_control.control.runtime import RuntimeAgent
+    from lerobot_robot_ufactory.scripts.uf_lerobot_record import _RecordingCleanup
+    from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop import GelloTeleop
+    from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import GelloTeleopConfig
+
+    transport = FakeTransport()
+    transport.stale = True
+    runtime = CurrentRuntime(experimental_profile, live=True, teleop=True, transport=transport)
+    with pytest.raises(RuntimeError, match="timeout"):
+        runtime.start()
+    teleop = GelloTeleop(GelloTeleopConfig())
+    teleop._current_runtime = runtime
+    teleop.gello_agent = RuntimeAgent(RuntimeRobot(runtime, [1] * 7, [8, 0, -42]))
+    teleop._is_connected = True
+    caplog.clear()
+    with pytest.raises(RuntimeError, match="state read exceeded timeout") as failure:
+        with _RecordingCleanup(object(), teleop, None, None):
+            runtime.raise_if_failed()
+    assert failure.value.__cause__ is runtime._error
+    # Repeated disconnects remain harmless after the context has closed it.
+    teleop.disconnect()
+    assert not teleop.is_connected
+    assert teleop._current_runtime is None
+    assert transport.calls.count("disable") == transport.calls.count("close") == 1
+    assert not any(record.levelname == "ERROR" for record in caplog.records)
+
+
 
 
 def test_device_fault_does_not_stop_other_worker(profile):

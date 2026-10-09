@@ -1546,11 +1546,12 @@ class UFRobot(Robot, Thread):
         converted.update(self._joints_to_tcp_pose_dict(joints))
         return converted
 
-    def _send_gripper_action(self, gripper_norm: float) -> None:
+    def _send_gripper_action(self, gripper_norm: float, *, force: bool = False) -> None:
         gripper_norm = min(max(float(gripper_norm), 0.0), 1.0)
         logs_enabled = bool(getattr(self, "enable_logs", True))
         if (
-            self._last_gripper_command is not None
+            not force
+            and self._last_gripper_command is not None
             and abs(gripper_norm - self._last_gripper_command)
             < self.config.gripper_command_threshold
         ):
@@ -1561,7 +1562,7 @@ class UFRobot(Robot, Thread):
         # Intermediate targets are coalesced and failed attempts are also
         # rate-limited so an error cannot cause a retry storm.
         now = time.perf_counter()
-        if now - self._last_gripper_command_attempt_s < self.config.gripper_command_interval_s:
+        if not force and now - self._last_gripper_command_attempt_s < self.config.gripper_command_interval_s:
             return
         self._last_gripper_command_attempt_s = now
         command_start_s = now if logs_enabled else None
@@ -1622,6 +1623,8 @@ class UFRobot(Robot, Thread):
                 code,
                 detail,
             )
+            if force:
+                raise RuntimeError(f"Gripper hold command failed, code={code}")
             return
         if logs_enabled:
             self._log_gripper_command(gripper_norm, grippos, command_dt_ms)
@@ -1631,6 +1634,28 @@ class UFRobot(Robot, Thread):
             self._gripper_command_history.append(
                 (command_recorded_s, gripper_norm)
             )
+
+    def stop_gripper_at_current_position(self) -> float:
+        """Replace an active goal with actual position on keyboard release."""
+        if not self._is_connected:
+            raise ConnectionError()
+        if self.config.no_action:
+            return float(self._last_gripper_command or 0.0)
+        # Observations can contain the commanded goal when monitoring is off.
+        # Read the physical position once per release, never on every tick.
+        if self._gripper_type == GripperType.xArmGripperG2:
+            code, position = self.real_arm.get_gripper_g2_position()
+        elif self._gripper_type == GripperType.xArmGripper:
+            code, position = self.real_arm.get_gripper_position()
+        else:
+            raise RuntimeError("Keyboard release stopping requires an xArm gripper")
+        self._check_gripper_code("get_gripper_position_on_release", code)
+        if not math.isfinite(float(position)):
+            raise RuntimeError("Invalid physical gripper position on keyboard release")
+        target = min(max(float(self._gripper_param.get_gripper_norm(position)), 0.0), 1.0)
+        # This single release command must bypass ordinary goal coalescing.
+        self._send_gripper_action(target, force=True)
+        return target
 
     def get_gripper_motion_parameters(self) -> tuple[float, float]:
         """Return effective gripper speed and open/close stroke in mm."""

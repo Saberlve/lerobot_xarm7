@@ -34,6 +34,7 @@ class GelloTeleop(UFBaseTeleop):
         self._keyboard_gripper_target = None
         self._keyboard_gripper_observed_position = None
         self._keyboard_gripper_stop_pending = False
+        self._keyboard_gripper_stop_requested = False
         self._keyboard_gripper_speed = 1.0
         self._keyboard_gripper_stroke_mm = None
         self._keyboard_gripper_last_update = None
@@ -156,7 +157,7 @@ class GelloTeleop(UFBaseTeleop):
             self._needs_alignment = True
             self._stop_feedback_worker()
             try:
-                runtime.stop()
+                runtime.stop(raise_on_fault=False)
             finally:
                 self._stop_current_log()
 
@@ -316,6 +317,13 @@ class GelloTeleop(UFBaseTeleop):
     def stop_feedback(self) -> None:
         """Stop accepting targets, then zero and disable ID8 current mode."""
         self._stop_feedback_worker()
+        runtime = getattr(self, "_current_runtime", None)
+        if runtime is not None and runtime.status()["state"] in ("stopped", "fault"):
+            # The serial owner unloads all touched motors, including ID8, in
+            # its finally block. Join it and verify cleanup instead of sending
+            # new requests to a faulted or already closed connection.
+            runtime.stop(raise_on_fault=False)
+            return
         if not hasattr(self, "gello_agent"):
             return
         failures = []
@@ -397,6 +405,7 @@ class GelloTeleop(UFBaseTeleop):
                 self._keyboard_gripper_target = float(obs.get("gripper.pos", 0.0))
                 self._keyboard_gripper_observed_position = self._keyboard_gripper_target
                 self._keyboard_gripper_stop_pending = False
+                self._keyboard_gripper_stop_requested = False
                 self._keyboard_gripper_last_update = time.monotonic()
                 self._keyboard_press_time = {"close": None, "open": None}
                 self._keyboard_step_pending = {"close": False, "open": False}
@@ -441,9 +450,9 @@ class GelloTeleop(UFBaseTeleop):
                         self.config.gripper_keyboard_hold_delay_s > 0.0
                     )
                 elif not pressed and was_pressed:
-                    # Release edge: stop the hold timer, but keep any queued
-                    # step so a tap shorter than one control cycle still counts.
+                    # A released key must never execute a queued tap later.
                     self._keyboard_press_time[name] = None
+                    self._keyboard_step_pending[name] = False
                 self._keyboard_gripper_state[name] = pressed
             is_moving = (
                 self._keyboard_gripper_state["close"]
@@ -458,6 +467,23 @@ class GelloTeleop(UFBaseTeleop):
                         self._keyboard_gripper_observed_position
                     )
                 self._keyboard_gripper_stop_pending = True
+                self._keyboard_gripper_stop_requested = True
+                self._keyboard_step_pending = {"close": False, "open": False}
+
+    def consume_gripper_stop_request(self) -> bool:
+        """Transfer a release-edge stop to the controller's serial I/O owner."""
+        with self._keyboard_gripper_lock:
+            requested = self._keyboard_gripper_stop_requested
+            self._keyboard_gripper_stop_requested = False
+            return requested
+
+    def set_gripper_keyboard_hold_position(self, position: float) -> None:
+        """Keep subsequent idle actions at the physical stop position."""
+        with self._keyboard_gripper_lock:
+            self._keyboard_gripper_observed_position = position
+            if self._keyboard_gripper_state["close"] == self._keyboard_gripper_state["open"]:
+                self._keyboard_gripper_target = position
+                self._keyboard_gripper_stop_pending = False
 
     def update_gripper_observation(self, position: float | None) -> None:
         """Cache the physical gripper position for release-edge stopping."""
@@ -474,8 +500,7 @@ class GelloTeleop(UFBaseTeleop):
             self._keyboard_gripper_observed_position = position
             if (
                 self._keyboard_gripper_stop_pending
-                and not self._keyboard_gripper_state["close"]
-                and not self._keyboard_gripper_state["open"]
+                and self._keyboard_gripper_state["close"] == self._keyboard_gripper_state["open"]
             ):
                 self._keyboard_gripper_target = position
                 self._keyboard_gripper_stop_pending = False
@@ -493,7 +518,7 @@ class GelloTeleop(UFBaseTeleop):
                 self._keyboard_gripper_target = min(max(float(fallback), 0.0), 1.0)
             last = self._keyboard_gripper_last_update
             self._keyboard_gripper_last_update = now
-            # Apply queued tap steps even if the key was already released.
+            # Tap steps are valid only while the key remains pressed.
             stroke = self._keyboard_gripper_stroke_mm
             for name, direction in (("close", 1.0), ("open", -1.0)):
                 if self._keyboard_step_pending[name]:
@@ -591,6 +616,9 @@ class GelloTeleop(UFBaseTeleop):
         finally:
             try:
                 gello_robot._driver.close()
+                # Drop the closed adapter so a repeated disconnect cannot send
+                # ID8 requests through a stale driver after runtime is cleared.
+                del self.gello_agent
             finally:
                 self._stop_current_log()
 
@@ -602,6 +630,10 @@ class GelloTeleop(UFBaseTeleop):
             self._teleop_enabled = False
             self._needs_alignment = True
             runtime = getattr(self, "_current_runtime", None)
-            if runtime is not None and runtime.status()["state"] in ("stopped", "fault"):
+            if (
+                runtime is not None
+                and not hasattr(self, "gello_agent")
+                and runtime.status()["state"] in ("stopped", "fault")
+            ):
                 self._current_runtime = None
         logger.info(f"{self} disconnected.")

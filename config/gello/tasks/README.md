@@ -7,6 +7,7 @@
 | 任务 | 配置 | 数据集保存路径 | repo_id |
 |---|---|---|---|
 | 鸡蛋抓取 | [xarm7_gello_egg_pick.yaml](egg_pick/xarm7_gello_egg_pick.yaml) | `datasets/xarm7_gello_tasks/egg_pick` | `ufactory/xarm7_gello_egg_pick` |
+| chip 抓取 | [xarm7_gello_chip_pick.yaml](chip_pick/xarm7_gello_chip_pick.yaml) | `datasets/xarm7_gello_tasks/chip_pick` | `ufactory/xarm7_gello_chip_pick` |
 | 按压洗手液 | [xarm7_gello_handwash_press.yaml](handwash_press/xarm7_gello_handwash_press.yaml) | `datasets/xarm7_gello_tasks/handwash_press` | `ufactory/xarm7_gello_handwash_press` |
 | 齿轮装配 | [xarm7_gello_gear_assembly.yaml](gear_assembly/xarm7_gello_gear_assembly.yaml) | `datasets/xarm7_gello_tasks/gear_assembly` | `ufactory/xarm7_gello_gear_assembly` |
 | 擦白板 | [xarm7_gello_whiteboard_erase.yaml](whiteboard_erase/xarm7_gello_whiteboard_erase.yaml) | `datasets/xarm7_gello_tasks/whiteboard_erase` | `ufactory/xarm7_gello_whiteboard_erase` |

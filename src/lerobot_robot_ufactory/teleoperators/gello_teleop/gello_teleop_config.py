@@ -55,7 +55,7 @@ class GelloTeleopConfig(TeleoperatorConfig):
     # independent hard ceiling of 100 mA and checks ID8's hardware Current Limit.
     gripper_current_limit_ma: Optional[float] = None
     feedback: GelloFeedbackConfig = field(default_factory=GelloFeedbackConfig)
-    # Keyboard gripper: distance closed/opened per quick tap of C/O (mm).
+    # Keyboard gripper: initial C/O step while pressed (mm), cancelled on release.
     # Must be > 0; Recommended >= 2 mm.
     gripper_keyboard_step_mm: float = 5.0
     # Keyboard gripper: how long C/O must be held (seconds) before the

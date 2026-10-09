@@ -50,6 +50,7 @@ class CurrentRuntime:
         self._state = None
         self._latest_record = None
         self._error = None
+        self._cleanup_error = None
         self._status = "created"
         self._records = deque(maxlen=2048)
         self.dropped_records = 0
@@ -102,11 +103,15 @@ class CurrentRuntime:
                     self._stop.set()
                     break
                 tick = time.monotonic()
+                dt = period if count == 0 else tick - previous
+                # Reject a stalled loop before sending management commands or
+                # spending another serial transaction on an already failed tick.
+                if not 0 < dt <= p.state_timeout_s:
+                    raise RuntimeError("Invalid or stale control interval")
                 self._service_commands()
                 state = self.transport.state()
                 now = time.monotonic()
                 age = now - state["stamp"]
-                dt = period if count == 0 else tick - previous
                 if age > p.state_timeout_s:
                     raise RuntimeError("GELLO state read exceeded timeout")
                 if max(state["temperature_c"]) >= self.temperature_limit_c:
@@ -175,10 +180,12 @@ class CurrentRuntime:
             try:
                 self.transport.disable()
             except BaseException as exc:
+                self._cleanup_error = exc
                 self._error = RuntimeError(f"{self._error or 'Stop'}; {exc}")
             try:
                 self.transport.close()
             except BaseException as exc:
+                self._cleanup_error = self._cleanup_error or exc
                 self._error = self._error or exc
             self._status = "fault" if self._error else "stopped"
             while True:
@@ -339,13 +346,18 @@ class CurrentRuntime:
                 )
         if raise_on_fault:
             self.raise_if_failed()
+        elif self._cleanup_error is not None:
+            raise RuntimeError(
+                f"GELLO {self.profile.name} cleanup failed: {self._cleanup_error}"
+            ) from self._cleanup_error
 
     # Minimal interface consumed by the existing ContinuousDynamixelRobot.
     def get_joints(self):
         return self.state()["position"]
 
     def close(self):
-        self.stop()
+        # The control path reports latched faults; closing still verifies unload.
+        self.stop(raise_on_fault=False)
 
 
 class RuntimeRobot:

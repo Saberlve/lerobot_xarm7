@@ -21,7 +21,10 @@ from lerobot.scripts.lerobot_record import RecordConfig as LeRobotRecordConfig
 from lerobot.datasets.utils import DEFAULT_FEATURES
 from lerobot_robot_ufactory.teleoperators.uf_mock_teleop import UFMockTeleop
 from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
-from lerobot_robot_ufactory.utils.realtime_teleop import RealtimeTeleopController
+from lerobot_robot_ufactory.utils.realtime_teleop import (
+    RealtimeTeleopController,
+    apply_keyboard_gripper_stop,
+)
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 from lerobot_robot_ufactory.utils.web_preview import RecordingWebPreview, WebPreviewConfig
 from lerobot_robot_ufactory.utils.episode_images import discard_episode_images, validate_episode_images
@@ -1238,6 +1241,7 @@ def record_loop(
             # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
             if realtime_controller is None:
                 action_send_start_ns = time.perf_counter_ns()
+                robot_action_to_send = apply_keyboard_gripper_stop(robot, teleop, robot_action_to_send)
                 _sent_action = robot.send_action(robot_action_to_send)
                 action_send_end_ns = time.perf_counter_ns()
                 action_send_start_s = action_send_start_ns / 1_000_000_000
