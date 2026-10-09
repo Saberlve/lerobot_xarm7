@@ -3,8 +3,7 @@
 # .venv/bin/uf-lerobot-record --config_path config/gello/xarm7_gello_base_wzy_10_test.yaml
 
 synchronize: true
-# Checkpoint raw images/data during recording; process episodes after recording ends.
-defer_processing: true
+# Save each episode with video encoding and offline Mesh3DFlow before the next recording.
 # Compute Mesh3DFlow from saved Rectify images and write the results to the dataset:
 # observation.photon_right.mesh_motion_3d / observation.photon_left.mesh_motion_3d.
 # This offline output is enabled even though save_marker_motion_3d above is false.

@@ -92,7 +92,7 @@ def session(tmp_path, monkeypatch):
     import lerobot_robot_ufactory.tactile.deferred as deferred
 
     class Camera:
-        deferred_feature_shapes = {}
+        deferred_feature_shapes = {"mesh_motion_3d": (2, 2, 3)}
 
         def runtime_manifest(self):
             return {}
@@ -159,7 +159,6 @@ def session(tmp_path, monkeypatch):
         policy=None,
         resume=False,
         offline_mesh3dflow=False,
-        defer_processing=False,
         web_preview=recording.WebPreviewConfig(),
         synchronize=True,
         play_sounds=False,
@@ -206,10 +205,10 @@ def session(tmp_path, monkeypatch):
             assert not dataset._get_image_file_dir(1, "observation.images.photon").exists()
             assert not dataset.image_writer._stopped
             if cfg.offline_mesh3dflow:
-                assert dataset._get_image_file_dir(0, "observation.images.photon").exists()
+                assert state.mesh_episodes == [0]
                 staging = dataset.root / "tactile_streams/.staging"
                 assert not staging.exists() or not any(staging.iterdir())
-                assert (dataset.root / "raw_episodes/episode_000000/manifest.json").exists()
+                assert dataset.num_episodes == 1
                 assert (
                     dataset.root / "tactile_streams/photon/episode_000000/samples.parquet"
                 ).exists()
@@ -217,7 +216,15 @@ def session(tmp_path, monkeypatch):
                 dataset.events["stop_recording"] = True
         return ""
 
-    def compute_mesh(dataset, cameras, runtime_dir, episode_index, **kwargs):
+    def compute_mesh(dataset, cameras, runtime_dir, episode_index, episode_buffer=None):
+        buffer = dataset.episode_buffer if episode_buffer is None else episode_buffer
+        assert buffer["episode_index"] == episode_index
+        assert dataset.num_episodes == episode_index
+        assert robot._is_connected
+        buffer["observation.photon.mesh_motion_3d"] = [
+            np.full((2, 2, 3), episode_index + 1, dtype=np.float32)
+            for _ in range(buffer["size"])
+        ]
         state.mesh_episodes.append(episode_index)
 
     def postprocess(dataset, cameras):
@@ -248,19 +255,18 @@ def session(tmp_path, monkeypatch):
         state.dataset.image_writer.stop()
 
 
-@pytest.mark.parametrize("mode", ["sync", "async", "offline", "raw", "raw_async"])
+@pytest.mark.parametrize("mode", ["sync", "async", "offline", "offline_async"])
 @pytest.mark.parametrize("failure_frames", [0, 1])
 @pytest.mark.parametrize("stop_after_timeout", [False, True])
 def test_timeout_preserves_previous_episode(
     session, mode, failure_frames, stop_after_timeout, caplog
 ):
-    session.cfg.offline_mesh3dflow = mode == "offline"
-    session.cfg.defer_processing = mode in ("raw", "raw_async")
-    session.cfg.dataset.video = mode == "offline"
+    session.cfg.offline_mesh3dflow = mode.startswith("offline")
+    session.cfg.dataset.video = mode.startswith("offline")
     session.robot.failure_frames = failure_frames
     session.stop_after_timeout = stop_after_timeout
 
-    dataset = recording.record(session.cfg, async_save=mode in ("async", "raw_async"))
+    dataset = recording.record(session.cfg, async_save=mode in ("async", "offline_async"))
 
     expected = 1 if stop_after_timeout else 2
     assert dataset.num_episodes == expected
@@ -270,7 +276,14 @@ def test_timeout_preserves_previous_episode(
     assert dataset.saved[0]["frames"][0]["observation.state"].tolist() == [0.0]
     if not stop_after_timeout:
         assert dataset.saved[1]["frames"][0]["observation.state"].tolist() == [3.0]
-    assert session.mesh_episodes == (list(range(expected)) if mode == "offline" else [])
+    assert session.mesh_episodes == (list(range(expected)) if mode.startswith("offline") else [])
+    if mode.startswith("offline"):
+        for index, buffer in enumerate(dataset.saved):
+            np.testing.assert_array_equal(
+                buffer["observation.photon.mesh_motion_3d"],
+                np.full((2, 2, 2, 3), index + 1, dtype=np.float32),
+            )
+    assert session.cfg.dataset.video_encoding_batch_size == 1
     assert dataset.finalized
     assert not session.robot._is_connected
     assert "Episode 1 synchronization timed out" in caplog.text
@@ -343,7 +356,7 @@ def test_keyboard_timeout_requires_release_and_new_start(session, monkeypatch):
 
     def main_loop_sleep(_duration):
         nonlocal sleeps_after_timeout
-        if session.robot.attempt == 1:
+        if session.robot.attempt == 2:
             # Keep Space held for two main-loop ticks. Neither may restart.
             assert session.dataset.episode_buffer["size"] == 0
             sleeps_after_timeout += 1
@@ -371,6 +384,72 @@ def test_keyboard_timeout_requires_release_and_new_start(session, monkeypatch):
     assert steps == ["stop"]
 
 
+@pytest.mark.parametrize("async_save", [False, True])
+def test_keyboard_discard_opens_and_resets_before_waiting_for_start(session, monkeypatch, async_save):
+    import time
+
+    session.robot.outcomes = [False, False, False]
+    keys = SimpleNamespace(space="space", enter="enter", right="right", left="left", esc="esc")
+    monkeypatch.setitem(sys.modules, "pynput", SimpleNamespace(keyboard=SimpleNamespace(Key=keys)))
+    monkeypatch.setattr(recording, "is_headless", lambda: False)
+    callbacks = {}
+    calls = []
+    wait_ticks = 0
+    original_reset = session.robot.reset_to_initial
+    original_add = Dataset.add_frame
+
+    def init_listener(events, on_press, on_release):
+        callbacks.update(press=on_press, release=on_release)
+        on_press(keys.space)
+        return SimpleNamespace(stop=lambda: None), events
+
+    def add_frame(dataset, frame):
+        original_add(dataset, frame)
+        if session.robot.attempt == 1 and dataset.episode_buffer["size"] == 2:
+            callbacks["press"](keys.left)
+
+    def open_gripper():
+        dataset = session.dataset
+        assert dataset.episode_buffer["episode_index"] == 1
+        assert dataset.episode_buffer["size"] == 0
+        assert not dataset._get_image_file_dir(1, "observation.images.photon").exists()
+        assert dataset.saved[0]["size"] == 2
+        calls.append("open")
+
+    def reset():
+        calls.append("reset")
+        original_reset()
+
+    def main_loop_sleep(_duration):
+        nonlocal wait_ticks
+        if session.robot.attempt == 2:
+            assert calls == ["reset", "reset", "open", "reset"]
+            assert session.robot.observation_count == 0
+            assert session.dataset.episode_buffer["size"] == 0
+            wait_ticks += 1
+            if wait_ticks == 3:
+                callbacks["release"](keys.space)
+            elif wait_ticks == 4:
+                callbacks["press"](keys.space)
+            elif wait_ticks > 4:
+                pytest.fail("discarded episode did not restart on a fresh Space press")
+
+    monkeypatch.setattr(recording, "init_keyboard_listener", init_listener)
+    monkeypatch.setattr(session.robot, "open_gripper", open_gripper, raising=False)
+    monkeypatch.setattr(session.robot, "reset_to_initial", reset)
+    monkeypatch.setattr(Dataset, "add_frame", add_frame)
+    monkeypatch.setattr(recording, "time", SimpleNamespace(
+        sleep=main_loop_sleep, perf_counter=time.perf_counter,
+        perf_counter_ns=time.perf_counter_ns, time=time.time,
+    ))
+    dataset = recording.record(session.cfg, async_save=async_save)
+    assert wait_ticks == 4
+    assert calls == ["reset", "reset", "open", "reset"]
+    assert [row["episode_index"] for row in dataset.saved] == [0, 1]
+    assert dataset.saved[1]["frames"][0]["observation.state"].tolist() == [2.0]
+    assert session.retry_prompts == 0
+
+
 def test_timeout_with_exit_request_still_discards_current_episode(session, monkeypatch):
     original_observation = session.robot.get_observation
 
@@ -392,8 +471,8 @@ def test_timeout_with_exit_request_still_discards_current_episode(session, monke
 def test_timeout_while_preparing_next_episode_is_recoverable(session, monkeypatch):
     original_prepare = recording._prepare_recording_episode
 
-    def prepare(robot, teleop, is_uf_teleop, manual_mode):
-        original_prepare(robot, teleop, is_uf_teleop, manual_mode)
+    def prepare(robot, teleop, is_uf_teleop, manual_mode, **kwargs):
+        original_prepare(robot, teleop, is_uf_teleop, manual_mode, **kwargs)
         if robot.outcomes[robot.attempt]:
             raise TimeoutError("no synchronized observation while enabling teleop")
 
@@ -420,16 +499,36 @@ def test_discard_zero_frame_episode_waits_for_partial_image_writes(session):
 
 
 @pytest.mark.parametrize("async_save", [False, True])
-def test_device_error_leaves_completed_raw_episode_recoverable(session, async_save):
-    session.cfg.defer_processing = True
+def test_device_error_preserves_completed_offline_episode(session, async_save):
+    session.cfg.offline_mesh3dflow = True
+    session.cfg.dataset.video = True
     session.robot.failure = RuntimeError
     with pytest.raises(RuntimeError, match="camera synchronization failed"):
         recording.record(session.cfg, async_save=async_save)
-    store = recording.RawEpisodeStore(session.dataset)
-    paths = store.checkpoints(session.dataset.root)
-    assert len(paths) == 1
-    buffer, metadata = store.load(paths[0])
-    assert metadata["episode_index"] == 0
-    assert buffer["size"] == 2
-    assert session.dataset.num_episodes == 0  # No video/inference attempted.
-    np.testing.assert_array_equal(buffer["observation.state"], [[0.0], [0.0]])
+    assert session.dataset.num_episodes == 1
+    assert session.mesh_episodes == [0]
+    assert session.dataset.saved[0]["size"] == 2
+
+
+@pytest.mark.parametrize("async_save", [False, True])
+def test_mesh_failure_stops_save_and_preserves_previous_episode(session, monkeypatch, async_save):
+    from lerobot_robot_ufactory.tactile import deferred
+
+    session.cfg.offline_mesh3dflow = True
+    session.cfg.dataset.video = True
+    session.robot.outcomes = [False, False]
+    compute_mesh = deferred.compute_episode_mesh
+
+    def fail_second(dataset, cameras, runtime_dir, episode_index, **kwargs):
+        if episode_index == 1:
+            raise RuntimeError("mesh inference failed")
+        return compute_mesh(dataset, cameras, runtime_dir, episode_index, **kwargs)
+
+    monkeypatch.setattr(deferred, "compute_episode_mesh", fail_second)
+    message = "Async episode save failed" if async_save else "mesh inference failed"
+    with pytest.raises(RuntimeError, match=message):
+        recording.record(session.cfg, async_save=async_save)
+    assert session.dataset.num_episodes == 1
+    assert session.mesh_episodes == [0]
+    assert session.dataset.finalized
+    assert not session.robot._is_connected

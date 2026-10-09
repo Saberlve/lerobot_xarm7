@@ -37,7 +37,7 @@ INIT_SYNC_JOINT_VELOCITY_RAD = 0.2
 ROBOT_RESET_SPEED_DEG = 20
 TCP_Z_CLAMP_TOLERANCE_MM = 1e-3
 TCP_Z_LOG_INTERVAL_S = 1.0
-TCP_Z_MAX_IK_JOINT_STEP_RAD = math.radians(10.0)
+TCP_Z_MAX_JOINT_STEP_RAD = math.radians(10.0)
 LOCAL_GUARD_MAX_ITERATIONS = 8
 LOCAL_GUARD_JACOBIAN_DAMPING = 1e-6
 XARM7_JOINT_LOWER_RAD = np.asarray(
@@ -214,8 +214,6 @@ class UFRobot(Robot, Thread):
         self._max_linear_velocity = self.config.max_linear_velocity
 
         self._min_tcp_z_mm = self.config.min_tcp_z_mm
-        self._tcp_z_guard_activation_margin_mm = self.config.tcp_z_guard_activation_margin_mm
-        self._tcp_z_guard_backend = self.config.tcp_z_guard_backend
         self._tcp_z_soft_floor_mm = (
             None
             if self._min_tcp_z_mm is None
@@ -393,7 +391,7 @@ class UFRobot(Robot, Thread):
         return action_ft
 
     def _needs_local_kinematics(self) -> bool:
-        return self._tcp_z_guard_backend == "local_projection" or self._record_space in ("tcp", "both")
+        return self._min_tcp_z_mm is not None or self._record_space in ("tcp", "both")
 
     def connect(self, calibrate: bool = True) -> None:
         if self._needs_local_kinematics():
@@ -449,10 +447,7 @@ class UFRobot(Robot, Thread):
             self.reset_to_initial()
         # reset_to_initial clears any pre-existing controller error before
         # configuring APIs that may otherwise be rejected with code 1.
-        if (
-            self._tcp_z_guard_backend == "local_projection"
-            and self.config.controller_safety_boundary
-        ):
+        if self.config.controller_safety_boundary:
             self._configure_controller_safety_boundary()
         if self._min_tcp_z_mm is not None and self.config.manual_mode:
             self._initialize_tcp_z_guard()
@@ -700,6 +695,13 @@ class UFRobot(Robot, Thread):
             if "capture_monotonic_s" in timing:
                 timing["pair_skew_ms"] = pair_skew_ms
 
+    def open_gripper(self) -> None:
+        """Open the configured gripper before a recording reset."""
+        if not self._is_connected or self.real_arm is None:
+            raise ConnectionError("UF Robot is not connected")
+        if self._gripper_type > GripperType.NoGripper:
+            self._configure_gripper(move_to_open=True)
+
     def reset_to_initial(self) -> None:
         if not self._is_connected or self.real_arm is None:
             raise ConnectionError("UF Robot is not connected")
@@ -739,15 +741,14 @@ class UFRobot(Robot, Thread):
         if not np.all(np.isfinite(target)):
             raise RuntimeError("Unable to initialize TCP z guard from non-finite joint state")
         self._last_safe_joint_target = target
-        if self._tcp_z_guard_backend == "local_projection":
-            if self._local_kinematics is None:
-                raise RuntimeError("Local xArm7 kinematics has not been initialized")
-            current_z = float(self._local_kinematics.tcp_position(target)[2])
-            if current_z < self._min_tcp_z_mm:
-                raise RuntimeError(
-                    f"Current TCP z {current_z:.2f} mm is below the hard floor "
-                    f"{self._min_tcp_z_mm:.2f} mm"
-                )
+        if self._local_kinematics is None:
+            raise RuntimeError("Local xArm7 kinematics has not been initialized")
+        current_z = float(self._local_kinematics.tcp_position(target)[2])
+        if current_z < self._min_tcp_z_mm:
+            raise RuntimeError(
+                f"Current TCP z {current_z:.2f} mm is below the hard floor "
+                f"{self._min_tcp_z_mm:.2f} mm"
+            )
         self._tcp_z_is_clamped = False
         self._tcp_z_last_log_time = 0.0
         self._tcp_z_last_error_log_time = 0.0
@@ -860,11 +861,6 @@ class UFRobot(Robot, Thread):
             self._tcp_z_last_error_log_time = now
 
     def _guard_joint_target(self, command: list[float]) -> np.ndarray | None:
-        if getattr(self, "_tcp_z_guard_backend", "controller_rpc") == "local_projection":
-            return self._guard_joint_target_local(command)
-        return self._guard_joint_target_controller_rpc(command)
-
-    def _guard_joint_target_local(self, command: list[float]) -> np.ndarray | None:
         """Project a joint update onto the local TCP-height constraint."""
         desired = np.asarray(command, dtype=np.float64)
         fallback = self._last_safe_joint_target
@@ -883,7 +879,7 @@ class UFRobot(Robot, Thread):
             if previous.shape != (7,) or not np.all(np.isfinite(previous)):
                 raise RuntimeError("last safe joint target is invalid")
             delta = (desired - previous + math.pi) % (2 * math.pi) - math.pi
-            delta = np.clip(delta, -TCP_Z_MAX_IK_JOINT_STEP_RAD, TCP_Z_MAX_IK_JOINT_STEP_RAD)
+            delta = np.clip(delta, -TCP_Z_MAX_JOINT_STEP_RAD, TCP_Z_MAX_JOINT_STEP_RAD)
             candidate = np.clip(previous + delta, XARM7_JOINT_LOWER_RAD, XARM7_JOINT_UPPER_RAD)
             soft_floor = float(self._tcp_z_soft_floor_mm)
 
@@ -910,8 +906,8 @@ class UFRobot(Robot, Thread):
 
             projected_delta = (projected - previous + math.pi) % (2 * math.pi) - math.pi
             max_delta = float(np.max(np.abs(projected_delta)))
-            if max_delta > TCP_Z_MAX_IK_JOINT_STEP_RAD:
-                projected = previous + projected_delta * (TCP_Z_MAX_IK_JOINT_STEP_RAD / max_delta)
+            if max_delta > TCP_Z_MAX_JOINT_STEP_RAD:
+                projected = previous + projected_delta * (TCP_Z_MAX_JOINT_STEP_RAD / max_delta)
 
             projected_z = float(self._local_kinematics.tcp_position(projected)[2])
             if projected_z < soft_floor - TCP_Z_CLAMP_TOLERANCE_MM:
@@ -963,124 +959,6 @@ class UFRobot(Robot, Thread):
             )
             return False
         return True
-
-    def _guard_joint_target_controller_rpc(self, command: list[float]) -> np.ndarray | None:
-        """Return a safe joint target, or None when motion must be skipped."""
-        desired = np.asarray(command, dtype=np.float64)
-        if self._min_tcp_z_mm is None:
-            self._last_guard_path = "disabled"
-            return desired
-
-        fallback = self._last_safe_joint_target
-        try:
-            if desired.shape != (self._dof,) or not np.all(np.isfinite(desired)):
-                raise ValueError("joint target has invalid shape or contains NaN/Inf")
-
-            # Far above the floor, the current TCP height is available from
-            # the RT report. Bypass the synchronous controller FK call so the
-            # normal GELLO path keeps a stable command cadence. A large
-            # activation margin absorbs ordinary per-cycle motion changes.
-            if self._rt_actual_tcp_is_far_above_floor():
-                self._last_guard_path = "rt_fast_path"
-                self._last_safe_joint_target = desired.copy()
-                self._log_tcp_z_clamp(False)
-                return desired
-
-            code, pose = self.real_arm.get_forward_kinematics(
-                desired.tolist(), input_is_radian=True, return_is_radian=True
-            )
-            pose = np.asarray(pose, dtype=np.float64)
-            if code != 0 or pose.shape[0] < 6 or not np.all(np.isfinite(pose)):
-                raise RuntimeError(f"forward kinematics failed, code={code}")
-
-            requested_z = float(pose[2])
-            if requested_z >= self._min_tcp_z_mm:
-                self._last_guard_path = "fk_safe"
-                self._validate_guard_joint_target(desired, fallback, "GELLO target")
-                self._last_safe_joint_target = desired.copy()
-                self._log_tcp_z_clamp(False)
-                return desired
-
-            clamped_pose = pose[:6].copy()
-            clamped_pose[2] = self._min_tcp_z_mm
-            ik_reference = fallback if fallback is not None else desired
-            code, inverse = self.real_arm.get_inverse_kinematics(
-                clamped_pose.tolist(),
-                input_is_radian=True,
-                return_is_radian=True,
-                limited=True,
-                ref_angles=np.asarray(ik_reference, dtype=np.float64).tolist(),
-            )
-            inverse = np.asarray(inverse, dtype=np.float64)
-            if code != 0 or inverse.shape[0] < self._dof or not np.all(np.isfinite(inverse)):
-                raise RuntimeError(f"inverse kinematics failed, code={code}")
-
-            safe_target = inverse[:self._dof].copy()
-            self._last_guard_path = "fk_ik_clamp"
-            self._validate_guard_joint_target(safe_target, fallback, "clamped IK target")
-            code, verified_pose = self.real_arm.get_forward_kinematics(
-                safe_target.tolist(), input_is_radian=True, return_is_radian=True
-            )
-            verified_pose = np.asarray(verified_pose, dtype=np.float64)
-            if (
-                code != 0
-                or verified_pose.shape[0] < 3
-                or not np.all(np.isfinite(verified_pose))
-                or verified_pose[2] < self._min_tcp_z_mm - TCP_Z_CLAMP_TOLERANCE_MM
-            ):
-                raise RuntimeError(f"inverse-kinematics result is below the TCP z floor, code={code}")
-
-            self._last_safe_joint_target = safe_target
-            self._log_tcp_z_clamp(True, requested_z)
-            return safe_target
-        except Exception as exc:
-            self._last_guard_path = "fallback"
-            self._log_tcp_z_guard_error(str(exc))
-            if fallback is None:
-                return None
-            return np.asarray(fallback, dtype=np.float64).copy()
-
-    def _validate_guard_joint_target(
-        self,
-        target: np.ndarray,
-        previous_safe_target: np.ndarray | None,
-        label: str,
-    ) -> None:
-        code, is_limited = self.real_arm.is_joint_limit(target.tolist(), is_radian=True)
-        if code != 0 or is_limited is not False:
-            raise RuntimeError(
-                f"{label} violates a joint limit, code={code}, limited={is_limited}, "
-                f"target={target.tolist()}"
-            )
-
-        if previous_safe_target is None:
-            return
-        previous = np.asarray(previous_safe_target, dtype=np.float64)
-        if previous.shape != target.shape or not np.all(np.isfinite(previous)):
-            raise RuntimeError("previous safe joint target is invalid")
-        delta = (target - previous + math.pi) % (2 * math.pi) - math.pi
-        max_delta = float(np.max(np.abs(delta)))
-        if max_delta > TCP_Z_MAX_IK_JOINT_STEP_RAD:
-            raise RuntimeError(
-                f"{label} jumps {math.degrees(max_delta):.1f} deg from the previous safe target"
-            )
-
-    def _rt_actual_tcp_is_far_above_floor(self) -> bool:
-        if self._min_tcp_z_mm is None or not getattr(self, "_rt_report_normal", False):
-            return False
-        update_lock = getattr(self, "_update_lock", None)
-        if update_lock is None:
-            return False
-        with update_lock:
-            pose = getattr(self, "rt_actual_tcp_pose", None)
-            if pose is None or len(pose) < 3:
-                return False
-            actual_z = float(pose[2])
-        activation_margin = getattr(self, "_tcp_z_guard_activation_margin_mm", 100.0)
-        return (
-            math.isfinite(actual_z)
-            and actual_z > self._min_tcp_z_mm + activation_margin
-        )
 
     def configure(self) -> None:
         self.real_arm.motion_enable()

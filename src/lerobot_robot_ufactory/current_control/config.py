@@ -1,6 +1,7 @@
 """Per-device current settings and viewer calibration; angles are radians and currents are amperes."""
 
 import math
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -173,6 +174,16 @@ class DeviceProfile:
         self.urdf = (self.path.parent / d["urdf"]).resolve()
         if not self.urdf.is_file():
             raise ValueError(f"Missing URDF: {self.urdf}")
+
+    def arm_only(self):
+        """Select the seven arm motors for callers that do not use GELLO ID8."""
+        profile = deepcopy(self)
+        profile.gripper_id = -1
+        profile.all_ids = profile.ids
+        profile.model_numbers = profile.model_numbers[:len(profile.ids)]
+        profile.data["gripper_id"] = -1
+        profile.data["model_numbers"] = list(profile.model_numbers)
+        return profile
 
     def validate_experiment(self):
         """Electrical bounds for fixed-current control, independent of the model."""

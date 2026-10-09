@@ -437,6 +437,22 @@ def test_realtime_controller_propagates_send_failures():
         controller.start()
 
 
+def test_fault_cleanup_can_stop_without_replacing_an_active_exception():
+    controller = RealtimeTeleopController(
+        FakeRobot(), FakeTeleop(), identity_action_processor, identity_action_processor,
+        fps=30, initial_observation={},
+    )
+    cause = RuntimeError("sync read reply ID8: communication=-3001, device_error=0")
+    controller._exception = cause
+    controller.stop(raise_on_fault=False)
+    assert controller._stop.is_set()
+    with pytest.raises(RuntimeError, match="Realtime joint control thread failed") as error:
+        controller.raise_if_failed()
+    assert error.value.__cause__ is cause
+    with pytest.raises(RuntimeError):
+        controller.stop()
+
+
 def _current_sample(
     current_ma=100.0,
     *,

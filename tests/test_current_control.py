@@ -363,6 +363,136 @@ def test_write_failure_latches_fault(profile, tmp_path):
         runtime.start()
     assert runtime.status()["state"] == "fault"
     assert transport.calls[-2:] == ["disable", "close"]
+    with pytest.raises(RuntimeError, match="injected write failure"):
+        runtime.state()
+
+
+@pytest.mark.parametrize("delay_phase", ["compute", "write"])
+def test_follower_reads_fresh_encoders_during_current_processing(experimental_profile, monkeypatch, delay_phase):
+    from types import SimpleNamespace
+    from lerobot_robot_ufactory.current_control.control import runtime as runtime_module
+
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(runtime_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    observations = []
+
+    class StopEvent:
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def wait(self, timeout):
+            clock.now += timeout
+
+    class TimedTransport(FakeTransport):
+        reads = 0
+        writes = 0
+
+        def state(self):
+            self.reads += 1
+            result = super().state()
+            result["stamp"] = clock.now
+            result["position"] = np.full(7, 0.01 * self.reads)
+            result["velocity"] = np.zeros(7)
+            clock.now += 0.010
+            return result
+
+        def currents(self, current, gripper=None):
+            self.writes += 1
+            if self.writes == 1:
+                # Startup still waits for the first successful current write.
+                assert not runtime._ready.is_set()
+            super().currents(current, gripper)
+            if self.writes == 2:
+                if delay_phase == "write":
+                    clock.now += 0.016
+                    read_follower()
+                clock.now += 0.009
+            else:
+                clock.now += 0.025
+            if self.writes == 3:
+                runtime.request_stop()
+
+    transport = TimedTransport()
+    runtime = CurrentRuntime(
+        experimental_profile.arm_only(), live=True, teleop=True, transport=transport,
+    )
+    runtime._stop = StopEvent()
+    follower = RuntimeRobot(runtime, [1] * 7, None)
+
+    def read_follower():
+        state = runtime.state()
+        # The previous published frame would now be 61 ms old. The newly
+        # read frame is only 26 ms old, even though this tick has not finished.
+        observations.append((clock.now - state["stamp"], follower.get_joint_state().copy()))
+        assert runtime.diagnostics()["record"]["position"][0] == pytest.approx(0.01)
+
+    original_compute = runtime.controller.compute
+
+    def compute(*args):
+        if transport.reads == 2 and delay_phase == "compute":
+            clock.now += 0.016
+            read_follower()
+        return original_compute(*args)
+
+    monkeypatch.setattr(runtime.controller, "compute", compute)
+    runtime._run()
+    runtime.raise_if_failed()
+    assert len(observations) == 1
+    age, position = observations[0]
+    assert age == pytest.approx(0.026)
+    assert np.allclose(position, 0.02)
+    records = runtime.drain_records()
+    assert len(records) == 3
+    assert all(record["work_s"] == pytest.approx(0.035) for record in records)
+    assert all(record["interval_s"] <= 0.05 for record in records)
+    assert transport.calls[-2:] == ["disable", "close"]
+
+
+@pytest.mark.parametrize("fault, message", [
+    ("position_shape", "Unexpected state shape"),
+    ("position_nan", "Non-finite encoder state"),
+    ("velocity_nan", "Non-finite encoder state"),
+    ("temperature", "temperature exceeded"),
+    ("voltage", "supply voltage outside"),
+    ("stale", "state read exceeded timeout"),
+])
+def test_invalid_encoder_read_does_not_replace_valid_cache(experimental_profile, fault, message):
+    class InvalidTransport(FakeTransport):
+        reads = 0
+
+        def state(self):
+            self.reads += 1
+            result = super().state()
+            if self.reads == 2:
+                if fault == "position_shape":
+                    result["position"] = np.zeros(6)
+                elif fault == "position_nan":
+                    result["position"][0] = np.nan
+                elif fault == "velocity_nan":
+                    result["velocity"][0] = np.nan
+                elif fault == "temperature":
+                    result["temperature_c"][0] = 60
+                elif fault == "voltage":
+                    result["voltage_v"][0] = 7
+                elif fault == "stale":
+                    result["stamp"] -= 1
+            else:
+                self.valid_stamp = result["stamp"]
+            return result
+
+    transport = InvalidTransport()
+    runtime = CurrentRuntime(experimental_profile, live=True, teleop=True, transport=transport)
+    runtime._run()
+    assert runtime._state["stamp"] == transport.valid_stamp
+    assert transport.calls.count("write") == 1
+    assert transport.calls[-2:] == ["disable", "close"]
+    with pytest.raises(RuntimeError, match=message):
+        runtime.state()
 
 
 @pytest.mark.parametrize("delay_phase", ["idle", "read", "write"])
@@ -583,6 +713,140 @@ def test_teleop_uses_one_runtime_and_pause_keeps_support(profile, tmp_path, monk
     finally:
         teleop.disconnect()
     assert actual.status()["state"] == "stopped"
+
+
+def test_arm_only_profile_does_not_modify_shared_gripper_configuration(profile):
+    selected = profile.arm_only()
+    assert selected.gripper_id == -1
+    assert selected.all_ids == tuple(range(1, 8))
+    assert len(selected.model_numbers) == 7
+    assert selected.data["gripper_id"] == -1
+    assert profile.gripper_id == profile.data["gripper_id"] == 8
+    assert profile.all_ids == tuple(range(1, 9))
+    assert len(profile.data["model_numbers"]) == 8
+
+
+def missing_id_transport_factory(missing_id, transports):
+    """Use the actual sync-read parser, injecting an absent motor reply."""
+    from types import SimpleNamespace
+    from dynamixel_sdk import COMM_RX_TIMEOUT
+
+    class MissingReplyTransport(XL330Transport):
+        def __init__(self, profile):
+            super().__init__(profile)
+            self.read_ids = []
+            self.calls = []
+            transports.append(self)
+
+        def open(self):
+            self.calls.append("open")
+            self.reader = SimpleNamespace(txPacket=lambda: 0)
+            payload = bytearray(21)
+            payload[18:20] = (50).to_bytes(2, "little")
+            payload[20] = 25
+
+            def read_reply(port, dxl_id, length):
+                self.read_ids.append(dxl_id)
+                if dxl_id == missing_id:
+                    return [], COMM_RX_TIMEOUT, 0
+                return payload, 0, 0
+
+            self.packet = SimpleNamespace(readRx=read_reply)
+
+        def enable(self, **kwargs):
+            self.calls.append("enable")
+
+        def currents(self, current, gripper=None):
+            self.calls.append("write")
+
+        def disable(self):
+            self.calls.append("disable")
+
+        def close(self):
+            self.calls.append("close")
+
+    return MissingReplyTransport
+
+
+def test_keyboard_recording_can_discard_and_realign_without_reading_id8(profile, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from lerobot_robot_ufactory.current_control.config import CurrentControlConfig
+    from lerobot_robot_ufactory.current_control.control import runtime as runtime_module
+    from lerobot_robot_ufactory.scripts.uf_lerobot_record import _discard_current_episode
+    from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop import GelloTeleop
+    from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import GelloTeleopConfig
+
+    p = commissioned(profile, tmp_path)
+    transports = []
+    monkeypatch.setattr(runtime_module, "XL330Transport", missing_id_transport_factory(8, transports))
+    teleop = GelloTeleop(GelloTeleopConfig(
+        port=p.port, current_control=CurrentControlConfig(True, str(p.path)),
+        gripper_control_mode="keyboard",
+    ))
+    assert teleop._dynamixel_robo_config.gripper_config is None
+    dataset = SimpleNamespace(
+        root=tmp_path / "dataset",
+        meta=SimpleNamespace(features={"wrist": {"dtype": "image"}}),
+        episode_buffer={"episode_index": 6, "size": 1, "action": [0.0]},
+        _wait_image_writer=lambda: None,
+    )
+    dataset._get_image_file_dir = lambda index, key: dataset.root / "images" / key / f"episode_{index:06d}"
+    saved_dir = dataset._get_image_file_dir(5, "wrist")
+    saved_dir.mkdir(parents=True)
+    (saved_dir / "frame-000000.png").write_bytes(b"saved episode")
+    try:
+        teleop.connect()
+        runtime = teleop._current_runtime
+        assert runtime.profile.all_ids == tuple(range(1, 8))
+        assert runtime.get_joints().shape == (7,)
+        for attempt in range(3):
+            pose = {f"J{i}.pos": attempt / 10 for i in range(1, 8)} | {"gripper.pos": 0.6}
+            teleop.set_teleop_enabled(True, pose)
+            action = teleop.get_action()
+            assert action["J1.pos"] == pytest.approx(attempt / 10)
+            assert action["gripper.pos"] == pytest.approx(0.6)
+            current_dir = dataset._get_image_file_dir(6, "wrist")
+            current_dir.mkdir(parents=True)
+            (current_dir / "frame-000000.png").write_bytes(b"discarded episode")
+            teleop.set_teleop_enabled(False)
+            _discard_current_episode(dataset)
+            assert not current_dir.exists()
+            assert dataset.episode_buffer["episode_index"] == 6
+            assert dataset.episode_buffer["size"] == 0
+            assert (saved_dir / "frame-000000.png").read_bytes() == b"saved episode"
+            runtime.raise_if_failed()
+        assert transports[0].calls.count("open") == 1
+        assert 8 not in transports[0].read_ids
+    finally:
+        teleop.disconnect()
+    assert transports[0].calls.count("disable") == transports[0].calls.count("close") == 1
+
+
+@pytest.mark.parametrize("gripper_mode,authorize_id8,missing_id", [
+    ("gello", False, 8), ("keyboard", True, 8), ("keyboard", False, 2),
+])
+def test_needed_motor_timeouts_still_stop_compensation(profile, tmp_path, monkeypatch,
+                                                     gripper_mode, authorize_id8, missing_id):
+    from lerobot_robot_ufactory.current_control.config import CurrentControlConfig
+    from lerobot_robot_ufactory.current_control.control import runtime as runtime_module
+    from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop import GelloTeleop
+    from lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop_config import GelloTeleopConfig
+
+    p = commissioned(profile, tmp_path)
+    transports = []
+    monkeypatch.setattr(runtime_module, "XL330Transport",
+                        missing_id_transport_factory(missing_id, transports))
+    teleop = GelloTeleop(GelloTeleopConfig(
+        port=p.port, current_control=CurrentControlConfig(True, str(p.path)),
+        gripper_control_mode=gripper_mode,
+        gripper_current_control_enabled=authorize_id8,
+        gripper_current_limit_ma=80 if authorize_id8 else None,
+    ))
+    with pytest.raises(RuntimeError, match=f"sync read reply ID{missing_id}.*-3001"):
+        teleop.connect()
+    assert not teleop.is_connected
+    assert transports[0].calls[-2:] == ["disable", "close"]
+    assert "write" not in transports[0].calls
 
 
 

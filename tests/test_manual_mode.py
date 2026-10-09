@@ -250,7 +250,7 @@ def test_recording_sync_timeout_stops_realtime_controller(monkeypatch):
         def start(self):
             calls.append("start")
 
-        def stop(self):
+        def stop(self, *, raise_on_fault=True):
             calls.append("stop")
 
         def latest_action_sample(self, *args, **kwargs):
@@ -278,6 +278,45 @@ def test_recording_sync_timeout_stops_realtime_controller(monkeypatch):
             teleop=Teleop(), control_time_s=1,
         )
     assert calls == ["start", "stop"]
+
+
+@pytest.mark.parametrize("capture_fails", [True, False])
+def test_record_loop_preserves_capture_fault_and_reports_fault_on_normal_stop(monkeypatch, capture_fails):
+    calls = []
+    capture_error = ValueError("injected capture fault")
+
+    class Teleop:
+        config = SimpleNamespace(realtime_control_fps=30)
+
+    class Controller:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            if capture_fails:
+                raise capture_error
+
+        def stop(self, *, raise_on_fault=True):
+            calls.append(raise_on_fault)
+            if raise_on_fault:
+                raise RuntimeError("injected control fault")
+
+    robot = SimpleNamespace(
+        _control_space="joint", enable_logs=False, action_features={"J1.pos": float},
+        get_observation=lambda: {"J1.pos": 0.0}, get_realtime_observation=lambda: {},
+    )
+    monkeypatch.setattr(record_module, "UFBaseTeleop", Teleop)
+    monkeypatch.setattr(record_module, "RealtimeTeleopController", Controller)
+    pipelines = record_module.make_default_processors()
+    expected = ValueError if capture_fails else RuntimeError
+    with pytest.raises(expected) as failure:
+        record_module.record_loop(
+            robot, {"exit_early": False}, 30, *pipelines,
+            teleop=Teleop(), control_time_s=0,
+        )
+    assert calls == [not capture_fails]
+    if capture_fails:
+        assert failure.value is capture_error
 
 
 def test_first_tick_skips_stale_first_action_anchor(monkeypatch):
@@ -394,7 +433,7 @@ def test_first_tick_skips_stale_first_action_anchor(monkeypatch):
         def start(self):
             pass
 
-        def stop(self):
+        def stop(self, *, raise_on_fault=True):
             producer.stop()
 
         def update_observation(self, obs):
@@ -669,6 +708,56 @@ def test_normal_mode_waits_for_gripper_to_open_before_control(monkeypatch, tmp_p
     )
     assert after_writes == before_writes
 
+    robot.disconnect()
+
+
+@pytest.mark.parametrize("gripper_type, open_position, api", [
+    (1, 800, "set_gripper_position"),
+    (2, 84, "set_gripper_g2_position"),
+])
+@pytest.mark.parametrize("open_fails", [False, True])
+def test_discard_reset_waits_for_gripper_before_arm_motion(
+    monkeypatch, tmp_path, gripper_type, open_position, api, open_fails,
+):
+    from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
+
+    arm = FakeXArm("192.168.1.245")
+    monkeypatch.setattr(uf_robot_module, "XArmAPI", lambda robot_ip: arm)
+    monkeypatch.setattr(uf_robot_module.time, "sleep", lambda _: None)
+    robot = UFRobot(UFRobotConfig(
+        calibration_dir=tmp_path, robot_ip=arm.robot_ip, robot_dof=6,
+        gripper_type=gripper_type, manual_mode=True, gripper_error_log_path=None,
+    ))
+    robot.connect()
+    arm.calls.clear()
+    arm.gripper_position = 0
+    arm.gripper_g2_position = 0
+    robot._last_gripper_command = 1.0
+    original_open = getattr(arm, api)
+
+    def open_gripper(position, **kwargs):
+        assert kwargs["wait"] is True
+        assert not any(call[0] == "set_servo_angle" for call in arm.calls)
+        original_open(position, **kwargs)
+        return 23 if open_fails else 0
+
+    monkeypatch.setattr(arm, api, open_gripper)
+    if open_fails:
+        with pytest.raises(RuntimeError, match=f"{api} failed, code=23"):
+            record_module._reset_recording_robot(robot, open_gripper_first=True)
+        assert not any(call[0] == "set_servo_angle" for call in arm.calls)
+        assert robot._last_gripper_command == 1.0
+    else:
+        record_module._reset_recording_robot(robot, open_gripper_first=True)
+        opens = [i for i, call in enumerate(arm.calls) if call[0] == api]
+        resets = [i for i, call in enumerate(arm.calls) if call[0] == "set_servo_angle"]
+        assert len(opens) == len(resets) == 1
+        assert opens[0] < resets[0]
+        assert arm.calls[opens[0]][1] == open_position
+        assert robot._last_gripper_command == 0.0
+        assert robot._gripper_param.gripper_norm == 0.0
+        assert arm.mode == 2
+    assert arm._arm._baud_checkset is False
     robot.disconnect()
 
 

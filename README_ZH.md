@@ -190,26 +190,20 @@ uv run record --config_path config/gello/xarm7_gello_record_config.yaml -a
 
 按键控制：`Space` 开始当前 episode，`→` 保存，`←` 放弃并重录，`Esc` 停止录制。每个 episode 之间机械臂会自动复位到初始点。
 
-默认 `defer_processing: true`：每段结束先等待图像写入完成，将动作、状态、任务和
-时间戳保存到 `raw_episodes/episode_XXXXXX/frames.parquet`，同时保存图像路径、
-触觉原始流及时间对应关系。相机 PNG 保留在 `images/`。按 `Esc` 或达到 episode
-数量上限后，先断开录制设备，再统一编码视频并计算启用的离线 Mesh3DFlow。
-后处理成功且最终数据集保存完成后，删除 `images/` 下对应 episode 的相机原始
-PNG；失败时保留，便于重试。checkpoint 和全采样率的触觉原始流仍保留。
+每条 episode 录制结束后，等待图像写入完成，计算启用的离线 Mesh3DFlow，
+编码该条视频，并保存 LeRobot 数据、触觉原始流及时间对应关系。默认等待当前
+episode 保存完成后再开始下一条；使用 `-a` 时，每条 episode 在后台完成推理、
+编码和保存，退出前等待所有保存任务完成。
 
-同步超时只丢弃当前 episode，等待 `Space`（无键盘监听时按 `Enter`）重录，
-之前保存的原始 episode 不受影响。其他异常仍报错退出，但已完成的原始 episode
-会保留。使用同一份配置可单独重跑后处理，不连接录制设备：
+同步超时只丢弃当前 episode，等待 `Space`（无键盘监听时按 `Enter`）重录。
+后续录制异常不会影响此前已经保存的 episode。
+
+旧版本录制留下的未处理原始 checkpoint，需要使用原配置运行以下命令后再续录，
+此命令不连接录制设备：
 
 ```bash
-uv run record --config_path config/gello/xarm7_gello_record_xense_photon_config.yaml --postprocess-only
+uv run record --config_path config/gello/xarm7_gello_base.yaml --postprocess-only
 ```
-
-续录时会从已保存的原始 episode 后继续编号；下一次正常结束时一起处理尚未转换的
-episode。关闭离线 Mesh3DFlow 后，可以设置 `defer_processing: false` 恢复每段立即
-保存 LeRobot 数据集的方式。
-若仍有未后处理的原始 episode，关闭延迟处理后的续录会在创建设备前被阻止。
-请先运行 `--postprocess-only`，或保持 `defer_processing: true` 续录。
 
 > 采集过程中**机械臂与相机（D435 / D435i）的相对位置必须保持不变**，推理时的相机位置必须与采集时一致。若机械臂或相机发生变化，此前采集的数据将失效。
 

@@ -19,12 +19,12 @@ class XensePhotonCameraConfig(TactileCameraConfig):
     config_path: str | None = None
     # Save the SDK Marker3DFlow output with the RGB image. The SDK documents
     # this as the 3D marker displacement field.
-    disable_infer: bool = False
-    save_marker_motion_3d: bool = True
+    disable_infer: bool = True
+    save_marker_motion_3d: bool = False
     # Legacy save_marker_motion_3d enables the selected displacement output.
     # Mesh3DFlow and Marker3DFlow have distinct dataset feature names.
-    motion_3d_output: str = "Marker3DFlow"
-    infer_mode: str | None = None
+    motion_3d_output: str = "Mesh3DFlow"
+    infer_mode: str | None = "fast"
     marker_rows: int = 35
     marker_cols: int = 20
     # Recent complete SDK samples retained for timestamp-bounded pairing by

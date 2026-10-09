@@ -16,6 +16,36 @@ logger = logging.getLogger(__name__)
 GRIPPER_CURRENT_FEEDBACK_KEY = "gripper.current_ma"
 
 
+def update_gello_joint_mode_key(teleop, key, pressed: bool) -> None:
+    """Route S/s to the opt-in mode without importing the keyboard backend."""
+    if getattr(key, "char", None) in ("s", "S"):
+        handler = getattr(teleop, "set_joint7_mode_key", None)
+        if callable(handler):
+            handler(pressed)
+
+
+def apply_pending_gello_joint_mode(robot, teleop, observation: dict) -> None:
+    """Switch on the robot I/O owner; use fresh RT feedback without camera reads."""
+    pending = getattr(teleop, "joint_control_mode_switch_pending", None)
+    if not callable(pending) or not pending():
+        return
+    if getattr(robot, "_control_space", None) != "joint":
+        raise ValueError("GELLO J7-only mode requires joint-space robot control")
+    latest_state = getattr(robot, "latest_state_before", None)
+    if callable(latest_state):
+        sample = latest_state(time.perf_counter())
+        joint_observation = {
+            f"J{i + 1}.pos": position
+            for i, position in enumerate(sample.joint_positions)
+        }
+    else:
+        prefix = getattr(robot, "prefix", "")
+        joint_observation = {
+            f"J{i}.pos": observation[f"{prefix}J{i}.pos"] for i in range(1, 7)
+        }
+    teleop.apply_pending_joint_control_mode(joint_observation)
+
+
 def apply_keyboard_gripper_stop(robot, teleop, command: dict) -> dict:
     """Handle release after action processing, on the robot I/O owner thread."""
     consume_stop = getattr(teleop, "consume_gripper_stop_request", None)
@@ -499,14 +529,17 @@ class RealtimeTeleopController:
             raise RuntimeError("Timed out waiting for the first realtime joint action")
         self.raise_if_failed()
 
-    def stop(self) -> None:
+    def stop(self, *, raise_on_fault: bool = True) -> None:
         self._stop.set()
         with self._action_condition:
             self._action_condition.notify_all()
         if self._thread.is_alive():
             self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                raise RuntimeError("Realtime joint control worker did not stop")
         self._safe_stop_feedback_output()
-        self.raise_if_failed()
+        if raise_on_fault:
+            self.raise_if_failed()
 
     def update_observation(self, observation: dict) -> None:
         with self._lock:
@@ -696,6 +729,7 @@ class RealtimeTeleopController:
                             gripper_position = cached_position
                     update_gripper_observation(gripper_position)
                 read_start_ns = time.perf_counter_ns()
+                apply_pending_gello_joint_mode(self.robot, self.teleop, observation)
                 action = self.teleop.get_action()
                 read_end_ns = time.perf_counter_ns()
                 processed = self.teleop_action_processor((action, observation))

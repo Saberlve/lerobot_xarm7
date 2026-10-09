@@ -76,7 +76,6 @@ class HeightModel:
 def make_local_guard_robot():
     robot = UFRobot.__new__(UFRobot)
     robot._dof = 7
-    robot._tcp_z_guard_backend = "local_projection"
     robot._local_kinematics = HeightModel()
     robot._min_tcp_z_mm = 95.0
     robot._tcp_z_soft_floor_mm = 100.0
@@ -247,7 +246,7 @@ def test_axis_angle_continuous_avoids_pi_flip():
 def test_tcp_record_space_config_validation():
     from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 
-    UFRobotConfig(robot_dof=7, control_space="joint", record_space="tcp")
+    UFRobotConfig(robot_dof=7, control_space="joint", record_space="tcp", min_tcp_z_mm=50.0)
 
     with pytest.raises(ValueError, match="record_space must be"):
         UFRobotConfig(robot_dof=7, control_space="joint", record_space="bogus")
@@ -362,10 +361,11 @@ def test_convert_recording_passthrough_in_joint_space():
 def test_both_record_space_config_validation():
     from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 
-    UFRobotConfig(robot_dof=7, control_space="joint", record_space="both")
+    UFRobotConfig(robot_dof=7, control_space="joint", record_space="both", min_tcp_z_mm=50.0)
     # Joint velocity keys remain valid when joints stay in the dataset.
     UFRobotConfig(
-        robot_dof=7, control_space="joint", record_space="both", observe_joint_vel=True
+        robot_dof=7, control_space="joint", record_space="both", observe_joint_vel=True,
+        min_tcp_z_mm=50.0,
     )
 
     with pytest.raises(ValueError, match="requires joint control on an xArm7"):

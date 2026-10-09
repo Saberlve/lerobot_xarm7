@@ -30,6 +30,13 @@ class GelloTeleop(UFBaseTeleop):
         self._is_calibrated = True # CHECK!!
         self._current_runtime = None
         self._current_log = None
+        self._joint_mode_lock = threading.Lock()
+        self._joint_mode_key_pressed = False
+        self._joint_mode_toggle_pending = False
+        self._joint7_only_active = False
+        self._joint_mode_hold = None
+        self._joint_mode_offsets = np.zeros(6)
+        self._joint_mode_realign = None
         self._keyboard_gripper_state = {"close": False, "open": False}
         self._keyboard_gripper_target = None
         self._keyboard_gripper_observed_position = None
@@ -53,7 +60,12 @@ class GelloTeleop(UFBaseTeleop):
 
         joint_offsets = [0.0] * len(self.config.joint_ids)
         self._align_gripper_to_current = self.config.gripper_open_deg is None
-        if self.config.gripper_id >= 0:
+        use_gello_gripper = (
+            self.config.gripper_control_mode == "gello"
+            or self.config.gripper_current_control_enabled
+            or self.config.feedback.enabled
+        )
+        if self.config.gripper_id >= 0 and use_gello_gripper:
             if self.config.gripper_open_deg is not None:
                 gripper_open_deg = self.config.gripper_open_deg
                 gripper_close_deg = self.config.gripper_close_deg
@@ -138,6 +150,10 @@ class GelloTeleop(UFBaseTeleop):
         profile = current_config.load_profile()
         if profile.port != self.config.port or tuple(self.config.joint_ids) != profile.ids or self.config.gripper_id != profile.gripper_id:
             raise ValueError("Current profile port/joint IDs/gripper must match teleop config")
+        if self._dynamixel_robo_config.gripper_config is None:
+            # The keyboard target comes from xArm feedback, not the GELLO
+            # gripper encoder. Do not make ID8 replies a dependency of arm I/O.
+            profile = profile.arm_only()
         runtime = CurrentRuntime(profile, live=True, experimental=current_config.experimental, teleop=True)
         self._current_runtime = runtime
         self.gello_agent = RuntimeAgent(RuntimeRobot(runtime, self.config.joint_signs, self._dynamixel_robo_config.gripper_config))
@@ -326,6 +342,8 @@ class GelloTeleop(UFBaseTeleop):
             return
         if not hasattr(self, "gello_agent"):
             return
+        if getattr(self.gello_agent._robot, "gripper_open_close", ()) is None:
+            return
         failures = []
         try:
             self.gello_agent._robot.zero_gripper_current()
@@ -370,6 +388,7 @@ class GelloTeleop(UFBaseTeleop):
             raise DeviceNotConnectedError("Gello teleop is not connected")
 
         self._teleop_enabled = False
+        self._reset_joint_control_mode()
         self._safely_disable_gripper_current_mode("reset")
         gello_robot = self.gello_agent._robot
         driver = gello_robot._driver
@@ -425,8 +444,72 @@ class GelloTeleop(UFBaseTeleop):
             self._safely_disable_gripper_current_mode("pause")
             self.gello_agent._robot.set_torque_mode(False)
             self._needs_alignment = True
+        if not enabled:
+            self._reset_joint_control_mode()
         self._teleop_enabled = enabled
         logger.info("Gello teleoperation %s", "enabled" if enabled else "disabled")
+
+    def _reset_joint_control_mode(self) -> None:
+        if not self.config.joint7_only_mode_enabled:
+            return
+        with self._joint_mode_lock:
+            self._joint_mode_toggle_pending = False
+            self._joint7_only_active = False
+            self._joint_mode_hold = None
+            self._joint_mode_offsets[:] = 0.0
+            self._joint_mode_realign = None
+
+    def set_joint7_mode_key(self, pressed: bool) -> None:
+        """Queue a toggle on a new S press; callbacks never perform device I/O."""
+        if not self.config.joint7_only_mode_enabled:
+            return
+        with self._joint_mode_lock:
+            if pressed and not self._joint_mode_key_pressed and self._teleop_enabled:
+                self._joint_mode_toggle_pending = not self._joint_mode_toggle_pending
+            self._joint_mode_key_pressed = pressed
+
+    def joint_control_mode_switch_pending(self) -> bool:
+        if not self.config.joint7_only_mode_enabled:
+            return False
+        with self._joint_mode_lock:
+            return self._joint_mode_toggle_pending
+
+    def apply_pending_joint_control_mode(self, observation: dict) -> None:
+        """Apply queued toggles on the control owner using measured robot joints."""
+        if not self.config.joint7_only_mode_enabled:
+            return
+        with self._joint_mode_lock:
+            if not self._joint_mode_toggle_pending or not self._teleop_enabled:
+                return
+            positions = np.asarray([observation[f"J{i}.pos"] for i in range(1, 7)], dtype=float)
+            if not np.isfinite(positions).all():
+                raise ValueError("Joint control mode requires finite robot joint positions")
+            if self._joint7_only_active:
+                # Rebase the first six follower targets on the next GELLO read.
+                # Preserve J7's continuous mapping and the gripper target.
+                self._joint_mode_realign = positions
+                self._joint7_only_active = False
+                self._joint_mode_hold = None
+            else:
+                self._joint_mode_hold = positions
+                self._joint7_only_active = True
+            self._joint_mode_toggle_pending = False
+            mode = "J7 only (J1-J6 held)" if self._joint7_only_active else "all joints"
+        logger.info("GELLO joint control mode: %s", mode)
+
+    def _apply_joint_control_mode(self, action_array):
+        if not self.config.joint7_only_mode_enabled:
+            return action_array
+        action_array = np.asarray(action_array, dtype=float).copy()
+        with self._joint_mode_lock:
+            if self._joint_mode_realign is not None:
+                self._joint_mode_offsets = self._joint_mode_realign - action_array[:6]
+                self._joint_mode_realign = None
+            if self._joint7_only_active:
+                action_array[:6] = self._joint_mode_hold
+            else:
+                action_array[:6] += self._joint_mode_offsets
+        return action_array
 
     def set_gripper_keyboard_state(self, *, close: bool, open: bool) -> None:
         if self.config.gripper_control_mode != "keyboard":
@@ -569,13 +652,17 @@ class GelloTeleop(UFBaseTeleop):
             raise RuntimeError("Gello teleop is disabled")
         fake_obs = dict({"joint_state": np.array([0.0]*(self.dof+1))}) # for agent.act() argument, actually no use
         action_array = self.gello_agent.act(fake_obs) # current gello joint pos as np.ndarray
+        action_array = self._apply_joint_control_mode(action_array)
 
         action = {}
         for i in range(self.dof):
             action.update({f"J{i+1}.pos": action_array[i]})
-        gripper_pos = action_array[self.dof]
         if self.config.gripper_control_mode == "keyboard":
-            gripper_pos = self._keyboard_gripper_action(gripper_pos)
+            # Arm-only drivers publish exactly seven real encoder positions.
+            # Alignment initializes the keyboard target from xArm observation.
+            gripper_pos = self._keyboard_gripper_action(0.0)
+        else:
+            gripper_pos = action_array[self.dof]
         action.update({"gripper.pos": gripper_pos})
         return action
 
@@ -629,6 +716,7 @@ class GelloTeleop(UFBaseTeleop):
             self._is_connected = False
             self._teleop_enabled = False
             self._needs_alignment = True
+            self._reset_joint_control_mode()
             runtime = getattr(self, "_current_runtime", None)
             if (
                 runtime is not None

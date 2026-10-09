@@ -1,7 +1,9 @@
 import json
+import queue
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -264,6 +266,148 @@ def test_failed_rerecord_restores_previous_complete_episode(tmp_path, monkeypatc
         )
     ) == 1
     assert (tmp_path / "timestamps/episode_000000_commit.json").is_file()
+
+
+@pytest.mark.parametrize("delayed_sample", [0, 1])
+def test_preparation_delay_does_not_reject_samples_when_queue_has_space(
+    tmp_path, monkeypatch, delayed_sample,
+):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(persistence, "time", SimpleNamespace(
+        perf_counter=lambda: clock.now, perf_counter_ns=time.perf_counter_ns,
+    ))
+    samples = [_sample(1.01 + i * 0.01, i + 1) for i in range(3)]
+
+    def delayed_samples():
+        for index, sample in enumerate(samples):
+            if index == delayed_sample:
+                clock.now += 0.150
+            yield sample
+
+    recorder = TactileStreamRecorder(tmp_path, 0, ("photon_left",))
+    try:
+        mapping = recorder.add_window("photon_left", delayed_samples(), 1.0, 1.04)
+        assert mapping["frame_count"] == 3
+        assert mapping["start_index"] == 0
+        assert mapping["end_index"] == 3
+        recorder.prepare(0)
+        rows = pq.read_table(recorder.staging_root / "photon_left/samples.parquet").to_pylist()
+        assert [row["capture_monotonic_s"] for row in rows] == [
+            sample.capture_monotonic_s for sample in samples
+        ]
+        assert [row["sensor_timestamp_s"] for row in rows] == [
+            sample.sensor_timestamp_s for sample in samples
+        ]
+        for index, sample in enumerate(samples):
+            image = persistence.cv2.imread(str(
+                recorder.staging_root / "photon_left/frames" / f"frame_{index:06d}.png"
+            ))
+            assert np.array_equal(image, sample.frame_bgr)
+        status = recorder.status()
+        assert status["enqueued_count"] == status["written_count"] == 3
+        assert status["backpressure_error_count"] == 0
+    finally:
+        recorder.discard()
+
+
+def test_full_queue_accepts_sample_when_writer_frees_space(tmp_path, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    results, errors = [], []
+    original_imwrite = persistence.cv2.imwrite
+
+    def blocked_imwrite(path, frame):
+        entered.set()
+        assert release.wait(2)
+        return original_imwrite(path, frame)
+
+    monkeypatch.setattr(persistence.cv2, "imwrite", blocked_imwrite)
+    recorder = TactileStreamRecorder(
+        tmp_path, 0, ("photon_left",), queue_size=1,
+    )
+    original_wait = recorder._queue.not_full.wait
+
+    def wait_for_space(timeout):
+        waiting.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(recorder._queue.not_full, "wait", wait_for_space)
+
+    def add_third_sample():
+        try:
+            results.append(recorder.add_window("photon_left", [_sample(1.05, 3)], 1.04, 1.06))
+        except BaseException as exc:
+            errors.append(exc)
+
+    producer = threading.Thread(target=add_third_sample)
+    try:
+        recorder.add_window("photon_left", [_sample(1.01, 1)], 1.0, 1.02)
+        assert entered.wait(1)
+        recorder.add_window("photon_left", [_sample(1.03, 2)], 1.02, 1.04)
+        assert recorder.status()["queue_depth"] == 1
+        producer.start()
+        assert waiting.wait(1)
+        release.set()
+        producer.join(timeout=1)
+        assert not producer.is_alive()
+        assert errors == []
+        assert results[0]["frame_count"] == 1
+        assert results[0]["start_index"] == 2
+        recorder.prepare(0)
+        status = recorder.status()
+        assert status["enqueued_count"] == status["written_count"] == 3
+        assert status["backpressure_error_count"] == 0
+    finally:
+        release.set()
+        if producer.ident is not None:
+            producer.join(timeout=1)
+        recorder.discard()
+
+
+def test_window_shares_queue_wait_budget_but_still_accepts_immediate_samples(tmp_path, monkeypatch):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(persistence, "time", SimpleNamespace(
+        perf_counter=lambda: clock.now, perf_counter_ns=time.perf_counter_ns,
+    ))
+    recorder = TactileStreamRecorder(tmp_path, 0, ("photon_left",))
+    original_nowait = recorder._queue.put_nowait
+    original_put = recorder._queue.put
+    waits = []
+
+    def put_nowait(item):
+        if item[0] in (0, 1):
+            raise queue.Full
+        return original_nowait(item)
+
+    def put(item, block=True, timeout=None):
+        if item is not recorder._STOP and block:
+            waits.append(timeout)
+            clock.now += 0.060 if len(waits) == 1 else timeout
+        return original_put(item, block=block, timeout=timeout)
+
+    monkeypatch.setattr(recorder._queue, "put_nowait", put_nowait)
+    monkeypatch.setattr(recorder._queue, "put", put)
+
+    def samples():
+        yield _sample(1.01, 1)
+        yield _sample(1.02, 2)
+        # The wait budget is spent, but preparation of a later sample must
+        # not prevent an immediate enqueue into a now-available slot.
+        clock.now += 0.150
+        yield _sample(1.03, 3)
+
+    try:
+        mapping = recorder.add_window("photon_left", samples(), 1.0, 1.04)
+        assert waits == pytest.approx([0.100, 0.040])
+        assert sum(waits[1:]) + 0.060 == pytest.approx(0.100)
+        assert mapping["frame_count"] == 3
+        recorder.prepare(0)
+        status = recorder.status()
+        assert status["enqueued_count"] == status["written_count"] == 3
+        assert status["backpressure_error_count"] == 0
+    finally:
+        recorder.discard()
 
 
 def test_writer_backpressure_is_bounded_observable_and_cleanup_is_complete(

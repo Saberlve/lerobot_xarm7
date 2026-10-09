@@ -1,6 +1,5 @@
 from pathlib import Path
 from types import SimpleNamespace
-from threading import Lock
 
 import numpy as np
 import pytest
@@ -10,147 +9,68 @@ from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 from lerobot_robot_ufactory.scripts.uf_read_tcp_z import read_tcp_z
 
 
-class FakeKinematicsArm:
-    def __init__(self, requested_pose=None, safe_pose=None):
-        self.requested_pose = requested_pose or [300.0, 10.0, 90.0, 0.1, 0.2, 0.3]
-        self.safe_pose = safe_pose or [300.0, 10.0, 100.0, 0.1, 0.2, 0.3]
-        self.inverse_result = [0.3] * 7
-        self.inverse_calls = []
-        self.fail_forward = False
-        self.fail_inverse = False
-        self.joint_limit = False
+class HeightModel:
+    def tcp_position(self, joints):
+        return np.asarray([0.0, 0.0, 100.0 + 100.0 * joints[0]])
 
-    def get_forward_kinematics(self, angles, **kwargs):
-        if self.fail_forward:
-            return 1, []
-        if np.allclose(angles, self.inverse_result):
-            return 0, self.safe_pose.copy()
-        return 0, self.requested_pose.copy()
-
-    def get_inverse_kinematics(self, pose, **kwargs):
-        self.inverse_calls.append((pose.copy(), kwargs))
-        if self.fail_inverse:
-            return 2, []
-        return 0, self.inverse_result.copy()
-
-    def is_joint_limit(self, target, **kwargs):
-        return 0, self.joint_limit
+    def tcp_z_and_jacobian(self, joints):
+        return float(self.tcp_position(joints)[2]), np.asarray([100.0, 0, 0, 0, 0, 0, 0])
 
 
-def make_guard_robot(arm, min_tcp_z_mm=100.0, control_space="joint"):
+def make_guard_robot():
     robot = UFRobot.__new__(UFRobot)
     robot._dof = 7
-    robot._control_space = control_space
-    robot._min_tcp_z_mm = min_tcp_z_mm
-    robot._last_safe_joint_target = np.asarray([0.25] * 7)
+    robot._control_space = "joint"
+    robot._min_tcp_z_mm = 95.0
+    robot._tcp_z_soft_floor_mm = 100.0
+    robot._local_kinematics = HeightModel()
+    robot._last_safe_joint_target = np.zeros(7)
     robot._tcp_z_is_clamped = False
     robot._tcp_z_last_log_time = 0.0
     robot._tcp_z_last_error_log_time = 0.0
-    robot.real_arm = arm
+    robot.real_arm = SimpleNamespace()
     return robot
 
 
-def test_joint_target_above_floor_is_unchanged():
-    arm = FakeKinematicsArm(requested_pose=[300.0, 10.0, 101.0, 0.1, 0.2, 0.3])
-    robot = make_guard_robot(arm)
-    requested = [0.1] * 7
-
-    result = robot._guard_joint_target(requested)
-
-    assert np.allclose(result, requested)
-    assert robot._last_guard_path == "fk_safe"
-    assert arm.inverse_calls == []
-    assert np.allclose(robot._last_safe_joint_target, requested)
-
-
-def test_joint_guard_uses_rt_report_fast_path_far_above_floor():
-    arm = FakeKinematicsArm()
-    robot = make_guard_robot(arm)
-    robot._rt_report_normal = True
-    robot._update_lock = Lock()
-    robot.rt_actual_tcp_pose = [0.0, 0.0, 200.0, 0.0, 0.0, 0.0]
-    robot._tcp_z_guard_activation_margin_mm = 50.0
-
-    result = robot._guard_joint_target([0.1] * 7)
-
-    assert np.allclose(result, [0.1] * 7)
-    assert robot._last_guard_path == "rt_fast_path"
-    assert arm.inverse_calls == []
-
-
-def test_joint_target_below_floor_clamps_only_tcp_z_before_inverse_kinematics():
-    arm = FakeKinematicsArm()
-    robot = make_guard_robot(arm)
-    requested = [0.1] * 7
-
-    result = robot._guard_joint_target(requested)
-
-    assert np.allclose(result, arm.inverse_result)
-    assert robot._last_guard_path == "fk_ik_clamp"
-    inverse_pose, inverse_kwargs = arm.inverse_calls[0]
-    assert inverse_pose == pytest.approx([300.0, 10.0, 100.0, 0.1, 0.2, 0.3])
-    assert inverse_kwargs["limited"] is True
-    assert inverse_kwargs["ref_angles"] == pytest.approx([0.25] * 7)
-    assert np.allclose(robot._last_safe_joint_target, arm.inverse_result)
-
-
-def test_successive_clamped_ik_uses_last_accepted_solution_as_reference():
-    arm = FakeKinematicsArm()
-    robot = make_guard_robot(arm)
-
-    first_result = robot._guard_joint_target([0.1] * 7)
-    arm.inverse_result = [0.32] * 7
-    second_result = robot._guard_joint_target([0.05] * 7)
-
-    assert first_result == pytest.approx([0.3] * 7)
-    assert second_result == pytest.approx([0.32] * 7)
-    assert arm.inverse_calls[1][1]["ref_angles"] == pytest.approx([0.3] * 7)
-
-
-@pytest.mark.parametrize("failed_stage", ["forward", "inverse", "verification"])
-def test_joint_guard_holds_last_safe_target_when_kinematics_fails(failed_stage):
-    arm = FakeKinematicsArm()
-    if failed_stage == "forward":
-        arm.fail_forward = True
-    elif failed_stage == "inverse":
-        arm.fail_inverse = True
+@pytest.mark.parametrize("failure", ["missing_model", "invalid_target", "singular_jacobian"])
+def test_joint_guard_holds_last_safe_target_on_failure(failure):
+    robot = make_guard_robot()
+    requested = [-0.1] * 7
+    if failure == "missing_model":
+        robot._local_kinematics = None
+    elif failure == "invalid_target":
+        requested[0] = float("nan")
     else:
-        arm.safe_pose[2] = 99.0
-    robot = make_guard_robot(arm)
+        robot._local_kinematics.tcp_z_and_jacobian = lambda joints: (90.0, np.zeros(7))
 
-    result = robot._guard_joint_target([0.1] * 7)
+    result = robot._guard_joint_target(requested)
 
-    assert np.allclose(result, [0.25] * 7)
-
-
-def test_joint_guard_holds_last_safe_target_when_ik_hits_joint_limit():
-    arm = FakeKinematicsArm()
-    arm.joint_limit = True
-    robot = make_guard_robot(arm)
-
-    result = robot._guard_joint_target([0.1] * 7)
-
-    assert np.allclose(result, [0.25] * 7)
+    assert result == pytest.approx(np.zeros(7))
+    assert robot._last_guard_path == "local_hold"
 
 
-def test_joint_guard_rejects_discontinuous_ik_solution():
-    arm = FakeKinematicsArm()
-    arm.inverse_result = [1.5] * 7
-    arm.safe_pose[2] = 100.0
-    robot = make_guard_robot(arm)
+def test_joint_guard_skips_motion_without_safe_fallback():
+    robot = make_guard_robot()
+    robot._last_safe_joint_target = None
 
-    result = robot._guard_joint_target([0.1] * 7)
-
-    assert np.allclose(result, [0.25] * 7)
+    assert robot._guard_joint_target([-0.1] * 7) is None
 
 
-def test_send_action_sends_and_returns_clamped_joint_target():
-    arm = FakeKinematicsArm()
+def test_guard_initialization_rejects_current_tcp_below_floor():
+    robot = make_guard_robot()
+    robot.real_arm.get_joint_states = lambda **kwargs: (0, [[-0.1] * 7])
+
+    with pytest.raises(RuntimeError, match="below the hard floor"):
+        robot._initialize_tcp_z_guard()
+
+
+def test_send_action_sends_and_returns_projected_joint_target():
+    robot = make_guard_robot()
+    arm = robot.real_arm
     arm.error_code = 0
     arm.mode = 6
     arm.sent_joint_targets = []
     arm.set_servo_angle = lambda **kwargs: arm.sent_joint_targets.append(kwargs["angle"]) or 0
-    robot = make_guard_robot(arm)
     robot._is_connected = True
     robot._last_logged_controller_error = 0
     robot._cmd_cnt = 20
@@ -164,17 +84,22 @@ def test_send_action_sends_and_returns_clamped_joint_target():
         joint_command_mode=6,
         gripper_error_log_path=None,
     )
-    action = {f"J{i + 1}.pos": 0.1 for i in range(7)}
+    action = {f"J{i + 1}.pos": -0.1 for i in range(7)}
 
     sent_action = robot.send_action(action)
 
-    assert arm.sent_joint_targets == [pytest.approx(arm.inverse_result)]
+    sent_joints = [sent_action[f"J{i + 1}.pos"] for i in range(7)]
+    assert arm.sent_joint_targets == [pytest.approx(sent_joints)]
+    assert robot._local_kinematics.tcp_position(sent_joints)[2] >= 100.0 - 1e-3
+    assert sent_joints[1:] == pytest.approx([-0.1] * 6)
     assert robot.logs["safety_guard_dt_s"] >= 0
-    assert robot.logs["safety_guard_path"] == "fk_ik_clamp"
-    assert [sent_action[f"J{i + 1}.pos"] for i in range(7)] == pytest.approx(
-        arm.inverse_result
-    )
-    assert [action[f"J{i + 1}.pos"] for i in range(7)] == pytest.approx([0.1] * 7)
+    assert robot.logs["safety_guard_path"] == "local_projected"
+    assert [action[f"J{i + 1}.pos"] for i in range(7)] == pytest.approx([-0.1] * 7)
+
+
+def test_removed_controller_backend_is_rejected():
+    with pytest.raises(ValueError, match="tcp_z_guard_backend must be 'local_projection'"):
+        UFRobotConfig(robot_dof=7, min_tcp_z_mm=95.0, tcp_z_guard_backend="controller_rpc")
 
 
 def test_non_finite_tcp_floor_is_rejected():

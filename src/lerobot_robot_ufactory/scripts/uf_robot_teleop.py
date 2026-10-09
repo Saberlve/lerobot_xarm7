@@ -35,6 +35,8 @@ from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
 from lerobot_robot_ufactory.utils.realtime_teleop import (
     RealtimeTeleopController,
     apply_keyboard_gripper_stop,
+    apply_pending_gello_joint_mode,
+    update_gello_joint_mode_key,
 )
 
 
@@ -257,6 +259,7 @@ def teleop_loop(cfg: TeleopConfig):
             gripper_keys = {"close": False, "open": False}
 
             def on_press(key):
+                update_gello_joint_mode_key(teleop, key, True)
                 char = getattr(key, "char", None)
                 if char in ("c", "C"):
                     gripper_keys["close"] = True
@@ -274,6 +277,7 @@ def teleop_loop(cfg: TeleopConfig):
                     key_dict[key] = True
 
             def on_release(key):
+                update_gello_joint_mode_key(teleop, key, False)
                 char = getattr(key, "char", None)
                 if char in ("c", "C"):
                     gripper_keys["close"] = False
@@ -289,6 +293,8 @@ def teleop_loop(cfg: TeleopConfig):
                                 print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
                         else:
                             print('⌨   [ESC] Exit  [Space] Pause  [←] Pause / Reset')
+                        if getattr(teleop.config, "joint7_only_mode_enabled", False):
+                            print('⌨   [S] J7 only / All joints')
                 except Exception as e:
                     print(f"Error handling key release: {e}")
                 if key in key_dict:
@@ -300,6 +306,8 @@ def teleop_loop(cfg: TeleopConfig):
                 controls = '[ESC] Exit  [Space] Reset / Start  [←] Reset'
                 if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
                     controls += '  [C] Close  [O] Open'
+                if getattr(teleop.config, "joint7_only_mode_enabled", False):
+                    controls += '  [S] J7 only / All joints'
                 print(f'⌨   {controls}')
             else:
                 print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
@@ -431,6 +439,7 @@ def teleop_loop(cfg: TeleopConfig):
                 else:
                     # Generic non-UFACTORY teleoperators retain the standard loop.
                     obs = robot.get_observation()
+                    apply_pending_gello_joint_mode(robot, teleop, obs)
                     act = teleop.get_action()
                     act_processed_teleop = teleop_action_processor((act, obs))
                     robot_action_to_send = robot_action_processor((act_processed_teleop, obs))

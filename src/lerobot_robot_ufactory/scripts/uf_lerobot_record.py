@@ -24,6 +24,8 @@ from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
 from lerobot_robot_ufactory.utils.realtime_teleop import (
     RealtimeTeleopController,
     apply_keyboard_gripper_stop,
+    apply_pending_gello_joint_mode,
+    update_gello_joint_mode_key,
 )
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 from lerobot_robot_ufactory.utils.web_preview import RecordingWebPreview, WebPreviewConfig
@@ -42,8 +44,6 @@ class UFRecordConfig(LeRobotRecordConfig):
     # available by default for GELLO recording.
     synchronize: bool = True
     offline_mesh3dflow: bool = False
-    # Checkpoint raw episodes immediately; encode/infer only when recording ends.
-    defer_processing: bool = True
 
     def __post_init__(self):
         self.web_preview.validate()
@@ -629,9 +629,10 @@ def _create_next_episode_buffer(dataset, current_episode_buffer):
 class AsyncEpisodeSaver:
     _STOP = object()
 
-    def __init__(self, dataset, raw_store=None):
+    def __init__(self, dataset, *, mesh_cameras=None, runtime_dir=None):
         self.dataset = dataset
-        self.raw_store = raw_store
+        self.mesh_cameras = mesh_cameras or {}
+        self.runtime_dir = runtime_dir
         self._queue = queue.Queue()
         self._total_cnts = 0
         self._finish_cnts = 0
@@ -674,11 +675,15 @@ class AsyncEpisodeSaver:
                     return
                 episode_index, episode_buffer, synchronization = item
                 print(f'[Async] saving episode {episode_index}')
-                if self.raw_store is not None:
-                    self.raw_store.save(episode_buffer, synchronization)
-                    continue
                 try:
                     validate_episode_images(self.dataset, episode_buffer)
+                    if self.mesh_cameras:
+                        from lerobot_robot_ufactory.tactile.deferred import compute_episode_mesh
+
+                        compute_episode_mesh(
+                            self.dataset, self.mesh_cameras, self.runtime_dir,
+                            episode_index, episode_buffer=episode_buffer,
+                        )
                     has_tactile_transaction = (
                         synchronization is not None
                         and synchronization.tactile_recorder is not None
@@ -1201,6 +1206,7 @@ def record_loop(
                     act_processed_teleop = matched_action
                     act = None
                 else:
+                    apply_pending_gello_joint_mode(robot, teleop, obs)
                     act = teleop.get_action()
 
                 # (space mouse) from delta Cartesian cmd to absolute command
@@ -1355,7 +1361,12 @@ def record_loop(
     finally:
         try:
             if realtime_controller is not None:
-                realtime_controller.stop()
+                # Preserve the capture exception instead of replacing it with
+                # the same latched control fault during worker cleanup.
+                if sys.exc_info()[0] is None:
+                    realtime_controller.stop()
+                else:
+                    realtime_controller.stop(raise_on_fault=False)
         finally:
             if sync_log_file is not None:
                 sync_log_file.close()
@@ -1364,23 +1375,32 @@ def record_loop(
     return episode_synchronization
 
 
-def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode):
+def _reset_recording_robot(robot, *, open_gripper_first=False):
+    if open_gripper_first:
+        open_gripper = getattr(robot, "open_gripper", None)
+        if open_gripper is not None:
+            # The gripper command must finish successfully before arm motion.
+            open_gripper()
+    reset = getattr(robot, "reset_to_initial", None)
+    if reset is None:
+        reset = robot.configure
+    reset()
+
+
+def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode, *, reset_robot=True):
     if is_uf_teleop:
         # Stop teleop output before handing control to the xArm reset motion.
         teleop.set_teleop_enabled(False)
 
-    if is_uf_teleop or manual_mode:
-        reset = getattr(robot, "reset_to_initial", None)
-        if reset is None:
-            reset = robot.configure
-        reset()
+    if reset_robot and (is_uf_teleop or manual_mode):
+        _reset_recording_robot(robot)
 
     if is_uf_teleop:
         obs = robot.get_observation()
         teleop.set_teleop_enabled(True, obs)
 
 
-def _print_record_controls(is_recorded, manual_mode):
+def _print_record_controls(is_recorded, manual_mode, teleop=None):
     if is_recorded:
         controls = '[ESC] Exit  [←] Reset  [→] Save'
     else:
@@ -1388,6 +1408,8 @@ def _print_record_controls(is_recorded, manual_mode):
         controls = f'[ESC] Exit  [Space] {start_label}  [←] Reset  [→] Save'
     if manual_mode:
         controls += '  [C] Close  [O] Open'
+    if getattr(getattr(teleop, "config", None), "joint7_only_mode_enabled", False):
+        controls += '  [S] J7 only / All joints'
     print(f'⌨   {controls}')
 
 
@@ -1487,9 +1509,8 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
     if cfg.display_data:
         init_rerun(session_name="recording")
 
-    defer_processing = getattr(cfg, "defer_processing", True) or cfg.offline_mesh3dflow
-    if defer_processing:
-        cfg.dataset.video_encoding_batch_size = 1
+    # Encode each completed episode immediately.
+    cfg.dataset.video_encoding_batch_size = 1
     if postprocess_only:
         cfg.resume = True
 
@@ -1509,7 +1530,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
             camera.configure_deferred_processing()
     _prepare_dataset_root(cfg)
 
-    if cfg.resume and not defer_processing and not postprocess_only:
+    if cfg.resume and not postprocess_only:
         root = Path(cfg.dataset.root)
         info = json.loads((root / "meta/info.json").read_text())
         pending = [
@@ -1518,9 +1539,9 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
         ]
         if pending:
             raise RuntimeError(
-                f"Cannot resume with defer_processing=false: {len(pending)} raw episode(s) "
+                f"Cannot resume recording: {len(pending)} raw episode(s) "
                 f"still need processing in {root}. Run --postprocess-only with the recording "
-                "configuration first, or enable defer_processing=true before resuming."
+                "configuration first."
             )
 
     robot = make_robot_from_config(cfg.robot)
@@ -1669,6 +1690,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
     is_evt = not is_headless()
     is_uf_teleop = isinstance(teleop, UFBaseTeleop)
     is_recorded = False
+    robot_reset_after_discard = False
     waiting_for_retry = False
     wait_for_start_release = False
     key_dict = {}
@@ -1685,6 +1707,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
         }
 
         def on_press(key):
+            update_gello_joint_mode_key(teleop, key, True)
             _update_manual_gripper_key_state(key, True, manual_gripper_keys)
             if getattr(teleop, "config", None) is not None and getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
                 teleop.set_gripper_keyboard_state(**manual_gripper_keys)
@@ -1706,12 +1729,13 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                 key_dict[key] = True
 
         def on_release(key):
+            update_gello_joint_mode_key(teleop, key, False)
             _update_manual_gripper_key_state(key, False, manual_gripper_keys)
             if getattr(teleop, "config", None) is not None and getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
                 teleop.set_gripper_keyboard_state(**manual_gripper_keys)
             try:
                 if key == keyboard.Key.enter:
-                    _print_record_controls(is_recorded, manual_mode)
+                    _print_record_controls(is_recorded, manual_mode, teleop)
                     # is_recorded = True
             except Exception as e:
                 print(f"Error handling key release: {e}")
@@ -1720,40 +1744,31 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
 
         listener, events = init_keyboard_listener(events=events, on_press=on_press, on_release=on_release)
         print("\n********** Episode Record Loop Start **********")
-        _print_record_controls(is_recorded, manual_mode)
+        _print_record_controls(is_recorded, manual_mode, teleop)
     else:
         input('⌨   Press Enter to start record >>> ')
         is_recorded = True
         print('\n********** Episode Record Loop Start **********')
 
     frame_callback = None
-    raw_store = (
-        RawEpisodeStore(dataset, runtime_dir=runtime_dir, offline_mesh_fields=offline_mesh_fields)
-        if defer_processing else None
+    mesh_cameras = tactile_cameras if cfg.offline_mesh3dflow else {}
+    async_episode_saver = (
+        AsyncEpisodeSaver(dataset, mesh_cameras=mesh_cameras, runtime_dir=runtime_dir)
+        if async_save else None
     )
-    if raw_store is not None:
-        episode_buffer = _get_episode_buffer(dataset)
-        _set_episode_buffer(dataset, _create_empty_episode_buffer(
-            dataset, raw_store.next_episode_index(), episode_buffer
-        ))
-        # A previous crash can leave PNGs from an uncommitted active episode.
-        # Its index follows all committed raw episodes, so only these are reset.
-        _discard_current_episode(dataset)
-        print("Raw episodes are saved immediately; video encoding and Mesh3DFlow run after recording.")
-    async_episode_saver = AsyncEpisodeSaver(dataset, raw_store=raw_store) if async_save else None
     if async_episode_saver is not None:
         print('Async episode saving is enabled.')
 
     episode_owner = _EpisodeSynchronizationOwner()
     # Close pending async saves before VideoEncodingManager finalizes Parquet
     # writers, including when capture or device cleanup raises an exception.
-    dataset_cleanup = _RawDatasetFinalize(dataset) if raw_store is not None else VideoEncodingManager(dataset)
+    dataset_cleanup = VideoEncodingManager(dataset)
     with dataset_cleanup, _RecordingCleanup(
         robot, teleop, listener, async_episode_saver, web_preview
     ), episode_owner:
         # num_episodes is a dataset-wide limit.  Count existing episodes so a
         # resumed recording cannot exceed it by recording another full batch.
-        recorded_episodes = raw_store.next_episode_index() if raw_store is not None else dataset.num_episodes
+        recorded_episodes = dataset.num_episodes
         if recorded_episodes >= cfg.dataset.num_episodes:
             print(
                 f"Episode limit already reached ({recorded_episodes}/"
@@ -1790,7 +1805,11 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                 episode_timed_out = False
                 try:
                     if is_uf_teleop or manual_mode:
-                        _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode)
+                        _prepare_recording_episode(
+                            robot, teleop, is_uf_teleop, manual_mode,
+                            reset_robot=not robot_reset_after_discard,
+                        )
+                        robot_reset_after_discard = False
                     log_say(f"Recording episode {_current_episode_index(dataset)}", cfg.play_sounds)
                     episode_synchronization = record_loop(
                         robot=robot,
@@ -1827,8 +1846,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                 continue
             if events['stop_recording'] and not events["rerecord_episode"]:
                 episode_owner.discard(episode_synchronization)
-                if raw_store is not None:
-                    _discard_current_episode(dataset, async_episode_saver)
+                _discard_current_episode(dataset, async_episode_saver)
                 break
             if events["rerecord_episode"]:
                 log_say("Re-record episode", cfg.play_sounds)
@@ -1841,11 +1859,14 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                 is_recorded = False
                 if events["stop_recording"]:
                     break
+                if is_uf_teleop or manual_mode:
+                    _reset_recording_robot(robot, open_gripper_first=True)
+                    robot_reset_after_discard = True
                 if is_evt:
+                    wait_for_start_release = bool(key_dict[keyboard.Key.space])
                     if episode_timed_out:
                         waiting_for_retry = True
-                        wait_for_start_release = bool(key_dict[keyboard.Key.space])
-                    _print_record_controls(is_recorded, manual_mode)
+                    _print_record_controls(is_recorded, manual_mode, teleop)
                 else:
                     input('\n⌨   Press Enter to rerecord this episode >>>>> ')
                     is_recorded = True
@@ -1859,38 +1880,31 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                 if async_episode_saver is None:
                     try:
                         validate_episode_images(dataset, _get_episode_buffer(dataset))
-                        if raw_store is not None:
-                            episode_buffer = _get_episode_buffer(dataset)
-                            raw_store.save(episode_buffer, episode_synchronization)
+                        if mesh_cameras:
+                            from lerobot_robot_ufactory.tactile.deferred import compute_episode_mesh
+
+                            compute_episode_mesh(
+                                dataset, mesh_cameras, runtime_dir, episode_index
+                            )
+                        has_tactile_transaction = (
+                            episode_synchronization is not None
+                            and episode_synchronization.tactile_recorder is not None
+                        )
+                        if has_tactile_transaction:
+                            episode_synchronization.write(
+                                Path(dataset.root),
+                                episode_index,
+                                defer_commit=True,
+                            )
+                        dataset.save_episode()
+                        if has_tactile_transaction:
+                            episode_synchronization.commit()
+                        elif episode_synchronization is not None:
+                            episode_synchronization.write(Path(dataset.root), episode_index)
+                        if episode_synchronization is not None:
+                            log_say(episode_synchronization.summary(), cfg.play_sounds)
                             episode_owner.release(episode_synchronization)
-                            next_episode_buffer = _create_next_episode_buffer(
-                                dataset, episode_buffer
-                            )
-                            _set_episode_buffer(dataset, next_episode_buffer)
-                            log_say(
-                                f"[RawSaved] Episode {episode_index}; processing after recording",
-                                cfg.play_sounds,
-                            )
-                        else:
-                            has_tactile_transaction = (
-                                episode_synchronization is not None
-                                and episode_synchronization.tactile_recorder is not None
-                            )
-                            if has_tactile_transaction:
-                                episode_synchronization.write(
-                                    Path(dataset.root),
-                                    episode_index,
-                                    defer_commit=True,
-                                )
-                            dataset.save_episode()
-                            if has_tactile_transaction:
-                                episode_synchronization.commit()
-                            elif episode_synchronization is not None:
-                                episode_synchronization.write(Path(dataset.root), episode_index)
-                            if episode_synchronization is not None:
-                                log_say(episode_synchronization.summary(), cfg.play_sounds)
-                                episode_owner.release(episode_synchronization)
-                            log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
+                        log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
                     except BaseException:
                         episode_owner.discard(episode_synchronization)
                         raise
@@ -1908,7 +1922,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                     print(f"Episode limit reached ({recorded_episodes}/{cfg.dataset.num_episodes}).")
                     break
                 if is_evt:
-                    _print_record_controls(is_recorded, manual_mode)
+                    _print_record_controls(is_recorded, manual_mode, teleop)
                 else:
                     input('⌨   Press Enter to record at the next episode >>>>> ')
                     is_recorded = True
@@ -1916,13 +1930,6 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
         if async_episode_saver is not None:
             print('Waiting for pending async episode saves.')
             async_episode_saver.close()
-
-        if raw_store is not None:
-            # All completed episodes are already checkpointed. Release devices
-            # before expensive processing; failures leave those checkpoints intact.
-            _disconnect_recording_resources(robot, teleop, listener)
-            listener = None
-            dataset = postprocess_raw_episodes(dataset, tactile_cameras)
 
     print("\n********** Episode Record Loop Exit **********")
 

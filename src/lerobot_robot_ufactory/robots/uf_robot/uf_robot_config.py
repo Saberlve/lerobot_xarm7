@@ -18,7 +18,7 @@ class UFRobotConfig(RobotConfig):
     # (mm; continuous 6D rotation, Zhou et al. CVPR 2019); "both" records
     # joints and TCP pose side by side. Control stays in joint space.
     record_space: str = "joint"
-    gripper_type: int = 1       # 1: xArm Gripper, 2: xArm Gripper G2, 10: Pika Gripper, 11: Robotiq 2F-85
+    gripper_type: int = 2       # 1: xArm Gripper, 2: xArm Gripper G2, 10: Pika Gripper, 11: Robotiq 2F-85
     gripper_port: str = None    # only used by pika gripper (gripper_type=10)
     gripper_speed: int = -1     # model-specific default; xArm Gripper G2: 50 mm/s
     gripper_force: int = -1     # auto
@@ -50,16 +50,11 @@ class UFRobotConfig(RobotConfig):
     # Optional TCP height floor in the xArm base coordinate system (mm).
     # The value should include any desired safety margin above the table.
     min_tcp_z_mm: float | None = None
-    # Skip synchronous FK while the actual TCP is this far above the floor.
-    # The RT report keeps this fast path asynchronous and avoids jitter during
-    # normal teleoperation; FK/IK remains active near the configured floor.
-    tcp_z_guard_activation_margin_mm: float = 100.0
-    # ``local_projection`` performs all per-cycle FK/Jacobian work on the CPU.
-    # ``controller_rpc`` retains the legacy controller FK/IK implementation.
-    tcp_z_guard_backend: str = "controller_rpc"
-    tcp_z_soft_margin_mm: float = 5.0
+    # TCP-height guarding performs all per-cycle FK/Jacobian work on the CPU.
+    tcp_z_guard_backend: str = "local_projection"
+    tcp_z_soft_margin_mm: float = 0.5
     local_kinematics_max_error_mm: float = 2.0
-    controller_safety_boundary: bool = False
+    controller_safety_boundary: bool = True
 
     def __post_init__(self):
         super().__post_init__()
@@ -120,18 +115,12 @@ class UFRobotConfig(RobotConfig):
             raise ValueError("record_space='tcp' does not support observe_joint_vel")
         if self.min_tcp_z_mm is not None and not math.isfinite(self.min_tcp_z_mm):
             raise ValueError("min_tcp_z_mm must be finite when provided")
-        if (
-            not math.isfinite(self.tcp_z_guard_activation_margin_mm)
-            or self.tcp_z_guard_activation_margin_mm < 0
-        ):
-            raise ValueError("tcp_z_guard_activation_margin_mm must be finite and non-negative")
-        if self.tcp_z_guard_backend not in ("controller_rpc", "local_projection"):
-            raise ValueError("tcp_z_guard_backend must be 'controller_rpc' or 'local_projection'")
-        if self.tcp_z_guard_backend == "local_projection":
-            if self.control_space != "joint" or self.robot_dof != 7:
-                raise ValueError("local_projection requires joint control on an xArm7")
-            if self.min_tcp_z_mm is None:
-                raise ValueError("local_projection requires min_tcp_z_mm")
+        if self.tcp_z_guard_backend != "local_projection":
+            raise ValueError("tcp_z_guard_backend must be 'local_projection'")
+        if self.control_space != "joint" or self.robot_dof != 7:
+            raise ValueError("local_projection requires joint control on an xArm7")
+        if self.min_tcp_z_mm is None:
+            raise ValueError("local_projection requires min_tcp_z_mm")
         if not math.isfinite(self.tcp_z_soft_margin_mm) or self.tcp_z_soft_margin_mm < 0:
             raise ValueError("tcp_z_soft_margin_mm must be finite and non-negative")
         if (

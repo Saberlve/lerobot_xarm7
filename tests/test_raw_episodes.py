@@ -120,7 +120,6 @@ def test_immediate_resume_rejects_pending_raw_before_creating_robot(
     cfg = SimpleNamespace(
         dataset=SimpleNamespace(root=dataset.root),
         resume=resume,
-        defer_processing=False,
         offline_mesh3dflow=False,
         display_data=False,
         robot=None,
@@ -141,7 +140,7 @@ def test_immediate_resume_rejects_pending_raw_before_creating_robot(
     }
 
 
-@pytest.mark.parametrize("mode", ["processed", "deferred", "postprocess_only"])
+@pytest.mark.parametrize("mode", ["processed", "postprocess_only"])
 def test_raw_resume_guard_allows_safe_modes(dataset, monkeypatch, mode):
     from lerobot_robot_ufactory.scripts import uf_lerobot_record as recording
 
@@ -153,7 +152,6 @@ def test_raw_resume_guard_allows_safe_modes(dataset, monkeypatch, mode):
     cfg = SimpleNamespace(
         dataset=SimpleNamespace(root=dataset.root),
         resume=True,
-        defer_processing=mode == "deferred",
         offline_mesh3dflow=False,
         display_data=False,
         robot=None,
@@ -371,7 +369,7 @@ def test_missing_offline_camera_keeps_raw_episode_for_retry(dataset):
     ("fail_recording", "recovery_mode"),
     [(False, None), (True, "postprocess_only"), (True, "resume")],
 )
-def test_recording_esc_and_postprocess_only_use_real_dataset(
+def test_recording_saves_video_before_next_episode_and_survives_failure(
     tmp_path, monkeypatch, fail_recording, recovery_mode
 ):
     import datasets.config
@@ -412,7 +410,6 @@ def test_recording_esc_and_postprocess_only_use_real_dataset(
         policy=None,
         resume=False,
         offline_mesh3dflow=False,
-        defer_processing=True,
         web_preview=recording.WebPreviewConfig(),
         synchronize=True,
         play_sounds=False,
@@ -422,7 +419,7 @@ def test_recording_esc_and_postprocess_only_use_real_dataset(
             root=root,
             fps=30,
             video=True,
-            video_encoding_batch_size=1,
+            video_encoding_batch_size=8,
             num_image_writer_processes=0,
             num_image_writer_threads_per_camera=1,
             num_episodes=3,
@@ -435,6 +432,7 @@ def test_recording_esc_and_postprocess_only_use_real_dataset(
     original_create = LeRobotDataset.create
 
     def create(*args, **kwargs):
+        assert kwargs["batch_encoding_size"] == 1
         kwargs["vcodec"] = "h264"
         return original_create(*args, **kwargs)
 
@@ -444,10 +442,9 @@ def test_recording_esc_and_postprocess_only_use_real_dataset(
 
     def prompt(message):
         if "next episode" in message:
-            assert (root / "raw_episodes/episode_000000/manifest.json").exists()
-            expected = 2 if state.recovering and recovery_mode == "resume" else 1
-            assert len(list((root / "images").rglob("*.png"))) == expected
-            assert not list((root / "videos").rglob("*.mp4"))
+            assert not (root / "raw_episodes").exists()
+            assert not list((root / "images").rglob("*.png"))
+            assert list((root / "videos").rglob("*.mp4"))
             if fail_recording and not state.recovering:
                 raise RuntimeError("GELLO disconnected")
             state.events["stop_recording"] = True  # Same event as Esc.
@@ -464,16 +461,11 @@ def test_recording_esc_and_postprocess_only_use_real_dataset(
     if fail_recording:
         with pytest.raises(RuntimeError, match="GELLO disconnected"):
             recording.record(cfg)
-        assert not list((root / "videos").rglob("*.mp4"))
+        assert list((root / "videos").rglob("*.mp4"))
         state.recovering = True
         if recovery_mode == "resume":
-            # Clear interrupted active-episode PNGs, preserving committed raw data.
-            stale = root / "images/observation.images.rgb/episode-000001/frame-999999.png"
-            stale.parent.mkdir(parents=True)
-            stale.write_bytes(b"incomplete previous episode")
             cfg.resume = True
             result = recording.record(cfg)
-            assert not stale.exists()
         else:
             result = recording.record(cfg, postprocess_only=True)
     else:

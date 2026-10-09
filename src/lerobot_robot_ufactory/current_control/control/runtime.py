@@ -123,6 +123,13 @@ class CurrentRuntime:
                         raise RuntimeError("Experiment stopped: joint moved more than 45 degrees")
                     if np.any(np.abs(state["current_a"][:7]) > p.limits):
                         raise RuntimeError("Experiment stopped: measured current exceeded limit")
+                self.controller.validate_state(state["position"], state["velocity"])
+                if time.monotonic() - state["stamp"] > p.state_timeout_s:
+                    raise RuntimeError("Encoder state became stale during validation")
+                # Followers need fresh, validated encoders independently of the
+                # current write and completed-transaction record below.
+                with self._lock:
+                    self._state = state
                 current, record = self.controller.compute(
                     state["position"], state["velocity"], dt, now - start
                 )
@@ -160,7 +167,6 @@ class CurrentRuntime:
                     }
                 )
                 with self._lock:
-                    self._state = state
                     self._latest_record = record
                     if len(self._records) == self._records.maxlen:
                         self.dropped_records += 1

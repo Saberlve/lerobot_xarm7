@@ -9,15 +9,20 @@ class CurrentController:
         self.previous = np.zeros(7)
         self.running_slew_a_s = None if running_slew_a_s is None else tuning_slew(running_slew_a_s)
 
-    def compute(self, position, velocity, dt, elapsed):
+    def validate_state(self, position, velocity):
         p = self.profile
-        if not 0 < dt <= p.state_timeout_s or not np.isfinite(elapsed) or elapsed < 0:
-            raise RuntimeError("Invalid or stale control interval")
         position, velocity = np.asarray(position), np.asarray(velocity)
         if position.shape != (len(p.all_ids),) or velocity.shape != position.shape:
             raise ValueError("Unexpected state shape")
         if not np.isfinite(position).all() or not np.isfinite(velocity).all():
             raise ValueError("Non-finite encoder state")
+        return position, velocity
+
+    def compute(self, position, velocity, dt, elapsed):
+        p = self.profile
+        if not 0 < dt <= p.state_timeout_s or not np.isfinite(elapsed) or elapsed < 0:
+            raise RuntimeError("Invalid or stale control interval")
+        position, velocity = self.validate_state(position, velocity)
         q, _ = p.model_state(position, velocity)  # Only for the model viewer.
         ramp = min(1.0, elapsed / p.ramp_s)
         constant = vector(p.constant_current_a, "constant_current_a")

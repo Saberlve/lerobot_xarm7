@@ -229,7 +229,7 @@ class TactileStreamRecorder:
         capture_times = []
         sensor_times = []
         previous = self._last_capture_s[stream_name]
-        enqueue_deadline = time.perf_counter() + self._enqueue_timeout_s
+        remaining_wait_s = self._enqueue_timeout_s
         for sample in samples:
             capture_s = float(sample.capture_monotonic_s)
             if not start_monotonic_s < capture_s <= end_monotonic_s:
@@ -290,13 +290,19 @@ class TactileStreamRecorder:
             with self._metrics_lock:
                 self._pending_enqueued_ns[item_id] = enqueued_ns
             try:
-                remaining_s = enqueue_deadline - time.perf_counter()
-                if remaining_s <= 0:
-                    raise queue.Full
-                self._queue.put(
-                    (item_id, enqueued_ns, stream_name, index, sample),
-                    timeout=remaining_s,
-                )
+                item = (item_id, enqueued_ns, stream_name, index, sample)
+                try:
+                    self._queue.put_nowait(item)
+                except queue.Full:
+                    if remaining_wait_s <= 0:
+                        raise
+                    # Share one bounded wait budget across this window. Only
+                    # waits for a full queue consume it, not sample preparation.
+                    wait_started_s = time.perf_counter()
+                    self._queue.put(item, timeout=remaining_wait_s)
+                    remaining_wait_s = max(
+                        0.0, remaining_wait_s - (time.perf_counter() - wait_started_s)
+                    )
             except queue.Full as exc:
                 self._rows[stream_name].pop()
                 with self._metrics_lock:
@@ -304,7 +310,7 @@ class TactileStreamRecorder:
                     self._backpressure_error_count += 1
                 raise TactileBackpressureError(
                     f"Raw tactile writer could not enqueue this window within "
-                    f"{self._enqueue_timeout_s * 1_000:.1f} ms "
+                    f"{self._enqueue_timeout_s * 1_000:.1f} ms of queue waiting "
                     f"(depth={self._queue.qsize()}, capacity={self._queue.maxsize})"
                 ) from exc
             with self._metrics_lock:

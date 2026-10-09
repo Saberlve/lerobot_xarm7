@@ -29,9 +29,11 @@ class GelloFeedbackConfig:
 class GelloTeleopConfig(TeleoperatorConfig):
     current_control: CurrentControlConfig = field(default_factory=CurrentControlConfig)
     # Frequency of the independent GELLO -> xArm realtime control loop.
-    dynamixel_baudrate: int = 57600
-    dynamixel_use_fake_fallback: bool = True
+    dynamixel_baudrate: int = 1000000
+    dynamixel_use_fake_fallback: bool = False
     realtime_control_fps: int = 30
+    # Explicit opt-in: S toggles holding J1-J6 while GELLO controls J7.
+    joint7_only_mode_enabled: bool = False
     # Port to connect to the gello dummy arm
     port: str = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAJZYC7-if00-port0"
 
@@ -45,8 +47,8 @@ class GelloTeleopConfig(TeleoperatorConfig):
     # alignment now always uses its current pose when teleoperation is enabled.
     start_joints: Tuple[float, ...] = (0, 0, 0, 90, 0, 90, 0)  # °
     gripper_id: int = 8  # -1: no gripper
-    gripper_open_deg: Optional[float] = None
-    gripper_close_deg: Optional[float] = None
+    gripper_open_deg: Optional[float] = 198.28125
+    gripper_close_deg: Optional[float] = 155.75
     gripper_control_mode: str = "gello"
     # Phase 2 authorization switch. This does not enable current mode during
     # connect; callers must still explicitly call enable_gripper_current_mode().
@@ -57,10 +59,10 @@ class GelloTeleopConfig(TeleoperatorConfig):
     feedback: GelloFeedbackConfig = field(default_factory=GelloFeedbackConfig)
     # Keyboard gripper: initial C/O step while pressed (mm), cancelled on release.
     # Must be > 0; Recommended >= 2 mm.
-    gripper_keyboard_step_mm: float = 5.0
+    gripper_keyboard_step_mm: float = 1.0
     # Keyboard gripper: how long C/O must be held (seconds) before the
     # gripper switches from fixed steps to continuous motion at gripper_speed.
-    gripper_keyboard_hold_delay_s: float = 0.5
+    gripper_keyboard_hold_delay_s: float = 0
     torque_joint_ids: Tuple[int, ...] = None  # deprecated
 
     def __post_init__(self):
@@ -71,6 +73,10 @@ class GelloTeleopConfig(TeleoperatorConfig):
             raise ValueError("dynamixel_baudrate must be a positive integer")
         if self.realtime_control_fps <= 0:
             raise ValueError("realtime_control_fps must be positive")
+        if type(self.joint7_only_mode_enabled) is not bool:
+            raise ValueError("joint7_only_mode_enabled must be a boolean")
+        if self.joint7_only_mode_enabled and tuple(self.joint_ids) != tuple(range(1, 8)):
+            raise ValueError("joint7_only_mode_enabled requires arm joint IDs 1..7")
         if len(self.joint_ids) != len(self.joint_signs):
             raise ValueError("joint_ids and joint_signs must have the same length")
         if len(self.joint_ids) != len(self.start_joints):
