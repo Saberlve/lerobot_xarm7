@@ -1,3 +1,15 @@
+# Task: 按压洗手液
+# Settings copied from config/gello/xarm7_gello_base.yaml; this is a standalone config.
+# Run from the project root:
+# .venv/bin/uf-lerobot-record --config_path config/gello/tasks/handwash_press/xarm7_gello_handwash_press.yaml
+
+synchronize: true
+# Checkpoint raw images/data during recording; process episodes after recording ends.
+defer_processing: true
+# Compute Mesh3DFlow from saved Rectify images and write the results to the dataset:
+# observation.photon_right.mesh_motion_3d / observation.photon_left.mesh_motion_3d.
+# This offline output is enabled even though save_marker_motion_3d above is false.
+offline_mesh3dflow: true
 robot:
   type: uf::robot
   id: "uf_robot"
@@ -12,11 +24,7 @@ robot:
   gripper_type: 2
   gripper_speed: 50
   gripper_command_interval_s: 0.03334
-  # Keyboard release stopping needs the G2's measured position instead of the
-  # last commanded target. This monitor is asynchronous and does not block the
-  # realtime control loop.
-  gripper_current_monitor: true
-  gripper_current_monitor_frequency_hz: 250
+  gripper_current_monitor: false
   enable_logs: false
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
   joint_command_mode: 6
@@ -54,8 +62,10 @@ robot:
       fps: 60  # 最终按60hz采触觉
       output_type: Rectify
       color_mode: rgb
-      # This device/SDK provides Mesh3DFlow, not Marker3DFlow.
+      # Recording phase: save Rectify images without running SDK inference.
       disable_infer: true
+      # Only controls live SDK 3D output during recording, not offline saving.
+      # Keep false here; offline_mesh3dflow below enables post-recording computation/saving.
       save_marker_motion_3d: false
       motion_3d_output: Mesh3DFlow
       infer_mode: fast
@@ -70,8 +80,10 @@ robot:
       fps: 60
       output_type: Rectify
       color_mode: rgb
-      # Rectify RGB, Mesh3DFlow and TimeStamp come from one SDK call.
+      # Recording phase: save Rectify images without running SDK inference.
       disable_infer: true
+      # Only controls live SDK 3D output during recording, not offline saving.
+      # Keep false here; offline_mesh3dflow below enables post-recording computation/saving.
       save_marker_motion_3d: false
       motion_3d_output: Mesh3DFlow
       infer_mode: fast
@@ -82,10 +94,15 @@ robot:
   # start_joints: [0, -30, 0, 0, 0, 30, 0]
 # make sure to edit with your correct configurations!
 teleop:
+  current_control:
+    enabled: true
+    profile_path: config/current_control/gello_A_working.yaml
+    experimental: false
+    # Running current slew is loaded from the shared device profile.
   type: uf::gello_teleop
   id: "gello_teleop"
   # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.
-  realtime_control_fps: 25
+  realtime_control_fps: 30
   port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
@@ -98,7 +115,7 @@ teleop:
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are
-# dropped instead of delaying the 25 Hz recorder or GELLO control loop.
+# dropped instead of delaying the 15 Hz recorder or 30 Hz GELLO control loop.
 web_preview:
   enabled: false
   host: "0.0.0.0"
@@ -107,14 +124,14 @@ web_preview:
   width: 480
   jpeg_quality: 65
 
-synchronize: true
-offline_mesh3dflow: true
+
 
 dataset:
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_hand_sanitiser"
-  repo_id: "ufactory/xarm7_gello_hand_sanitiser"
-  single_task: "Squeeze the hand sanitiser into the cup"
+  root: "datasets/xarm7_gello_tasks/handwash_press"
+  repo_id: "ufactory/xarm7_gello_handwash_press"
+  # Task description stored in the dataset.
+  single_task: "Align with the pump of a fixed handwash bottle, press down until soap is dispensed, then release the pump and withdraw."
   fps: 15
   episode_time_s: 960  # max duration for one episode
   reset_time_s: 20    # time for resetting env between episodes
