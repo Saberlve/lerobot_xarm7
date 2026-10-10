@@ -13,6 +13,10 @@ robot:
   gripper_speed: 50
   gripper_command_interval_s: 0.03334
   enable_logs: false
+  # Require mapped RealSense exposure-midpoint time on all three RGB streams.
+  realsense_require_exposure_timestamp: true
+  # 15 Hz frame period (~67 ms) plus RGB delivery/SDK latency for the watermark.
+  sync_wait_ms: 200.0
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
   joint_command_mode: 6
   max_joint_velocity: 120
@@ -31,7 +35,7 @@ robot:
       serial_number_or_name: "242622070583"
       width: 640
       height: 480
-      # Select the latest host-received frame at/before each action send-start.
+      # Select by mapped SENSOR_TIMESTAMP (exposure midpoint), including late arrivals.
       fps: 15
     third_camera:
       type: intelrealsense

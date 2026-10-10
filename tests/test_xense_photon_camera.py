@@ -134,16 +134,19 @@ def test_runtime_export_failure_releases_camera(sdk, tmp_path, monkeypatch, fail
     assert not camera.is_connected
 
 
-def test_registration_and_yaml():
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "config/gello/xarm7_gello_record_xense_photon_config.yaml"
-    )
-    raw = yaml.safe_load(path.read_text())
+def test_registration_with_two_configured_sensors():
     configs = {
-        key: draccus.decode(CameraConfig, value)
-        for key, value in raw["robot"]["cameras"].items()
-        if value["type"] == "photon"
+        name: draccus.decode(
+            CameraConfig,
+            {
+                "type": "photon",
+                "serial_number": serial,
+                "fps": 60,
+                "disable_infer": True,
+                "save_marker_motion_3d": False,
+            },
+        )
+        for name, serial in [("photon_right", "RIGHT"), ("photon_left", "LEFT")]
     }
     cameras = make_cameras_from_configs(configs)
     assert set(cameras) == {"photon_right", "photon_left"}
@@ -151,7 +154,6 @@ def test_registration_and_yaml():
     assert cameras["photon_right"].config.color_mode == ColorMode.RGB
     assert not cameras["photon_right"].saves_marker_motion_3d
     assert cameras["photon_right"].config.disable_infer
-    assert raw['offline_mesh3dflow']
 
 
 def test_registration_and_yaml_four_tactile_streams():
@@ -175,9 +177,7 @@ def test_registration_and_yaml_four_tactile_streams():
     }
     assert all(isinstance(cam, XensePhotonCamera) for cam in cameras.values())
     assert len({cam.config.serial_number for cam in cameras.values()}) == 4
-    rgb_keys = {
-        key for key, value in camera_entries.items() if value["type"] == "intelrealsense"
-    }
+    rgb_keys = {key for key, value in camera_entries.items() if value["type"] == "intelrealsense"}
     assert rgb_keys == {"wrist_camera", "third_camera", "wrist_camera_2"}
     assert raw["offline_mesh3dflow"]
 
@@ -206,10 +206,12 @@ def test_duplicate_serial_rejected():
 def test_two_sensors_and_lifecycle(sdk):
     _, instances = sdk
     assert len(XensePhotonCamera.find_cameras()) == 2
-    left = XensePhotonCamera(config(config_path="/calibration", disable_infer=True,
-                                    save_marker_motion_3d=False))
-    right = XensePhotonCamera(config("RIGHT", output_type="Raw",
-                                     disable_infer=True, save_marker_motion_3d=False))
+    left = XensePhotonCamera(
+        config(config_path="/calibration", disable_infer=True, save_marker_motion_3d=False)
+    )
+    right = XensePhotonCamera(
+        config("RIGHT", output_type="Raw", disable_infer=True, save_marker_motion_3d=False)
+    )
     with pytest.raises(DeviceNotConnectedError):
         left.read()
     left.connect()
@@ -224,7 +226,9 @@ def test_two_sensors_and_lifecycle(sdk):
         np.testing.assert_array_equal(left.read(ColorMode.BGR)[0, 0], [10, 20, 30])
         frame[:] = 0
         assert left.read()[0, 0, 0] == 30
-        assert instances[0].kwargs == dict(disable_infer=True, config_path="/calibration")
+        assert instances[0].kwargs == dict(
+            disable_infer=True, config_path="/calibration", infer_mode="fast"
+        )
         assert instances[1].output == (2, 5)
     finally:
         left.disconnect()
@@ -237,7 +241,7 @@ def test_two_sensors_and_lifecycle(sdk):
 def test_marker_motion_3d_and_rgb_share_one_sdk_sample(sdk):
     _, instances = sdk
     camera = XensePhotonCamera(
-        config(disable_infer=False, save_marker_motion_3d=True)
+        config(disable_infer=False, save_marker_motion_3d=True, motion_3d_output="Marker3DFlow")
     )
     camera.connect()
     try:
@@ -256,18 +260,22 @@ def test_marker_motion_3d_and_rgb_share_one_sdk_sample(sdk):
 
 
 def test_latest_marker_sample_is_causal_and_enforces_age(sdk):
-    camera = XensePhotonCamera(config(disable_infer=False, save_marker_motion_3d=True))
+    camera = XensePhotonCamera(
+        config(disable_infer=False, save_marker_motion_3d=True, motion_3d_output="Marker3DFlow")
+    )
     # Exercise the time-pairing queue directly; no SDK thread is needed.
     camera._sensor = object()
     target = camera_xense_photon.perf_counter()
     with camera._condition:
         for offset_s in (-0.010, -0.001, 0.001):
-            camera._sample_history.append(XensePhotonSample(
-                frame_bgr=np.zeros((12, 8, 3), dtype=np.uint8),
-                marker_motion_3d=np.ones((35, 20, 3), dtype=np.float32),
-                sensor_timestamp_s=1.0 + offset_s,
-                capture_monotonic_s=target + offset_s,
-            ))
+            camera._sample_history.append(
+                XensePhotonSample(
+                    frame_bgr=np.zeros((12, 8, 3), dtype=np.uint8),
+                    marker_motion_3d=np.ones((35, 20, 3), dtype=np.float32),
+                    sensor_timestamp_s=1.0 + offset_s,
+                    capture_monotonic_s=target + offset_s,
+                )
+            )
 
     frame, tactile = camera.async_read_with_marker_motion_3d_latest_before(
         target_monotonic_s=target,
@@ -383,7 +391,9 @@ def test_tactile_window_can_be_normally_empty_after_retained_history(sdk):
 
 def test_empty_warmup_releases(sdk, monkeypatch):
     sensor, instances = sdk
-    monkeypatch.setattr(sensor, "selectSensorInfo", lambda self, *outputs: (None, None, None))
+    monkeypatch.setattr(
+        sensor, "selectSensorInfo", lambda self, *outputs: tuple(None for _ in outputs)
+    )
     camera = XensePhotonCamera(config(timeout_ms=30))
     with pytest.raises(TimeoutError):
         camera.connect()
@@ -441,7 +451,7 @@ def test_sdk_create_uses_supported_options(sdk):
     camera = XensePhotonCamera(config())
     camera.connect()
     try:
-        assert instances[0].kwargs == {"disable_infer": False}
+        assert instances[0].kwargs == {"disable_infer": True, "infer_mode": "fast"}
         assert camera.sync_samples()
     finally:
         camera.disconnect()
@@ -449,6 +459,7 @@ def test_sdk_create_uses_supported_options(sdk):
 
 def test_repeated_sdk_timestamp_does_not_refresh_history(sdk):
     from time import sleep
+
     camera = XensePhotonCamera(config())
     camera.connect()
     try:
@@ -463,7 +474,9 @@ def test_repeated_sdk_timestamp_does_not_refresh_history(sdk):
 
 def test_mesh_displacement_has_distinct_dataset_key(sdk):
     _, instances = sdk
-    camera = XensePhotonCamera(config(motion_3d_output="Mesh3DFlow"))
+    camera = XensePhotonCamera(
+        config(motion_3d_output="Mesh3DFlow", disable_infer=False, save_marker_motion_3d=True)
+    )
     camera.connect()
     try:
         frame, timing = camera.export_sync_sample(camera.sync_samples()[0])
@@ -476,36 +489,47 @@ def test_mesh_displacement_has_distinct_dataset_key(sdk):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_deferred_solver_reused_and_released(sdk, tmp_path, monkeypatch, fail):
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_deferred_solver_reused_and_released(sdk, tmp_path, monkeypatch, fail, dtype):
     sensor, _ = sdk
     created = []
+
     class Solver:
         def __init__(self):
             self.calls = self.releases = 0
-            self.buffer = np.zeros((35,20,3), np.float32)
+            self.buffer = np.zeros((35, 20, 3), dtype)
+
         def selectSensorInfo(self, output, rectify_image):
             self.calls += 1
             if fail and self.calls == 3:
                 raise RuntimeError("inference failed")
             self.buffer[:] = self.calls
             return self.buffer
+
         def release(self):
             self.releases += 1
+
     def create(*args, **kwargs):
-        solver = Solver(); created.append(solver); return solver
+        solver = Solver()
+        created.append(solver)
+        return solver
+
     monkeypatch.setattr(sensor, "createSolver", create, raising=False)
     camera = XensePhotonCamera(config())
     frames = []
     try:
         with camera.deferred_session(tmp_path):
             for _ in range(5):
-                frames.append(camera.compute_deferred_features(np.zeros((12,8,3), np.uint8), tmp_path))
+                frames.append(
+                    camera.compute_deferred_features(np.zeros((12, 8, 3), np.uint8), tmp_path)
+                )
     except RuntimeError as exc:
         assert fail and str(exc) == "inference failed"
     assert len(created) == 1
     assert created[0].releases == 1
     assert camera._solver is None
     assert np.all(frames[0]["mesh_motion_3d"] == 1)
+    assert frames[0]["mesh_motion_3d"].dtype == dtype
     with camera.deferred_session(tmp_path / "next"):
-        camera.compute_deferred_features(np.zeros((12,8,3), np.uint8), tmp_path / "next")
+        camera.compute_deferred_features(np.zeros((12, 8, 3), np.uint8), tmp_path / "next")
     assert len(created) == 2 and created[1].releases == 1

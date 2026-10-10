@@ -132,18 +132,23 @@ class XensePhotonCamera(TactileCamera):
 
     def compute_deferred_features(
         self, image_bgr: NDArray[np.uint8], runtime_dir: Path
-    ) -> dict[str, NDArray[np.float32]]:
+    ) -> dict[str, NDArray[Any]]:
         with self.deferred_session(runtime_dir):
             flow = np.array(
                 self._solver.selectSensorInfo(
                     _sensor_class().OutputType.Mesh3DFlow, rectify_image=image_bgr
-                ), dtype=np.float32, copy=True,
+                ),
+                copy=True,
             )
             expected_shape = self.deferred_feature_shapes["mesh_motion_3d"]
-            if flow.shape != expected_shape or not np.isfinite(flow).all():
+            if (
+                flow.shape != expected_shape
+                or flow.dtype.kind != "f"
+                or not np.isfinite(flow).all()
+            ):
                 raise RuntimeError(
                     f"Invalid offline Mesh3DFlow for {self.config.serial_number}: "
-                    f"expected {expected_shape}, got {flow.shape}"
+                    f"expected finite floating array {expected_shape}, got {flow.shape}, {flow.dtype}"
                 )
             return {"mesh_motion_3d": flow}
 
@@ -157,7 +162,9 @@ class XensePhotonCamera(TactileCamera):
 
     @property
     def motion_3d_feature_key(self) -> str:
-        return "mesh_motion_3d" if self.config.motion_3d_output == "Mesh3DFlow" else "marker_motion_3d"
+        return (
+            "mesh_motion_3d" if self.config.motion_3d_output == "Mesh3DFlow" else "marker_motion_3d"
+        )
 
     @staticmethod
     def find_cameras() -> list[dict[str, Any]]:
@@ -244,8 +251,7 @@ class XensePhotonCamera(TactileCamera):
                     # instead of silently pairing it against perf_counter().
                     if not 1e8 <= sensor_timestamp <= 1e11:
                         raise ValueError(
-                            "Xense TimeStamp is not in Unix seconds: "
-                            f"{sensor_timestamp}"
+                            f"Xense TimeStamp is not in Unix seconds: {sensor_timestamp}"
                         )
                     if sensor_timestamp == last_sensor_timestamp:
                         self._stop.wait(max(0, 1 / self.fps - (perf_counter() - started)))
@@ -264,9 +270,7 @@ class XensePhotonCamera(TactileCamera):
                         and mapped_monotonic_s <= last_mapped_monotonic_s
                     ):
                         last_sensor_timestamp = sensor_timestamp
-                        self._stop.wait(
-                            max(0, 1 / self.fps - (perf_counter() - started))
-                        )
+                        self._stop.wait(max(0, 1 / self.fps - (perf_counter() - started)))
                         continue
                     if not isinstance(frame, np.ndarray) or frame.dtype != np.uint8:
                         raise ValueError("Xense image must be a uint8 numpy array")
@@ -275,7 +279,12 @@ class XensePhotonCamera(TactileCamera):
                     if frame.shape[:2] != (self.height, self.width):
                         frame = cv2.resize(frame, (self.width, self.height))
                     if self.config.save_marker_motion_3d:
-                        marker_motion_3d = np.asarray(marker_motion_3d, dtype=np.float32)
+                        marker_motion_3d = np.asarray(marker_motion_3d)
+                        if (
+                            marker_motion_3d.dtype.kind != "f"
+                            or not np.isfinite(marker_motion_3d).all()
+                        ):
+                            raise ValueError("Xense displacement must be a finite floating array")
                         expected_shape = (
                             self.config.marker_rows,
                             self.config.marker_cols,
@@ -316,7 +325,9 @@ class XensePhotonCamera(TactileCamera):
             if not self.is_connected or self._stop.is_set():
                 raise DeviceNotConnectedError()
             if self._error is not None:
-                raise RuntimeError(f"Xense capture failed for {self.config.serial_number}") from self._error
+                raise RuntimeError(
+                    f"Xense capture failed for {self.config.serial_number}"
+                ) from self._error
             return tuple(self._sample_history)
 
     def export_sync_sample(self, sample: XensePhotonSample) -> tuple[NDArray[Any], dict]:
@@ -440,18 +451,14 @@ class XensePhotonCamera(TactileCamera):
         A positive ``wait_ms`` waits only for a timestamp beyond ``end`` to
         watermark the ordered stream. That future sample is never returned.
         """
-        if not all(
-            np.isfinite(value)
-            for value in (start_monotonic_s, end_monotonic_s, wait_ms)
-        ):
+        if not all(np.isfinite(value) for value in (start_monotonic_s, end_monotonic_s, wait_ms)):
             raise ValueError("Xense window bounds must be finite")
         if end_monotonic_s < start_monotonic_s or wait_ms < 0:
             raise ValueError("Xense window end must be at or after its start")
         deadline = perf_counter() + wait_ms / 1_000
         with self._condition:
             while wait_ms > 0 and not any(
-                sample.capture_monotonic_s > end_monotonic_s
-                for sample in self._sample_history
+                sample.capture_monotonic_s > end_monotonic_s for sample in self._sample_history
             ):
                 if not self.is_connected or self._stop.is_set():
                     raise DeviceNotConnectedError()
@@ -511,9 +518,7 @@ class XensePhotonCamera(TactileCamera):
         """Return RGB/BGR and marker displacement from the same cached SDK sample."""
         if not self.saves_marker_motion_3d:
             raise RuntimeError("Marker3DFlow saving is disabled for this Xense camera")
-        sample = self._latest_sample(
-            self.config.timeout_ms if timeout_ms is None else timeout_ms
-        )
+        sample = self._latest_sample(self.config.timeout_ms if timeout_ms is None else timeout_ms)
         if sample.marker_motion_3d is None or sample.sensor_timestamp_s is None:
             raise RuntimeError("Latest Xense sample has no Marker3DFlow or TimeStamp")
         frame = sample.frame_bgr
@@ -524,9 +529,7 @@ class XensePhotonCamera(TactileCamera):
             "sensor_timestamp_s": sample.sensor_timestamp_s,
             "capture_monotonic_s": sample.capture_monotonic_s,
             "capture_monotonic_ns": sample.capture_monotonic_ns,
-            "device_to_host_offset_s": (
-                sample.capture_monotonic_s - sample.sensor_timestamp_s
-            ),
+            "device_to_host_offset_s": (sample.capture_monotonic_s - sample.sensor_timestamp_s),
         }
 
     def async_read_with_marker_motion_3d_latest_before(
@@ -553,9 +556,7 @@ class XensePhotonCamera(TactileCamera):
             "sensor_timestamp_s": sample.sensor_timestamp_s,
             "capture_monotonic_s": sample.capture_monotonic_s,
             "capture_monotonic_ns": sample.capture_monotonic_ns,
-            "device_to_host_offset_s": (
-                sample.capture_monotonic_s - sample.sensor_timestamp_s
-            ),
+            "device_to_host_offset_s": (sample.capture_monotonic_s - sample.sensor_timestamp_s),
             "sync_target_monotonic_s": target_monotonic_s,
             "sync_offset_ms": sync_offset_ms,
         }

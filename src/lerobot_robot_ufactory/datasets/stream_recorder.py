@@ -1,10 +1,10 @@
-"""Lossless per-episode Photon streams kept outside LeRobot video features."""
+"""Transactional native-rate videos and lossless tactile displacement arrays."""
 
 from __future__ import annotations
 
-import os
 import json
 import logging
+import os
 import queue
 import shutil
 import threading
@@ -15,7 +15,6 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
-
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +84,9 @@ def cleanup_stale_tactile_staging(dataset_root: Path) -> None:
                     marker = Path(marker_path)
                     marker.resolve().relative_to(dataset_root)
                     if marker.is_file():
-                        committed = (
-                            json.loads(marker.read_text()).get("transaction_id")
-                            == journal.get("transaction_id")
-                        )
+                        committed = json.loads(marker.read_text()).get(
+                            "transaction_id"
+                        ) == journal.get("transaction_id")
                 if not committed and journal.get("dataset_saved") and marker_path:
                     marker_item = items[-1]
                     marker_source = Path(marker_item["source"])
@@ -116,8 +114,8 @@ class TactileStreamRecorder:
     """Asynchronously persist variable-rate tactile samples and their clocks.
 
     Dataset rows refer to a half-open index range ``[start_index, end_index)``
-    in each stream. Samples themselves are lossless PNGs plus a Parquet index;
-    optional SDK displacement arrays are saved as ``.npy`` files.
+    in each stream. Images become native-rate videos only after their numeric
+    displacement arrays have been written and checked bit for bit.
     """
 
     _STOP = object()
@@ -128,6 +126,10 @@ class TactileStreamRecorder:
         episode_index: int,
         stream_names: tuple[str, ...] | list[str],
         *,
+        stream_fps: dict[str, float] | None = None,
+        video_streams: dict[str, str] | None = None,
+        video_crf: dict[str, int] | None = None,
+        required_mesh_streams: tuple[str, ...] = (),
         queue_size: int = 256,
         enqueue_timeout_s: float = 0.1,
         num_writer_threads: int | None = None,
@@ -159,6 +161,18 @@ class TactileStreamRecorder:
         self.dataset_root = Path(dataset_root)
         self.episode_index = int(episode_index)
         self.stream_names = names
+        self.stream_fps = dict(stream_fps or {})
+        self.video_streams = dict(video_streams or {})
+        self.video_crf = dict(video_crf or {})
+        self.required_mesh_streams = set(required_mesh_streams)
+        if self.required_mesh_streams - set(names):
+            raise ValueError("Mesh settings must reference known streams")
+        if set(self.stream_fps) - set(names) or set(self.video_streams) - set(names):
+            raise ValueError("Camera video/rate settings must reference known streams")
+        if any(not np.isfinite(fps) or fps <= 0 for fps in self.stream_fps.values()):
+            raise ValueError("Camera stream fps must be finite and positive")
+        if set(self.video_streams) - set(self.stream_fps):
+            raise ValueError("Native-rate video requires an explicit camera fps")
         self._base = f"episode_{self.episode_index:06d}"
         self._transaction_id = uuid4().hex
         self._staging_root = (
@@ -204,6 +218,17 @@ class TactileStreamRecorder:
         for thread in self._threads:
             thread.start()
 
+    def add_initial_sample(self, stream_name, sample, window_start_s):
+        """Persist a pre-start representative, outside the first action range."""
+        if self._rows[stream_name]:
+            raise ValueError("Initial representative must precede all window samples")
+        capture_s = float(sample.capture_monotonic_s)
+        if not np.isfinite(capture_s) or capture_s > window_start_s:
+            raise ValueError("Initial representative must be at or before episode start")
+        # Reuse the validated writer without adding this synthetic interval to
+        # synchronization.frames. The real first window starts at index 1.
+        self.add_window(stream_name, (sample,), np.nextafter(capture_s, -np.inf), capture_s)
+
     def add_window(
         self,
         stream_name: str,
@@ -238,9 +263,7 @@ class TactileStreamRecorder:
                     f"({start_monotonic_s:.9f}, {end_monotonic_s:.9f}]"
                 )
             if previous is not None and capture_s <= previous:
-                raise AssertionError(
-                    f"Tactile stream {stream_name} is not strictly monotonic"
-                )
+                raise AssertionError(f"Tactile stream {stream_name} is not strictly monotonic")
             index = len(self._rows[stream_name])
             frame_relative = (
                 Path("tactile_streams")
@@ -260,10 +283,10 @@ class TactileStreamRecorder:
                     / f"motion_{index:06d}.npy"
                 )
             sensor_timestamp_s = getattr(sample, "sensor_timestamp_s", None)
-            device_to_host_offset_s = (
-                None
-                if sensor_timestamp_s is None
-                else capture_s - float(sensor_timestamp_s)
+            camera_timing = getattr(sample, "timing", {})
+            device_to_host_offset_s = camera_timing.get(
+                "device_to_host_offset_s",
+                None if sensor_timestamp_s is None else capture_s - float(sensor_timestamp_s),
             )
             row = {
                 "tactile_index": index,
@@ -277,11 +300,16 @@ class TactileStreamRecorder:
                     None if sensor_timestamp_s is None else float(sensor_timestamp_s)
                 ),
                 "device_to_host_offset_s": device_to_host_offset_s,
+                "camera_timing_json": json.dumps(camera_timing, sort_keys=True),
                 "frame_path": frame_relative.as_posix(),
-                "motion_path": (
-                    None if marker_relative is None else marker_relative.as_posix()
-                ),
+                "motion_path": (None if marker_relative is None else marker_relative.as_posix()),
                 "image_encoding": "png_bgr8",
+                "camera_fps": self.stream_fps.get(stream_name),
+                "video_path": None,
+                "video_frame_index": None,
+                "video_timestamp_s": None,
+                "mesh_path": None,
+                "mesh_frame_index": None,
             }
             self._rows[stream_name].append(row)
             item_id = self._next_queue_item_id
@@ -345,6 +373,7 @@ class TactileStreamRecorder:
                 if end_monotonic_ns is not None
                 else round(end_monotonic_s * 1_000_000_000)
             ),
+            "camera_fps": self.stream_fps.get(stream_name),
             "start_index": start_index,
             "end_index": end_index,
             "frame_count": end_index - start_index,
@@ -354,15 +383,11 @@ class TactileStreamRecorder:
             ],
             "sensor_timestamp_s": sensor_times,
             "device_to_host_offset_s": [
-                None
-                if sensor_timestamp_s is None
-                else capture_s - sensor_timestamp_s
-                for capture_s, sensor_timestamp_s in zip(capture_times, sensor_times)
+                self._rows[stream_name][index]["device_to_host_offset_s"]
+                for index in range(start_index, end_index)
             ],
             "span_ms": (
-                0.0
-                if len(capture_times) < 2
-                else (capture_times[-1] - capture_times[0]) * 1_000
+                0.0 if len(capture_times) < 2 else (capture_times[-1] - capture_times[0]) * 1_000
             ),
         }
 
@@ -388,7 +413,8 @@ class TactileStreamRecorder:
                 if marker is not None:
                     motion_dir = stream_root / "motion"
                     motion_dir.mkdir(exist_ok=True)
-                    np.save(motion_dir / f"motion_{index:06d}.npy", np.asarray(marker))
+                    motion_path = motion_dir / f"motion_{index:06d}.npy"
+                    self._save_exact_array(motion_path, np.asarray(marker))
                 latency_ms = (time.perf_counter_ns() - write_started_ns) / 1_000_000
                 with self._metrics_lock:
                     self._written_count += 1
@@ -452,6 +478,117 @@ class TactileStreamRecorder:
     def representative_index(self, stream_name: str, capture_monotonic_ns: int) -> int | None:
         return self._capture_index[stream_name].get(int(capture_monotonic_ns))
 
+    @staticmethod
+    def _save_exact_array(path, values):
+        """NPY preserves dtype, shape and every bit (including signed zero)."""
+        if values.dtype.hasobject or not np.isfinite(values).all():
+            raise TactilePersistenceError("Mesh3DFlow must contain finite numeric values")
+        temporary = path.with_suffix(".npy.tmp")
+        with temporary.open("wb") as stream:
+            np.save(stream, values, allow_pickle=False)
+        saved = np.load(temporary, allow_pickle=False)
+        if (
+            saved.dtype != values.dtype
+            or saved.shape != values.shape
+            or saved.tobytes() != values.tobytes()
+        ):
+            raise TactilePersistenceError("Lossless Mesh3DFlow round-trip validation failed")
+        os.replace(temporary, path)
+
+    def compute_mesh(self, cameras, runtime_dir):
+        """Infer every native-rate frame from PNGs before they enter a codec."""
+        import hashlib
+
+        from .deferred_mesh import deferred_sessions
+
+        self._close_writer()
+        result = {}
+        for name, camera in cameras.items():
+            if name not in self._rows:
+                continue
+            rows = self._rows[name]
+            if not rows:
+                continue
+            staged = self._staging_root / name
+            path = staged / "mesh3dflow.npy"
+            if path.is_file() and all(row["mesh_path"] for row in rows):
+                result[name] = np.load(path, allow_pickle=False, mmap_mode="r")
+                continue
+            expected = tuple(camera.deferred_feature_shapes["mesh_motion_3d"])
+            temporary = path.with_suffix(".npy.tmp")
+            values = None
+            expected_dtype = None
+            expected_digest = hashlib.sha256()
+            with deferred_sessions({name: camera}, runtime_dir):
+                for index in range(len(rows)):
+                    image_path = staged / "frames" / f"frame_{index:06d}.png"
+                    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+                    if image is None:
+                        raise TactilePersistenceError(
+                            f"Missing original tactile image: {image_path}"
+                        )
+                    computed = camera.compute_deferred_features(image, Path(runtime_dir))
+                    flow = np.asarray(computed["mesh_motion_3d"])
+                    if (
+                        flow.shape != expected
+                        or flow.dtype.kind != "f"
+                        or not np.isfinite(flow).all()
+                    ):
+                        raise TactilePersistenceError(
+                            f"Invalid native Mesh3DFlow: {flow.shape}, {flow.dtype}"
+                        )
+                    if values is None:
+                        expected_dtype = flow.dtype
+                        values = np.lib.format.open_memmap(
+                            temporary,
+                            mode="w+",
+                            dtype=expected_dtype,
+                            shape=(len(rows), *expected),
+                        )
+                    elif flow.dtype != expected_dtype:
+                        raise TactilePersistenceError(
+                            f"Native Mesh3DFlow dtype changed: {expected_dtype} to {flow.dtype}"
+                        )
+                    values[index] = flow
+                    expected_digest.update(flow.tobytes())
+            values.flush()
+            del values
+            saved = np.load(temporary, allow_pickle=False, mmap_mode="r")
+            if saved.dtype != expected_dtype or saved.shape != (len(rows), *expected):
+                raise TactilePersistenceError("Native Mesh3DFlow dtype/shape round-trip failed")
+            saved_digest = hashlib.sha256()
+            for flow in saved:
+                saved_digest.update(flow.tobytes())
+            if saved_digest.digest() != expected_digest.digest():
+                raise TactilePersistenceError("Native Mesh3DFlow round-trip validation failed")
+            del saved
+            os.replace(temporary, path)
+            values = np.load(path, allow_pickle=False, mmap_mode="r")
+            file_digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    file_digest.update(chunk)
+            relative = Path("tactile_streams") / name / self._base / path.name
+            for index, row in enumerate(rows):
+                row.update(mesh_path=relative.as_posix(), mesh_frame_index=index)
+            (staged / "mesh3dflow.json").write_text(
+                json.dumps(
+                    {
+                        "dtype": values.dtype.str,
+                        "shape": list(values.shape),
+                        "lossless": True,
+                        "roundtrip": "bit_exact",
+                        "source": "uncompressed_rectify_png_before_video_encoding",
+                        "sha256": file_digest.hexdigest(),
+                        "camera_fps": self.stream_fps.get(name),
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            result[name] = values
+        return result
+
     def prepare(self, episode_index: int) -> None:
         """Flush and validate all raw files while they are still private."""
         if int(episode_index) != self.episode_index:
@@ -472,9 +609,16 @@ class TactileStreamRecorder:
                 ("capture_monotonic_s", pa.float64()),
                 ("sensor_timestamp_s", pa.float64()),
                 ("device_to_host_offset_s", pa.float64()),
+                ("camera_timing_json", pa.string()),
                 ("frame_path", pa.string()),
                 ("motion_path", pa.string()),
                 ("image_encoding", pa.string()),
+                ("camera_fps", pa.float64()),
+                ("video_path", pa.string()),
+                ("video_frame_index", pa.int64()),
+                ("video_timestamp_s", pa.float64()),
+                ("mesh_path", pa.string()),
+                ("mesh_frame_index", pa.int64()),
             ]
         )
         for name in self.stream_names:
@@ -483,16 +627,47 @@ class TactileStreamRecorder:
                 if row["tactile_index"] != index:
                     raise TactilePersistenceError(f"Non-contiguous tactile index for {name}")
                 if not (staged / "frames" / f"frame_{index:06d}.png").is_file():
-                    raise TactilePersistenceError(f"Missing staged tactile frame for {name}:{index}")
-                if row["motion_path"] is not None and not (
-                    staged / "motion" / f"motion_{index:06d}.npy"
-                ).is_file():
-                    raise TactilePersistenceError(f"Missing staged tactile motion for {name}:{index}")
+                    raise TactilePersistenceError(
+                        f"Missing staged tactile frame for {name}:{index}"
+                    )
+                if (
+                    row["motion_path"] is not None
+                    and not (staged / "motion" / f"motion_{index:06d}.npy").is_file()
+                ):
+                    raise TactilePersistenceError(
+                        f"Missing staged tactile motion for {name}:{index}"
+                    )
+                if name in self.required_mesh_streams and not (
+                    row["mesh_path"] or row["motion_path"]
+                ):
+                    raise TactilePersistenceError(
+                        f"Refusing to encode before lossless Mesh3DFlow is saved: {name}:{index}"
+                    )
+                if row["mesh_path"] is not None and not (staged / "mesh3dflow.npy").is_file():
+                    raise TactilePersistenceError(f"Missing staged Mesh3DFlow for {name}:{index}")
+            if name in self.video_streams and self._rows[name]:
+                from lerobot_robot_ufactory.datasets.camera_streams import encode_camera_interval
+
+                encode_camera_interval(
+                    staged,
+                    self._rows[name],
+                    self.stream_fps[name],
+                    self.video_streams[name],
+                    Path("tactile_streams") / name / self._base,
+                    crf=self.video_crf.get(name, 30),
+                )
             index_path = staged / "samples.parquet"
             temporary = index_path.with_suffix(".parquet.tmp")
             table = pa.Table.from_pylist(self._rows[name], schema=schema)
             pq.write_table(table, temporary)
             os.replace(temporary, index_path)
+
+        # Keep every original input until all streams have valid videos and
+        # indexes. A later camera's encoding failure must not erase an earlier
+        # camera's originals, so the whole preparation can be retried.
+        for name in self.stream_names:
+            if name in self.video_streams and self._rows[name]:
+                shutil.rmtree(self._staging_root / name / "frames")
 
         self._prepared = True
 
@@ -537,9 +712,7 @@ class TactileStreamRecorder:
             "transaction_id": self._transaction_id,
             "episode_index": self.episode_index,
             "dataset_saved": False,
-            "commit_marker": (
-                None if commit_marker is None else str(commit_marker[1].resolve())
-            ),
+            "commit_marker": (None if commit_marker is None else str(commit_marker[1].resolve())),
             "items": journal_items,
         }
         journal_path = self._staging_root / "transaction.json"

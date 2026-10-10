@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lerobot_robot_ufactory.utils.episode_images import discard_episode_images, validate_episode_images
+from lerobot_robot_ufactory.datasets.episode_images import discard_episode_images, validate_episode_images
 
 
 @pytest.fixture

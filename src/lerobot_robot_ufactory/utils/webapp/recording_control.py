@@ -260,9 +260,9 @@ def controlled_recording(
         control.transition("saving", stage="Validating images", has_unsaved=True)
         recording.validate_episode_images(dataset, recording._get_episode_buffer(dataset))
         if cfg.offline_mesh3dflow and tactile_cameras:
-            from lerobot_robot_ufactory.tactile.deferred import compute_episode_mesh
+            from lerobot_robot_ufactory.datasets.deferred_mesh import compute_episode_mesh
             control.progress(stage="Computing Mesh3DFlow")
-            compute_episode_mesh(dataset, tactile_cameras, runtime_dir, index)
+            compute_episode_mesh(dataset, tactile_cameras, runtime_dir, index, synchronization=sync)
         transactional = sync is not None and sync.tactile_recorder is not None
         if sync is not None and transactional:
             sync.write(Path(dataset.root), index, defer_commit=True)
@@ -273,6 +273,9 @@ def controlled_recording(
                 sync.commit()
             else:
                 sync.write(Path(dataset.root), index)
+        finish_native = getattr(dataset, "finish_native_episode", None)
+        if finish_native is not None:
+            finish_native(index)
         print(f"[Finish] Save episode {index}", flush=True)
 
     with recording.VideoEncodingManager(dataset), recording._RecordingCleanup(

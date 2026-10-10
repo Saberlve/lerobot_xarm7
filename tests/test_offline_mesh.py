@@ -1,7 +1,7 @@
 from types import SimpleNamespace as NS
 import numpy as np
 import pytest
-from lerobot_robot_ufactory.tactile import deferred as offline_mesh
+from lerobot_robot_ufactory.datasets import deferred_mesh as offline_mesh
 
 
 class FakeTactileCamera:

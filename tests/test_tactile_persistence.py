@@ -13,8 +13,8 @@ from lerobot_robot_ufactory.scripts.uf_lerobot_record import (
     EpisodeSynchronization,
     _EpisodeSynchronizationOwner,
 )
-from lerobot_robot_ufactory.tactile import persistence
-from lerobot_robot_ufactory.tactile.persistence import (
+from lerobot_robot_ufactory.datasets import stream_recorder as persistence
+from lerobot_robot_ufactory.datasets.stream_recorder import (
     TactileBackpressureError,
     TactileStreamRecorder,
     cleanup_stale_tactile_staging,

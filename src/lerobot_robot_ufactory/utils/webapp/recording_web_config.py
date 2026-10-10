@@ -78,7 +78,7 @@ def dataset_status(project, raw):
         return result
     try:
         from lerobot_robot_ufactory.scripts.uf_lerobot_record import _missing_dataset_files
-        from lerobot_robot_ufactory.utils.raw_episodes import RawEpisodeStore
+        from lerobot_robot_ufactory.datasets.raw_episodes import RawEpisodeStore
         info = json.loads((root / "meta/info.json").read_text())
         result["episodes"] = int(info["total_episodes"])
         missing = _missing_dataset_files(root)

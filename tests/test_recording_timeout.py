@@ -10,6 +10,7 @@ import pytest
 from lerobot.datasets.image_writer import AsyncImageWriter
 
 from lerobot_robot_ufactory.scripts import uf_lerobot_record as recording
+from lerobot_robot_ufactory.datasets.deferred_mesh import compute_episode_mesh as real_compute_episode_mesh
 from lerobot_robot_ufactory.tactile.photon.camera import XensePhotonSample
 from lerobot_robot_ufactory.tactile.photon.config import XensePhotonCameraConfig
 
@@ -89,7 +90,7 @@ class Dataset:
 @pytest.fixture
 def session(tmp_path, monkeypatch):
     import lerobot_robot_ufactory.tactile as tactile
-    import lerobot_robot_ufactory.tactile.deferred as deferred
+    import lerobot_robot_ufactory.datasets.deferred_mesh as deferred
 
     class Camera:
         deferred_feature_shapes = {"mesh_motion_3d": (2, 2, 3)}
@@ -205,7 +206,8 @@ def session(tmp_path, monkeypatch):
             assert not dataset._get_image_file_dir(1, "observation.images.photon").exists()
             assert not dataset.image_writer._stopped
             if cfg.offline_mesh3dflow:
-                assert state.mesh_episodes == [0]
+                if "observation.photon.tactile_range" not in dataset.features:
+                    assert state.mesh_episodes == [0]
                 staging = dataset.root / "tactile_streams/.staging"
                 assert not staging.exists() or not any(staging.iterdir())
                 assert dataset.num_episodes == 1
@@ -216,7 +218,7 @@ def session(tmp_path, monkeypatch):
                 dataset.events["stop_recording"] = True
         return ""
 
-    def compute_mesh(dataset, cameras, runtime_dir, episode_index, episode_buffer=None):
+    def compute_mesh(dataset, cameras, runtime_dir, episode_index, episode_buffer=None, synchronization=None):
         buffer = dataset.episode_buffer if episode_buffer is None else episode_buffer
         assert buffer["episode_index"] == episode_index
         assert dataset.num_episodes == episode_index
@@ -512,7 +514,7 @@ def test_device_error_preserves_completed_offline_episode(session, async_save):
 
 @pytest.mark.parametrize("async_save", [False, True])
 def test_mesh_failure_stops_save_and_preserves_previous_episode(session, monkeypatch, async_save):
-    from lerobot_robot_ufactory.tactile import deferred
+    from lerobot_robot_ufactory.datasets import deferred_mesh as deferred
 
     session.cfg.offline_mesh3dflow = True
     session.cfg.dataset.video = True
@@ -532,3 +534,148 @@ def test_mesh_failure_stops_save_and_preserves_previous_episode(session, monkeyp
     assert session.mesh_episodes == [0]
     assert session.dataset.finalized
     assert not session.robot._is_connected
+
+
+@pytest.mark.parametrize("async_save", [False, True])
+@pytest.mark.parametrize("camera_fps", [15, 60])
+@pytest.mark.parametrize("offline", [False, True])
+def test_native_tactile_video_survives_real_record_and_retry(
+    session, async_save, camera_fps, offline
+):
+    from dataclasses import replace
+    camera = session.robot.cameras["photon"]
+    camera.fps = camera_fps
+    camera.samples_between = lambda start, end, wait=0: (
+        tuple(replace(sample, frame_bgr=np.full((64, 64, 3), 7, dtype=np.uint8)) for sample in session.robot.get_tactile_samples_between(start, end)["photon"])
+    )
+    session.cfg.dataset.fps = 15
+    session.cfg.offline_mesh3dflow = offline
+    session.cfg.dataset.video = True
+    dataset = recording.record(session.cfg, async_save=async_save)
+    assert dataset.fps == 15
+    assert dataset.features["observation.images.photon"]["dtype"] == "video"
+    assert dataset.num_episodes == 2
+    for index in range(2):
+        root = dataset.root / f"tactile_streams/photon/episode_{index:06d}"
+        import pyarrow.parquet as pq
+        rows = pq.read_table(root / "samples.parquet").to_pylist()
+        assert len(rows) == 2
+        assert all(row["camera_fps"] == camera_fps for row in rows)
+        assert all((dataset.root / row["video_path"]).is_file() for row in rows)
+    assert len(list(dataset.root.rglob("*.mp4"))) == 2
+
+
+@pytest.mark.parametrize("legacy_plan", [None, {"dataset_fps": 15, "cameras": {}}])
+def test_legacy_dataset_resume_is_rejected_without_changing_files(session, legacy_plan):
+    import hashlib
+    import json
+
+    root = session.cfg.dataset.root
+    (root / "meta").mkdir(parents=True)
+    (root / "meta/info.json").write_text('{"total_episodes": 0}')
+    (root / "original.png").write_bytes(b"original dataset sentinel")
+    if legacy_plan is not None:
+        (root / "meta/camera_streams.json").write_text(json.dumps(legacy_plan))
+    snapshot = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()}
+    camera = session.robot.cameras["photon"]
+    camera.fps = 60
+    camera.samples_between = lambda *args: ()
+    session.cfg.resume = True
+    session.cfg.dataset.video = True
+    session.cfg.dataset.fps = 15
+    with pytest.raises(ValueError, match="preserve it and use a new dataset root"):
+        recording.record(session.cfg)
+    assert not session.robot._is_connected
+    assert session.dataset is None
+    assert snapshot == {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("async_save", [False, True])
+@pytest.mark.parametrize("online_requested", [False, True])
+def test_native_mesh_action_rows_contain_only_ranges(session, monkeypatch, async_save, online_requested):
+    from dataclasses import replace
+    import pyarrow.parquet as pq
+    from lerobot_robot_ufactory.datasets import deferred_mesh as deferred
+
+    camera = session.robot.cameras["photon"]
+    camera.fps = 60
+    camera.config = SimpleNamespace(motion_3d_output="Mesh3DFlow")
+    camera.samples_between = lambda start, end, wait=0: tuple(
+        replace(sample, frame_bgr=np.full((64, 64, 3), 7, dtype=np.uint8))
+        for sample in session.robot.get_tactile_samples_between(start, end)["photon"]
+    )
+    camera.compute_deferred_features = lambda image, runtime: {
+        "mesh_motion_3d": np.full((2, 2, 3), 1.234567, dtype=np.float32)
+    }
+    monkeypatch.setattr(deferred, "compute_episode_mesh", real_compute_episode_mesh)
+    session.cfg.dataset.fps = 15
+    session.cfg.offline_mesh3dflow = False
+    sensor_config = session.cfg.robot.cameras["photon"]
+    sensor_config.save_marker_motion_3d = online_requested
+    sensor_config.disable_infer = not online_requested
+    session.cfg.dataset.video = True
+    dataset = recording.record(session.cfg, async_save=async_save)
+    assert session.cfg.offline_mesh3dflow
+    assert sensor_config.disable_infer and not sensor_config.save_marker_motion_3d
+    key = "observation.photon.tactile_range"
+    assert dataset.features[key]["dtype"] == "int64"
+    assert "observation.photon.mesh_motion_3d" not in dataset.features
+    for index, buffer in enumerate(dataset.saved):
+        assert np.asarray(buffer[key]).dtype == np.int64
+        assert np.asarray(buffer[key]).tolist() == [[0, 1], [1, 2]]
+        assert "observation.photon.mesh_motion_3d" not in buffer
+        stream = dataset.root / f"tactile_streams/photon/episode_{index:06d}"
+        values = np.load(stream / "mesh3dflow.npy", allow_pickle=False)
+        assert values.shape == (2, 2, 2, 3)
+        rows = pq.read_table(stream / "samples.parquet").to_pylist()
+        assert [row["mesh_frame_index"] for row in rows] == [0, 1]
+
+
+@pytest.mark.parametrize("async_save", [False, True])
+def test_record_seeds_prestart_frame_once_per_episode_and_retry(session, monkeypatch, async_save):
+    import time
+    import json
+    import pyarrow.parquet as pq
+    from lerobot_robot_ufactory.datasets import deferred_mesh as deferred
+
+    camera = session.robot.cameras["photon"]
+    camera.fps = 60
+    camera.config = SimpleNamespace(motion_3d_output="Mesh3DFlow")
+    camera.samples_between = lambda *args: ()
+    camera.sync_samples = lambda: (camera.seed,)
+    camera.compute_deferred_features = lambda image, runtime: {
+        "mesh_motion_3d": np.full((2, 2, 3), 1.234567, dtype=np.float32)
+    }
+    original_observation = session.robot.get_observation
+
+    def observation():
+        value = original_observation()
+        if session.robot.observation_count == 1:
+            captured = time.perf_counter() - 0.001
+            camera.seed = XensePhotonSample(
+                frame_bgr=np.full((64, 64, 3), 7, dtype=np.uint8),
+                capture_monotonic_s=captured, capture_monotonic_ns=round(captured * 1e9),
+                sensor_timestamp_s=None, marker_motion_3d=None,
+            )
+        session.robot._last_observation_sync_timing = {"camera": {"photon": {
+            "capture_monotonic_s": camera.seed.capture_monotonic_s,
+            "capture_monotonic_ns": camera.seed.capture_monotonic_ns,
+        }}}
+        return value
+
+    monkeypatch.setattr(session.robot, "get_observation", observation)
+    monkeypatch.setattr(deferred, "compute_episode_mesh", real_compute_episode_mesh)
+    session.cfg.dataset.fps = 15
+    session.cfg.dataset.video = True
+    dataset = recording.record(session.cfg, async_save=async_save)
+    assert dataset.num_episodes == 2
+    for episode, buffer in enumerate(dataset.saved):
+        assert np.asarray(buffer["observation.photon.tactile_range"]).tolist() == [[1, 1], [1, 1]]
+        stream = dataset.root / f"tactile_streams/photon/episode_{episode:06d}"
+        assert pq.read_table(stream / "samples.parquet").num_rows == 1
+        assert np.load(stream / "mesh3dflow.npy").shape[0] == 1
+        timing = pq.read_table(dataset.root / f"timestamps/episode_{episode:06d}.parquet").to_pylist()
+        for row in timing:
+            interval = json.loads(row["camera_intervals_json"])["photon"]
+            assert interval["frame_count"] == 0
+            assert interval["representative_tactile_index"] == 0

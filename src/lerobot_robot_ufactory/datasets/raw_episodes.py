@@ -175,7 +175,7 @@ def recover_postprocessing(root):
 
 def open_recording_dataset(repo_id, root, **kwargs):
     """Open a raw-only recording locally without attempting a Hub download."""
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from .native_dataset import NativeRateLeRobotDataset as LeRobotDataset
     from lerobot.datasets.utils import load_info
 
     root = Path(root)
@@ -239,9 +239,9 @@ def _cleanup_processed_images(dataset):
 
 def postprocess_raw_episodes(dataset, cameras):
     """Keep raw inputs until conversion is published and can be reopened."""
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from .native_dataset import NativeRateLeRobotDataset as LeRobotDataset
 
-    from lerobot_robot_ufactory.tactile.deferred import compute_episode_mesh, deferred_sessions
+    from lerobot_robot_ufactory.datasets.deferred_mesh import compute_episode_mesh, deferred_sessions
 
     store = RawEpisodeStore(dataset)
     pending = [
@@ -280,6 +280,11 @@ def postprocess_raw_episodes(dataset, cameras):
                 vcodec=dataset.vcodec,
             )
         # Reuse each session's offline solvers across its episodes.
+        converted._native_stream_root = store.root
+        converted._camera_stream_plan = getattr(dataset, "_camera_stream_plan", None)
+        if converted._camera_stream_plan is None:
+            plan_path = store.root / "meta/camera_streams.json"
+            converted._camera_stream_plan = json.loads(plan_path.read_text())["cameras"] if plan_path.is_file() else {}
         active_runtime = None
         with ExitStack() as sessions:
             for ordinal, path in enumerate(pending, 1):
@@ -326,6 +331,9 @@ def postprocess_raw_episodes(dataset, cameras):
                             shutil.copyfile(source, destination)
                 converted.save_episode(episode_data=buffer)
         converted.finalize()
+        plan_path = store.root / "meta/camera_streams.json"
+        if plan_path.is_file():
+            shutil.copyfile(plan_path, output / "meta/camera_streams.json")
         _publish_output(store.root, output, work)
         result = LeRobotDataset(
             dataset.repo_id, root=store.root, batch_encoding_size=1, vcodec=dataset.vcodec

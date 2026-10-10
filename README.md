@@ -80,7 +80,21 @@ Predefined configs are provided under `config/`:
 - `teleop.realtime_control_fps` — independent GELLO-to-xArm command loop rate; it is separate from `dataset.fps`
 - `dataset.root` / `dataset.repo_id` — where the dataset is stored
 - `dataset.single_task` — task description saved with each frame
-- `dataset.fps` / `episode_time_s` / `reset_time_s` — recording timing
+- `dataset.fps` — action/state/numeric row rate; full camera streams use each camera's configured `fps`
+- `episode_time_s` / `reset_time_s` — episode/reset durations
+- [Native camera rates and lossless Mesh3DFlow (Chinese)](docs/camera_fps_storage_zh.md): standard LeRobot videos at camera fps; tactile H.264/YUV420P videos with independent, bit-exact Mesh3DFlow arrays computed before encoding. Existing datasets are preserved.
+
+Full tactile streams always add `observation.<camera>.tactile_range`, an int64
+`[start_index, end_index)` into the episode's `samples.parquet`. The range
+references tactile images and, when enabled, the matching Mesh3DFlow samples,
+using the same rule whether camera and dataset fps match or differ. A window
+with no new frames stores `[k, k)`; its observation image is linked separately
+by `representative_tactile_index` in `timestamps/episode_<index>.parquet`.
+If the first action uses an image captured before recording started, that original
+sample is saved at the beginning of the native stream, outside the action windows.
+For example, representative index 0 and an empty first range `[1, 1)` preserve both
+the observation and the actual window. The initial sample also participates in
+video encoding and Mesh computation when enabled.
 
 > The xArm7 config already contains the correct joint mapping; only edit the port, IP, and dataset fields for your setup.
 
@@ -213,6 +227,20 @@ or tune it in the top-level `web_preview` section of the YAML configuration.
 sidecars under `timestamps/` for state, GELLO-action, and camera-read arrival
 timing, and prints a synchronization summary. These files do not change the
 LeRobot training schema. Set top-level `synchronize: false` to disable them.
+
+The four-Photon configuration aligns all three RealSense RGB streams using
+`SENSOR_TIMESTAMP` (exposure midpoint). Pixels, device frame number, raw exposure
+and readout timestamps, and host receipt time come from the same color frame.
+SDK global time maps readout time to the system clock; the same-frame exposure
+delta and a paired system/monotonic clock read map exposure to the action clock.
+This depends on SDK clock accuracy. Metadata definitions are in the
+[official RealSense header](https://github.com/realsenseai/librealsense/blob/master/include/librealsense2/h/rs_frame.h).
+The configuration requires exposure metadata (`realsense_require_exposure_timestamp: true`)
+and waits up to 200 ms for a post-boundary exposure before closing an action
+window. Setting the requirement to `false` permits a labelled host-receipt
+fallback. Timestamp resets or reversals fail capture. Timing provenance and
+exposure-to-receipt delay are saved in action sidecars and each native RGB
+stream's `samples.parquet` under `camera_timing_json`.
 When `robot.enable_logs` is enabled for diagnostics, one
 `logs/gello_record_sync_*.csv` file is written per episode. The
 `preview_clients`, `record_period_ms`, `frame_overrun_ms`, `action_age_ms`, and
@@ -352,6 +380,16 @@ lerobot_xarm7/
 │   ├── gello/                     # xArm7 GELLO record config
 │   └── manual_mode/               # xArm7 manual-drag record config
 ├── src/lerobot_robot_ufactory/
+│   ├── datasets/                 # dataset storage, native streams and offline processing
+│   │   ├── native_dataset.py     # dataset I/O and timestamp mapping
+│   │   ├── camera_streams.py     # stream plans, sampling and encoding
+│   │   ├── tactile_indices.py   # tactile interval indexes
+│   │   ├── stream_recorder.py   # background writes and storage transactions
+│   │   ├── deferred_mesh.py     # episode-level offline Mesh processing
+│   │   ├── episode_images.py   # temporary image validation and cleanup
+│   │   └── raw_episodes.py      # raw episode checkpoints, recovery and conversion
+│   ├── cameras/                 # RGB drivers, timestamps and sample queues
+│   ├── tactile/                 # tactile interfaces, Photon driver and per-frame SDK inference
 │   ├── robots/
 │   │   └── uf_robot/              # xArm control (joint/cartesian, teach mode)
 │   ├── teleoperators/

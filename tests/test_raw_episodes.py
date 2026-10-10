@@ -12,8 +12,8 @@ from lerobot_robot_ufactory.scripts.uf_lerobot_record import (
     _prepare_dataset_root,
     _RawDatasetFinalize,
 )
-from lerobot_robot_ufactory.utils import raw_episodes
-from lerobot_robot_ufactory.utils.raw_episodes import (
+from lerobot_robot_ufactory.datasets import raw_episodes
+from lerobot_robot_ufactory.datasets.raw_episodes import (
     RawEpisodeStore,
     open_recording_dataset,
     postprocess_raw_episodes,

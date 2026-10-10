@@ -19,6 +19,8 @@ import lerobot_robot_ufactory # patch
 from lerobot.scripts.lerobot_record import *
 from lerobot.scripts.lerobot_record import RecordConfig as LeRobotRecordConfig
 from lerobot.datasets.utils import DEFAULT_FEATURES
+from lerobot_robot_ufactory.datasets.native_dataset import NativeRateLeRobotDataset as LeRobotDataset
+from lerobot_robot_ufactory.datasets.tactile_indices import apply_tactile_index_plan, frame_tactile_ranges, tactile_range_key
 from lerobot_robot_ufactory.teleoperators.uf_mock_teleop import UFMockTeleop
 from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
 from lerobot_robot_ufactory.utils.realtime_teleop import (
@@ -30,8 +32,11 @@ from lerobot_robot_ufactory.utils.realtime_teleop import (
 from lerobot_robot_ufactory.utils.recording_lock import exclusive_recording
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 from lerobot_robot_ufactory.utils.webapp.web_preview import RecordingWebPreview, WebPreviewConfig
-from lerobot_robot_ufactory.utils.episode_images import discard_episode_images, validate_episode_images
-from lerobot_robot_ufactory.utils.raw_episodes import (
+from lerobot_robot_ufactory.datasets.episode_images import discard_episode_images, validate_episode_images
+from lerobot_robot_ufactory.datasets.camera_streams import (
+    camera_recording_plan, apply_camera_storage_plan, camera_samples_between, initial_camera_samples,
+)
+from lerobot_robot_ufactory.datasets.raw_episodes import (
     RawEpisodeStore, open_recording_dataset, postprocess_raw_episodes, recover_postprocessing,
 )
 
@@ -72,6 +77,10 @@ def build_dataset_frame(
             continue
         if feature["dtype"] in ("image", "video"):
             frame[key] = values[key.removeprefix(f"{prefix}.images.")]
+            continue
+        if key.endswith((".tactile_range", ".mesh3dflow_range")):
+            # Filled from the committed capture window before dataset.add_frame.
+            frame[key] = np.array([-1, -1], dtype=np.int64)
             continue
         if feature["dtype"] not in ("float32", "float64"):
             continue
@@ -193,6 +202,10 @@ class EpisodeSynchronization:
         dataset_root: Path | None = None,
         episode_index: int | None = None,
         tactile_stream_names: tuple[str, ...] = (),
+        stream_fps: dict | None = None,
+        video_streams: dict | None = None,
+        video_crf: dict | None = None,
+        required_mesh_streams: tuple[str, ...] = (),
     ):
         self.controller = controller
         self.fps = fps
@@ -204,12 +217,16 @@ class EpisodeSynchronization:
                 raise ValueError(
                     "dataset_root and episode_index are required for tactile streams"
                 )
-            from lerobot_robot_ufactory.tactile.persistence import TactileStreamRecorder
+            from lerobot_robot_ufactory.datasets.stream_recorder import TactileStreamRecorder
 
             self.tactile_recorder = TactileStreamRecorder(
                 dataset_root,
                 episode_index,
                 tactile_stream_names,
+                stream_fps=stream_fps,
+                video_streams=video_streams,
+                video_crf=video_crf,
+                required_mesh_streams=required_mesh_streams,
             )
 
     def add_frame(
@@ -231,6 +248,7 @@ class EpisodeSynchronization:
         tactile_window_start_s: float | None = None,
         tactile_window_start_ns: int | None = None,
         tactile_samples: dict[str, tuple] | None = None,
+        initial_samples: dict | None = None,
     ) -> None:
         # ``action_sent_s`` was the historical send-end field. Accept it for
         # callers outside this repository while making send-start primary.
@@ -315,6 +333,17 @@ class EpisodeSynchronization:
                 ) * 1_000
             if "sensor_timestamp_s" in timing:
                 camera_timestamp["sensor_timestamp_s"] = timing["sensor_timestamp_s"]
+            for name in (
+                "timestamp_source", "clock_mapping_method", "timestamp_fallback_reason",
+                "received_monotonic_ns", "received_monotonic_s", "frame_number",
+                "sensor_timestamp_us", "frame_timestamp_us", "actual_exposure_us",
+                "sensor_timestamp_supported", "frame_timestamp_supported",
+                "actual_exposure_supported", "sdk_timestamp_ms", "sdk_timestamp_domain",
+                "wall_to_monotonic_offset_ns", "clock_bridge_uncertainty_ns",
+                "exposure_to_receipt_ms",
+            ):
+                if name in timing:
+                    camera_timestamp[name] = timing[name]
             if "device_to_host_offset_s" in timing:
                 camera_timestamp["device_to_host_offset_s"] = timing[
                     "device_to_host_offset_s"
@@ -335,6 +364,11 @@ class EpisodeSynchronization:
         if self.tactile_recorder is not None:
             if tactile_window_start_s is None:
                 raise ValueError("tactile_window_start_s is required for tactile streams")
+            if initial_samples:
+                if self.frames:
+                    raise ValueError("Initial camera samples are only valid for the first action row")
+                for name, sample in initial_samples.items():
+                    self.tactile_recorder.add_initial_sample(name, sample, tactile_window_start_s)
             for name in self.tactile_recorder.stream_names:
                 tactile_timestamps[name] = self.tactile_recorder.add_window(
                     name,
@@ -345,7 +379,7 @@ class EpisodeSynchronization:
                     end_monotonic_ns=action_send_start_ns,
                 )
             for camera_name, timing in camera_timing.items():
-                stream_name = timing.get("tactile_stream_name")
+                stream_name = timing.get("camera_stream_name", timing.get("tactile_stream_name", camera_name))
                 if stream_name not in tactile_timestamps:
                     continue
                 capture_s = timing.get("capture_monotonic_s")
@@ -389,6 +423,7 @@ class EpisodeSynchronization:
                 "state_read_age_ms": state_age_ms,
                 "camera_timing_json": json.dumps(camera_timestamps, sort_keys=True),
                 "tactile_timing_json": json.dumps(tactile_timestamps, sort_keys=True),
+                "camera_intervals_json": json.dumps(tactile_timestamps, sort_keys=True),
             }
         )
         if self.controller is None:
@@ -679,11 +714,12 @@ class AsyncEpisodeSaver:
                 try:
                     validate_episode_images(self.dataset, episode_buffer)
                     if self.mesh_cameras:
-                        from lerobot_robot_ufactory.tactile.deferred import compute_episode_mesh
+                        from lerobot_robot_ufactory.datasets.deferred_mesh import compute_episode_mesh
 
                         compute_episode_mesh(
                             self.dataset, self.mesh_cameras, self.runtime_dir,
                             episode_index, episode_buffer=episode_buffer,
+                            synchronization=synchronization,
                         )
                     has_tactile_transaction = (
                         synchronization is not None
@@ -704,6 +740,9 @@ class AsyncEpisodeSaver:
                     raise
                 if has_tactile_transaction:
                     synchronization.commit()
+                finish_native = getattr(self.dataset, "finish_native_episode", None)
+                if finish_native is not None:
+                    finish_native(episode_index)
                 self._delete_saved_image_dirs(episode_index)
                 if synchronization is not None and not has_tactile_transaction:
                     synchronization.write(Path(self.dataset.root), episode_index)
@@ -966,6 +1005,9 @@ def record_loop(
         get_tactile_stream_names = getattr(robot, "tactile_stream_names", None)
         if callable(get_tactile_stream_names):
             tactile_stream_names = tuple(get_tactile_stream_names())
+    stream_plan = getattr(dataset, "_camera_stream_plan", {}) if dataset is not None else {}
+    if stream_plan:
+        tactile_stream_names = tuple(name for name, item in stream_plan.items() if item["interval"] or item["tactile"])
     record_auxiliary_timing = synchronize or bool(tactile_stream_names)
     diagnostic_logs_enabled = _diagnostic_logs_enabled(robot)
     sync_log_file = None
@@ -1041,6 +1083,15 @@ def record_loop(
                     None if dataset is None else _current_episode_index(dataset)
                 ),
                 tactile_stream_names=tactile_stream_names,
+                stream_fps={name: stream_plan[name]["fps"] for name in tactile_stream_names if name in stream_plan},
+                video_streams={
+                    name: stream_plan[name].get("codec") or getattr(dataset, "vcodec", "libsvtav1")
+                    for name in tactile_stream_names
+                    if name in stream_plan
+                    and getattr(dataset, "_native_camera_video", False)
+                },
+                video_crf={name: stream_plan[name]["crf"] for name in tactile_stream_names if name in stream_plan},
+                required_mesh_streams=tuple(name for name in tactile_stream_names if stream_plan.get(name, {}).get("require_mesh")),
             )
 
         timestamp = 0
@@ -1150,6 +1201,13 @@ def record_loop(
                 state_rt_receive_s = sync_timing.get("state_rt_receive_s")
                 state_rt_receive_ns = sync_timing.get("state_rt_receive_ns")
                 state_anchor_s = state_rt_receive_s or observation_monotonic_s
+
+            initial_samples = (
+                initial_camera_samples(
+                    robot, sync_timing.get("camera", {}), start_episode_t, tactile_stream_names,
+                )
+                if sync_frame_index == 0 and tactile_stream_names else {}
+            )
 
             # Applies a pipeline to the raw robot observation, default is IdentityProcessor
             obs_processed = robot_observation_processor(obs)
@@ -1274,19 +1332,15 @@ def record_loop(
 
             tactile_samples = {}
             get_tactile_window = getattr(robot, "get_tactile_samples_between", None)
-            if tactile_stream_names and callable(get_tactile_window):
+            if tactile_stream_names and stream_plan:
+                tactile_samples = camera_samples_between(
+                    robot, previous_tactile_anchor_s, action_send_start_s, tactile_stream_names,
+                )
+            elif tactile_stream_names and callable(get_tactile_window):
                 tactile_samples = get_tactile_window(
                     previous_tactile_anchor_s,
                     action_send_start_s,
                 )
-
-            # Write to dataset
-            if dataset is not None:
-                action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
-                frame = {**observation_frame, **action_frame, "task": single_task}
-                if frame_callback is not None:
-                    frame = frame_callback(frame)
-                dataset.add_frame(frame)
 
             if episode_synchronization is not None:
                 episode_synchronization.add_frame(
@@ -1305,7 +1359,18 @@ def record_loop(
                     tactile_window_start_s=previous_tactile_anchor_s,
                     tactile_window_start_ns=previous_tactile_anchor_ns,
                     tactile_samples=tactile_samples,
+                    initial_samples=initial_samples,
                 )
+
+            # Capture intervals define the exact integer references before the
+            # numeric row is queued. Mesh payloads live only in native storage.
+            if dataset is not None:
+                action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
+                frame = {**observation_frame, **action_frame, "task": single_task}
+                frame.update(frame_tactile_ranges(dataset.features, episode_synchronization))
+                if frame_callback is not None:
+                    frame = frame_callback(frame)
+                dataset.add_frame(frame)
 
             previous_tactile_anchor_s = action_send_start_s
             previous_tactile_anchor_ns = action_send_start_ns
@@ -1544,6 +1609,13 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
     if postprocess_only:
         cfg.resume = True
 
+    # Always compute Mesh3DFlow from original captured frames before encoding,
+    # including configs that previously requested online displacement output.
+    if getattr(cfg.dataset, "video", False) and any(
+        getattr(camera, "motion_3d_output", None) == "Mesh3DFlow"
+        for camera in getattr(cfg.robot, "cameras", {}).values()
+    ):
+        cfg.offline_mesh3dflow = True
     if cfg.offline_mesh3dflow:
         if not cfg.dataset.video:
             raise ValueError('offline_mesh3dflow requires video recording')
@@ -1599,11 +1671,16 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
     # Keep 3D tactile displacement tensors out of the generic camera feature
     # pipeline, which treats every HxWx3 shape as an image/video stream.
     dataset_features.update(getattr(robot, "tactile_observation_features", {}))
+    camera_plan = camera_recording_plan(robot, cfg.dataset.fps, use_videos=cfg.dataset.video)
+    apply_camera_storage_plan(dataset_features, camera_plan)
+    apply_tactile_index_plan(dataset_features, camera_plan)
     offline_mesh_fields = {}
     if cfg.offline_mesh3dflow:
         from lerobot_robot_ufactory.tactile import TactileCamera
         for name, camera in robot.cameras.items():
             if isinstance(camera, TactileCamera):
+                if tactile_range_key(name) in dataset_features:
+                    continue
                 for suffix, shape in camera.deferred_feature_shapes.items():
                     key = f'observation.{name}.{suffix}'
                     offline_mesh_fields[key] = shape
@@ -1612,6 +1689,14 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                     }
 
     if cfg.resume:
+        if camera_plan and not postprocess_only:
+            plan_path = Path(cfg.dataset.root) / "meta/camera_streams.json"
+            expected_plan = {"dataset_fps": cfg.dataset.fps, "cameras": camera_plan}
+            if not plan_path.is_file() or json.loads(plan_path.read_text()) != expected_plan:
+                raise ValueError(
+                    "Existing dataset uses a different camera storage format; "
+                    "preserve it and use a new dataset root"
+                )
         dataset = open_recording_dataset(
             cfg.dataset.repo_id,
             root=cfg.dataset.root,
@@ -1639,10 +1724,22 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
             batch_encoding_size=cfg.dataset.video_encoding_batch_size,
         )
 
+    dataset._camera_stream_plan = camera_plan
+    dataset._native_camera_video = cfg.dataset.video
+    if any(item["tactile"] for item in camera_plan.values()):
+        logging.info("Tactile images: H.264/YUV420P CRF=18 at camera fps; Mesh3DFlow: independent lossless NPY")
+    if camera_plan:
+        plan_path = Path(dataset.root) / "meta/camera_streams.json"
+        saved_plan = {"dataset_fps": cfg.dataset.fps, "cameras": camera_plan}
+        if plan_path.exists() and json.loads(plan_path.read_text()) != saved_plan:
+            raise ValueError("Camera rates/storage differ from the saved recording; use a new dataset")
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        if not plan_path.exists():
+            plan_path.write_text(json.dumps(saved_plan, indent=2) + "\n")
     dataset._offline_mesh_fields = offline_mesh_fields
     # A previous crash may leave only private transaction directories. Recover
     # an interrupted publish when a journal exists, then remove stale staging.
-    from lerobot_robot_ufactory.tactile.persistence import cleanup_stale_tactile_staging
+    from lerobot_robot_ufactory.datasets.stream_recorder import cleanup_stale_tactile_staging
 
     cleanup_stale_tactile_staging(Path(dataset.root))
 
@@ -1926,10 +2023,11 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                     try:
                         validate_episode_images(dataset, _get_episode_buffer(dataset))
                         if mesh_cameras:
-                            from lerobot_robot_ufactory.tactile.deferred import compute_episode_mesh
+                            from lerobot_robot_ufactory.datasets.deferred_mesh import compute_episode_mesh
 
                             compute_episode_mesh(
-                                dataset, mesh_cameras, runtime_dir, episode_index
+                                dataset, mesh_cameras, runtime_dir, episode_index,
+                                synchronization=episode_synchronization,
                             )
                         has_tactile_transaction = (
                             episode_synchronization is not None
@@ -1946,6 +2044,9 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                             episode_synchronization.commit()
                         elif episode_synchronization is not None:
                             episode_synchronization.write(Path(dataset.root), episode_index)
+                        finish_native = getattr(dataset, "finish_native_episode", None)
+                        if finish_native is not None:
+                            finish_native(episode_index)
                         if episode_synchronization is not None:
                             log_say(episode_synchronization.summary(), cfg.play_sounds)
                             episode_owner.release(episode_synchronization)

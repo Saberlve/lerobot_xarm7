@@ -94,6 +94,8 @@ models/
 ufactory_usage/
 .history/
 datasets/
+# Dataset implementation is source code, not captured data.
+!src/lerobot_robot_ufactory/datasets/
 tmp/
 experiment/**
 # Local checkout used for GELLO hardware development. Runtime fixes live in

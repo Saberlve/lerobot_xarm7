@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition, Thread, Event, Lock
 from lerobot.robots import Robot
-from lerobot.cameras.utils import make_cameras_from_configs
+from lerobot_robot_ufactory.cameras.utils import make_cameras_from_configs
 from lerobot_robot_ufactory.cameras.synchronization import (
     TimestampedCameraBuffer,
     select_synchronized_samples,
@@ -467,8 +467,8 @@ class UFRobot(Robot, Thread):
 
         Once started, these buffers are the only callers of ``async_read`` for
         regular RGB backends.  This preserves their new-frame semantics and
-        gives RealSense, Azure-style, OpenCV, and future Camera backends one
-        common host-clock pairing interface.
+        RealSense reads exposure metadata directly from its SDK pipeline;
+        other backends use their fresh ``async_read`` host receipt time.
         """
         self._stop_rgb_sync_buffers()
         try:
@@ -478,6 +478,7 @@ class UFRobot(Robot, Thread):
                 buffer = TimestampedCameraBuffer(
                     camera,
                     history_size=self.config.sync_history_size,
+                    require_exposure_timestamp=self.config.realsense_require_exposure_timestamp,
                 )
                 buffer.start()
                 self._rgb_sync_buffers[camera_key] = buffer
@@ -507,7 +508,7 @@ class UFRobot(Robot, Thread):
         # causal compatibility view; the full interval is saved separately.
         rgb_sources = {
             key: source for key, source in sources.items()
-            if not hasattr(source, "samples_between")
+            if not hasattr(self.cameras[key], "samples_between")
         }
         selected = select_synchronized_samples(
             rgb_sources,
@@ -517,7 +518,7 @@ class UFRobot(Robot, Thread):
             self.config.sync_wait_ms,
         )
         for key, source in sources.items():
-            if not hasattr(source, "samples_between"):
+            if not hasattr(self.cameras[key], "samples_between"):
                 continue
             sample, _age_ms = source.latest_before_sample(
                 target_monotonic_s,
@@ -539,7 +540,8 @@ class UFRobot(Robot, Thread):
                 sync_offset_ms=abs(signed_offset_ms),
                 sync_signed_offset_ms=signed_offset_ms,
             )
-            if hasattr(sources[key], "samples_between"):
+            timing["camera_stream_name"] = f"{self.prefix}{key}"
+            if hasattr(self.cameras[key], "samples_between"):
                 timing["tactile_stream_name"] = f"{self.prefix}{key}"
             result[key] = frame, timing
         return result

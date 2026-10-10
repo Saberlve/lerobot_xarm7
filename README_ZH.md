@@ -95,7 +95,19 @@ ls /dev/serial/by-id/
 - `teleop.realtime_control_fps` — GELLO 到 xArm 的独立实时控制频率，与 `dataset.fps` 分开
 - `dataset.root` / `dataset.repo_id` — 数据集保存位置
 - `dataset.single_task` — 随每一帧保存的任务描述
-- `dataset.fps` / `episode_time_s` / `reset_time_s` — 录制时序参数
+- `dataset.fps` — 动作、状态及其他数值字段的行采样频率；完整相机流使用各自 `robot.cameras.<name>.fps`
+- `episode_time_s` / `reset_time_s` — episode 与复位时长
+- 相机独立帧率、触觉视频与无损 Mesh3DFlow：触觉按相机帧率保存 H.264/YUV420P 视频；编码前计算并独立无损保存完整 Mesh3DFlow，已有数据集保持原样
+
+凡是保存完整触觉流，每行都新增 `observation.<camera>.tactile_range`，类型为
+`int64[2]`，以 `[start_index, end_index)` 关联该 episode 的 `samples.parquet`。
+不开启 Mesh 时，范围关联触觉图像；开启 Mesh 时，同一范围同时关联图像和
+Mesh3DFlow。同频和不同频均使用这一规则。没有新帧时保存 `[k, k)`，该行观测的
+代表图像通过 `timestamps/episode_<index>.parquet` 中的
+`representative_tactile_index` 另行关联。
+如果首条动作使用了录制开始前的图像，该原始样本会先保存到完整相机流，
+但不计入首个动作窗口。例如起始代表帧索引为 0，首窗口没有新帧时范围为
+`[1, 1)`；代表帧也会参与启用的 Mesh 计算和视频编码。
 
 > xArm7 的配置已包含正确的关节映射，一般只需要修改串口、IP 和数据集路径。
 
@@ -211,6 +223,21 @@ uv run record --config_path config/gello/xarm7_gello_base.yaml --postprocess-onl
 `timestamps/` 下额外写入 state、GELLO action 和相机读取到达时间的 Parquet
 sidecar，并在控制台输出同步统计；它不改变 LeRobot 训练数据的 schema。若只需
 普通录制，可在 YAML 顶层设置 `synchronize: false` 关闭这些文件和统计。
+
+四触觉配置的三个 RealSense RGB 流按 `SENSOR_TIMESTAMP`（设备曝光中点，微秒）
+对齐动作的 `perf_counter()` 时间。读取同一个 color frame 时保留图像、设备帧号、
+原始曝光/读出时间和主机接收时间；以 SDK global time 映射读出时间，补上同帧
+曝光与读出时间差，再通过主机系统时钟与单调时钟的配对读数转换到动作时钟。
+`FRAME_TIMESTAMP` 仅用于映射，不作为曝光时间。该方案依赖 SDK 时钟映射精度，
+不是硬件触发同步；`exposure_to_receipt_ms` 包含曝光到读出及 SDK 交付延迟。
+元数据定义见 [RealSense 官方头文件](https://github.com/realsenseai/librealsense/blob/master/include/librealsense2/h/rs_frame.h)。
+
+`robot.realsense_require_exposure_timestamp: true` 在缺少曝光元数据或映射不可用时
+报错；设为 `false` 时明确回退到主机接收时间，并记录来源、原因和警告。四触觉
+配置使用严格模式和 `sync_wait_ms: 200`：等待曝光时间超过动作边界的下一帧，
+然后按曝光时间选择 `(前一动作, 当前动作]` 内的帧；超过等待预算会报同步超时。
+设备重置或映射时间倒退会使有序窗口失效并报错。每帧诊断保存在动作时间 sidecar
+以及原始 RGB 流 `samples.parquet` 的 `camera_timing_json` 中。
 
 > 如果数据集目录已存在且未加 `-r`，脚本会询问是覆盖、续录还是取消。
 
@@ -370,6 +397,16 @@ lerobot_xarm7/
 │   ├── gello/                     # xArm7 GELLO 录制配置
 │   └── manual_mode/               # xArm7 手动拖拽录制配置
 ├── src/lerobot_robot_ufactory/
+│   ├── datasets/                 # 数据集存储、原生相机流和离线处理
+│   │   ├── native_dataset.py     # 数据集读写与时间映射
+│   │   ├── camera_streams.py     # 相机流方案、采样与编码
+│   │   ├── tactile_indices.py   # 触觉范围索引
+│   │   ├── stream_recorder.py   # 后台写入与存储事务
+│   │   ├── deferred_mesh.py     # episode 离线 Mesh 计算流程
+│   │   ├── episode_images.py   # 临时图像校验与清理
+│   │   └── raw_episodes.py      # 原始 episode 保存、恢复与后处理
+│   ├── cameras/                 # RGB 驱动、时间戳与采样队列
+│   ├── tactile/                 # 触觉接口、Photon 驱动与单帧 SDK 推理
 │   ├── robots/
 │   │   └── uf_robot/              # xArm 控制（关节/笛卡尔空间、示教模式）
 │   ├── teleoperators/
