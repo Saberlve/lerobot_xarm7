@@ -13,7 +13,16 @@ class Element {
   constructor() {
     this.textContent = ''; this.innerHTML = ''; this.value = ''; this.checked = false;
     this.disabled = false; this.className = ''; this.dataset = {}; this.children = [];
-    this.classList = { add() {}, remove() {}, toggle() {} };
+    const classes = new Set();
+    this.classList = {
+      add(name) { classes.add(name); }, remove(name) { classes.delete(name); },
+      contains(name) { return classes.has(name); },
+      toggle(name, force) {
+        const enabled = force === undefined ? !classes.has(name) : force;
+        if (enabled) classes.add(name); else classes.delete(name);
+        return enabled;
+      },
+    };
   }
   append(...items) { this.children.push(...items); }
   replaceChildren() { this.children = []; }
@@ -31,6 +40,7 @@ class Element {
   focus() {}
   showModal() { this.open = true; }
   close() { this.open = false; }
+  removeAttribute(name) { delete this[name]; }
 }
 const elements = new Map();
 const events = {};
@@ -147,6 +157,22 @@ assert.equal(control.sent.length, before, 'Save/discard keys must be disabled du
 console.log('Single-command arrow save/discard checks passed.');
 
 // Offline processing must stay bound to the selected saved configuration.
+assert.match(html, /id="exit"[^>]*>退出录制并启动后处理/);
+assert.ok(html.indexOf('id="postprocessProgress"') < html.indexOf('id="controlBar"'),
+  'Postprocessing progress must appear in the top session status panel');
+snapshot('ready', {has_unsaved:false});
+before = control.sent.length;
+elements.get('exit').onclick();
+assert.equal(control.sent.length, before + 1);
+assert.equal(control.sent.at(-1).action, 'exit');
+snapshot('stopping', {has_unsaved:false});
+assert.equal(elements.get('postprocessProgress').classList.contains('hidden'), false);
+assert.equal(elements.get('postprocessBar').value, undefined, 'Show indeterminate progress until totals arrive');
+assert.match(elements.get('postprocessDetail').textContent, /释放设备.*后处理/);
+snapshot('postprocessing', {has_unsaved:false});
+assert.equal(elements.get('postprocessProgress').classList.contains('hidden'), false);
+assert.match(elements.get('postprocessDetail').textContent, /准备后处理/);
+
 vm.runInContext(`
   selected={path:'tasks/a.yaml',revision:'rev-a',text:'config-a'};loadedText=selected.text;
   $('yamlEditor').value=loadedText;$('configPath').value=selected.path;
@@ -167,15 +193,23 @@ snapshot('postprocessing', {postprocess:{stage:'mesh',total_episodes:2,completed
   episode_index:1,elapsed_s:12,streams:{photon:{stage:'mesh',completed_frames:3,total_frames:6}}}});
 assert.equal(elements.get('launch').disabled, true);
 assert.equal(elements.get('exit').disabled, true);
+assert.equal(elements.get('postprocessProgress').classList.contains('hidden'), false);
 assert.equal(elements.get('postprocessBar').max, 2);
 assert.equal(elements.get('postprocessBar').value, 1);
 assert.match(elements.get('postprocessDetail').textContent, /已转换 1 \/ 2 条.*Mesh3DFlow/);
 assert.match(elements.get('postprocessStreams').children.at(-1).textContent, /photon.*3 \/ 6 帧/);
+snapshot('finished', {has_unsaved:false,postprocess:{stage:'complete',total_episodes:2,completed_episodes:2}});
+assert.equal(elements.get('postprocessBar').value, 2);
+assert.equal(elements.get('postprocessProgress').classList.contains('hidden'), false);
+snapshot('finished', {has_unsaved:false,postprocess:{stage:'complete',total_episodes:0,completed_episodes:0}});
+assert.equal(elements.get('postprocessBar').value, 1);
+assert.match(elements.get('postprocessDetail').textContent, /暂无待处理数据.*处理完成/);
 console.log('Postprocessing checks passed: saved configuration, dataset isolation, mutual exclusion, stage and frame progress.');
 
 // Rebuild confirmation shows the inspected path and never asks the user to type it.
 (async () => {
   assert.doesNotMatch(html, /id="confirmRoot"|输入完整数据集路径/);
+  assert.doesNotMatch(html, /web-dataset-trash|旧数据移入回收目录/);
   vm.runInContext(`
     selected={path:'tasks/a.yaml',revision:'rev-a',text:'config-a'};loadedText=selected.text;
     $('yamlEditor').value=loadedText;$('configPath').value=selected.path;
@@ -205,6 +239,7 @@ console.log('Postprocessing checks passed: saved configuration, dataset isolatio
   assert.equal(elements.get('launchDialog').open, true, 'Cancellation must keep launch choices available');
   assert.equal(elements.get('confirmLaunch').disabled, false);
   assert.ok(confirmations[0].includes(dataset.root), 'Confirmation must show the full inspected path');
+  assert.match(confirmations[0], /旧数据将被删除/, 'Confirmation must describe overwriting the old dataset');
   accepted = true;
   await run('confirmLaunch()');
   assert.equal(starts.length, 1);

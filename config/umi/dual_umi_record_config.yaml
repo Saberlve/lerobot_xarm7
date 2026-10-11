@@ -1,3 +1,4 @@
+defer_processing: true
 robot:
   type: uf::multiple_mock_robot
   id: "multiple_uf_mock_robots"

@@ -206,7 +206,7 @@ class RecordingControl:
                     self.release_keys()
                     self.events["stop_recording"] = True
                     self.events["exit_early"] = True
-                    self.transition("stopping", stage="Releasing devices")
+                    self.transition("stopping", stage="Releasing devices before postprocessing")
                     self.actions.put_nowait("exit")
                 else:
                     raise ValueError("Unknown action")
@@ -443,8 +443,9 @@ def controlled_recording(
                                    stage="Ready for next episode")
         finally:
             control.release_keys()
-    if raw_store is not None:
-        control.transition("postprocessing", stage="Postprocessing saved episodes", has_unsaved=False)
+    if raw_store is not None or control.events["stop_recording"]:
+        control.transition("postprocessing", operation="postprocess",
+                           stage="Postprocessing saved episodes", has_unsaved=False)
         dataset = recording.postprocess_raw_episodes(
             dataset, tactile_cameras, progress=control.postprocess_progress
         )

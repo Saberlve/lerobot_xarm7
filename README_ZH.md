@@ -196,22 +196,22 @@ uv run record --config_path config/gello/xarm7_gello_record_config.yaml
 # 在已有数据集上续录
 uv run record --config_path config/gello/xarm7_gello_record_config.yaml -r
 
-# 可选：后台异步保存 episode
-uv run record --config_path config/gello/xarm7_gello_record_config.yaml -a
+# 可选：关闭延后处理，后台异步保存 episode
+uv run record --config_path config/gello/xarm7_gello_record_config.yaml -a --defer_processing=false
 ```
 
 按键控制：`Space` 开始当前 episode，`→` 保存，`←` 放弃并重录，`Esc` 停止录制。每个 episode 之间机械臂会自动复位到初始点。
 
-每条 episode 录制结束后，等待图像写入完成，计算启用的离线 Mesh3DFlow，
-编码该条视频，并保存 LeRobot 数据、触觉原始流及时间对应关系。默认等待当前
-episode 保存完成后再开始下一条；使用 `-a` 时，每条 episode 在后台完成推理、
-编码和保存，退出前等待所有保存任务完成。
+所有录制配置默认启用 `defer_processing: true`。每条 episode 先等待图像写入完成，
+保存原始 checkpoint、触觉流及时间对应关系，再开始下一条。正常退出录制后释放
+设备，统一计算启用的离线 Mesh3DFlow、编码视频并生成 LeRobot 数据集。
+关闭延后处理后可使用 `-a` 在后台完成每条的推理、编码和保存，退出前等待任务完成。
 
 同步超时只丢弃当前 episode，等待 `Space`（无键盘监听时按 `Enter`）重录。
 后续录制异常不会影响此前已经保存的 episode。
 
-旧版本录制留下的未处理原始 checkpoint，需要使用原配置运行以下命令后再续录，
-此命令不连接录制设备：
+延后处理模式支持保留连续编号的原始 checkpoint 并继续录制。也可以使用原配置
+运行以下命令单独后处理，此命令不连接录制设备：
 
 ```bash
 uv run record --config_path config/gello/xarm7_gello_base.yaml --postprocess-only
@@ -446,4 +446,4 @@ lerobot_xarm7/
 
 使用 `.venv/bin/uf-lerobot-record-web --port 8769` 启动统一配置管理、录制控制和相机预览。支持浏览器键盘与仅 J7 模式，Photon 预览默认关闭。参见 [网页录制说明](docs/recording_web.md)。
 
-选择并保存配置后，“数据后处理”面板会自动检测该数据目录中的待处理原始条，每 5 秒刷新，也可手动刷新。点击“单独后处理”可在不连接机器人、GELLO 或相机的情况下处理这些数据，并显示已转换条数、当前阶段和各相机的帧数进度。后处理与录制互斥，网页断线不会终止处理；失败后原始数据保留，可修复问题后重试。`defer_processing` 会话退出时的自动后处理也显示同样的进度。
+选择并保存配置后，“数据后处理”面板会自动检测该数据目录中的待处理原始条，每 5 秒刷新，也可手动刷新。点击“退出录制并启动后处理”（或按 Esc）会丢弃当前未保存条，释放设备并处理已保存的原始数据；顶部状态区显示后处理进度条、已转换条数、当前阶段和各相机的帧数进度。点击“单独后处理”也可在不连接机器人、GELLO 或相机的情况下处理这些数据。后处理与录制互斥，网页断线不会终止处理；失败后原始数据保留，可修复问题后重试。

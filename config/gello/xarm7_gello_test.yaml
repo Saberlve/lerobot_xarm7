@@ -1,3 +1,4 @@
+defer_processing: true
 robot:
   type: uf::robot
   id: "uf_robot"
@@ -7,7 +8,7 @@ robot:
   # the FK-converted TCP pose (mm; continuous 6D rotation, Zhou et al. CVPR 2019);
   # "both" records joints and TCP pose side by side. Control stays in joint space.
   record_space: "joint"
-  robot_ip: "192.168.1.245"
+  robot_ip: "192.168.1.229"
   # 2: xArm Gripper G2 (0-84 mm opening range).
   gripper_type: 2
   enable_logs: false

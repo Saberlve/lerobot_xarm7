@@ -239,6 +239,100 @@ def test_capture_saves_or_discards_without_second_confirmation(session, monkeypa
     control.close()
 
 
+@pytest.mark.parametrize("exit_phase", ["empty", "ready", "recording", "paused"])
+def test_exit_discards_current_episode_and_postprocesses_saved_raw(session, monkeypatch, exit_phase):
+    robot = session.robot
+    original_connect = robot.connect
+    robot.connect = lambda *, defer_motion=False: original_connect()
+    robot.outcomes = [False] * 5
+    robot.pause_motion = lambda: None
+    original_reset = robot.reset_to_initial
+    robot.reset_to_initial = lambda cancel_check=None: original_reset()
+    robot.get_gripper_motion_parameters = lambda: (50.0, 84.0)
+    teleop = GelloTeleop(GelloTeleopConfig(gripper_control_mode="keyboard"))
+    teleop.connect = lambda: None
+    teleop.disconnect = lambda: None
+    teleop.set_teleop_enabled = lambda *args, **kwargs: None
+    teleop.get_action = lambda: {"J1.pos": float(robot.attempt)}
+    session.cfg.robot.manual_mode = False
+    session.cfg.teleop = teleop.config
+    session.cfg.defer_processing = True
+    session.cfg.dataset.num_episodes = 5
+    monkeypatch.setattr(recording, "make_teleoperator_from_config", lambda cfg: teleop)
+    control = RecordingControl("exit-postprocess-test")
+    control.prepare_dataset = lambda: None
+    control.preview = RecordingWebPreview(WebPreviewConfig())
+    states, processed = [], []
+
+    def command(action):
+        control.command({"action": action, "session_id": control.session_id,
+                         "version": control.state["version"], "request_id": str(len(states))})
+
+    def send(message):
+        if message["type"] != "state":
+            return
+        state = message["state"]
+        states.append(state)
+        if state["phase"] == "ready":
+            command("exit" if exit_phase == "empty" or exit_phase == "ready" and state["saved"] else "start")
+        elif state["phase"] == "paused":
+            command("exit")
+
+    control.send = send
+    original_loop = recording.record_loop
+
+    def loop(**kwargs):
+        dataset = session.dataset
+        original_add = dataset.add_frame
+
+        def add_frame(frame):
+            original_add(frame)
+            if dataset.episode_buffer["episode_index"] == 1 and dataset.episode_buffer["size"] == 1:
+                if exit_phase == "paused":
+                    control.disconnect()
+                else:
+                    command("exit")
+
+        dataset.add_frame = add_frame
+        try:
+            return original_loop(**kwargs)
+        finally:
+            dataset.add_frame = original_add
+
+    original_postprocess = recording.postprocess_raw_episodes
+
+    def postprocess(dataset, cameras, *, progress):
+        assert not robot._is_connected, "Release devices before starting postprocessing"
+        assert dataset.finalized
+        assert dataset.episode_buffer["size"] == 0
+        total = len(recording.RawEpisodeStore.checkpoints(dataset.root))
+        processed.append(total)
+        progress({"stage": "loading", "total_episodes": total, "completed_episodes": 0,
+                  "episode_index": None, "streams": {}, "elapsed_s": 0})
+        result = original_postprocess(dataset, cameras)
+        progress({"stage": "complete", "total_episodes": total, "completed_episodes": total,
+                  "episode_index": None, "streams": {}, "elapsed_s": 1})
+        return result
+
+    monkeypatch.setattr(recording, "record_loop", loop)
+    monkeypatch.setattr(recording, "postprocess_raw_episodes", postprocess)
+    try:
+        dataset = recording.record(session.cfg, recording_control=control)
+        expected = 0 if exit_phase == "empty" else 1
+        assert processed == [expected]
+        assert dataset.num_episodes == expected
+        assert control.state["postprocess"]["stage"] == "complete"
+        assert control.state["postprocess"]["completed_episodes"] == expected
+        assert any(state["phase"] == "stopping" for state in states)
+        assert any(state["phase"] == "postprocessing" for state in states)
+        assert not (dataset.root / "raw_episodes/episode_000001").exists()
+        assert not dataset._get_image_file_dir(1, "observation.images.photon").exists()
+        if expected:
+            assert dataset.saved[0]["episode_index"] == 0 and dataset.saved[0]["size"] == 2
+    finally:
+        control.close()
+
+
 @pytest.mark.parametrize("cancelled", [False, True])
 def test_web_reset_can_cancel_before_sending_motion(cancelled):
     from lerobot_robot_ufactory.robots.uf_robot.uf_robot import UFRobot

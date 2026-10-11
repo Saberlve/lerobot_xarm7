@@ -194,24 +194,26 @@ uv run record --config_path config/gello/xarm7_gello_record_config.yaml
 # Continue recording on an existing dataset
 uv run record --config_path config/gello/xarm7_gello_record_config.yaml -r
 
-# Optional: save episodes in the background
-uv run record --config_path config/gello/xarm7_gello_record_config.yaml -a
+# Optional: disable deferred processing and save episodes in the background
+uv run record --config_path config/gello/xarm7_gello_record_config.yaml -a --defer_processing=false
 ```
 
 Controls: `Space` start the episode, `→` save it, `←` discard and re-record it, `Esc` stop recording. The arm resets to its initial point between episodes.
 
-Each completed episode waits for image writes, computes offline Mesh3DFlow
-when enabled, encodes its videos, and saves the LeRobot data and tactile streams.
-Video encoding runs once per episode. By default, saving finishes before the
-next episode starts. With `-a`, each episode is processed and saved in the
-background; pending saves are drained before exit.
+All recording configurations enable `defer_processing: true`. Each completed
+episode waits for image writes and saves a raw checkpoint, tactile streams, and
+timing data before the next episode starts. Normal recording exit releases devices,
+then computes enabled offline Mesh3DFlow, encodes videos, and produces the LeRobot
+dataset. Disable deferred processing to use `-a` for background processing and saving;
+pending saves are drained before exit.
 
 A synchronization timeout discards only the active episode and waits for
 `Space` (or `Enter` without a keyboard listener) to retry. Completed episodes
 remain saved if later recording fails.
 
-For unprocessed raw checkpoints created by older recordings, run the following
-with the original configuration before resuming. It does not connect devices:
+Deferred processing supports resuming with contiguous unprocessed raw checkpoints.
+To process them separately, run the following with the original configuration.
+It does not connect devices:
 
 ```bash
 uv run record --config_path config/gello/xarm7_gello_base.yaml --postprocess-only
@@ -434,4 +436,4 @@ This project is released under the Apache License 2.0. See [LICENSE](LICENSE).
 
 Run `.venv/bin/uf-lerobot-record-web --port 8769` for configuration management, recording control, and preview on one page. Browser shortcuts and J7-only mode are supported; Photon previews are opt-in. See the [web recording guide](docs/recording_web_en.md).
 
-After selecting and saving a configuration, the data postprocessing panel detects pending raw episodes in its dataset directory every 5 seconds, with a manual refresh option. The standalone postprocessing button processes them without connecting the robot, GELLO, or cameras, and shows converted episode counts, processing stages, and per-camera frame progress. Recording and postprocessing cannot run together. Processing continues if the browser disconnects; failures preserve raw inputs for retry. Automatic processing at the end of a `defer_processing` session shows the same progress.
+After selecting and saving a configuration, the data postprocessing panel detects pending raw episodes every 5 seconds, with a manual refresh option. Clicking “Exit recording and start postprocessing” (or pressing Esc) discards the unsaved episode, releases devices, and processes saved raw episodes. The top session panel shows a progress bar, converted episode counts, processing stages, and per-camera frame progress. Standalone postprocessing also runs without connecting the robot, GELLO, or cameras. Recording and postprocessing cannot run together. Processing continues if the browser disconnects; failures preserve raw inputs for retry.

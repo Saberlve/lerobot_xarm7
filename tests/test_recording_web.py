@@ -101,23 +101,25 @@ def test_strict_validation_rejects_mistakes(project, mutation):
 
 
 @pytest.mark.parametrize("mode", ["new", "rebuild", "resume"])
-def test_dataset_selection_and_recoverable_rebuild(project, mode):
+def test_dataset_selection_and_overwrite_rebuild(project, mode):
     root = project / "datasets/existing"
     root.mkdir(parents=True)
     (root / "sentinel.txt").write_text("previous data")
+    sibling = root.parent / "other-dataset"
+    sibling.mkdir()
+    (sibling / "sentinel.txt").write_text("other data")
     cfg = SimpleNamespace(dataset=SimpleNamespace(root=root))
     raw = {"dataset": {"root": str(root)}}
     options = {"dataset_mode": mode, "dataset_stamp": dataset_stamp(root)}
     if mode == "rebuild":
         prepare_web_dataset(project, cfg, raw, options)
         assert not root.exists()
-        archives = list((root.parent / ".web-dataset-trash").glob("*/sentinel.txt"))
-        assert len(archives) == 1
-        assert archives[0].read_text() == "previous data"
+        assert not (root.parent / ".web-dataset-trash").exists()
     else:
         with pytest.raises(RuntimeError):
             prepare_web_dataset(project, cfg, raw, options)
         assert (root / "sentinel.txt").read_text() == "previous data"
+    assert (sibling / "sentinel.txt").read_text() == "other data"
 
 
 def test_rebuild_rejects_stale_confirmation_and_outside_directory(project, tmp_path):

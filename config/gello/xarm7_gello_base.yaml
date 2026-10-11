@@ -2,6 +2,7 @@
 # Run from the project root:
 # .venv/bin/uf-lerobot-record --config_path config/gello/xarm7_gello_base.yaml
 
+defer_processing: true
 synchronize: true
 # Save each episode with video encoding and offline Mesh3DFlow before the next recording.
 # Compute Mesh3DFlow from saved Rectify images and write the results to the dataset:

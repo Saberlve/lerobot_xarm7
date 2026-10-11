@@ -4,11 +4,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import sys
 import time
 import traceback
-from uuid import uuid4
 
 from lerobot_robot_ufactory.utils.webapp.recording_control import RecordingControl
 
@@ -64,7 +64,8 @@ def worker_main(project, folder, session_id, connection, images, options):
 
             control.prepare_dataset = lambda: prepare_web_dataset(project, cfg, raw, options)
             record(cfg, recording_control=control)
-        control.transition("finished", has_unsaved=False, joint_mode="all", stage="Devices released")
+        stage = "Postprocessing complete" if control.state["phase"] == "postprocessing" else "Devices released"
+        control.transition("finished", has_unsaved=False, joint_mode="all", stage=stage)
     except BaseException as exc:
         traceback.print_exc()
         control.transition("error", error=str(exc), stage="Session failed; see console log")
@@ -93,10 +94,8 @@ def prepare_web_dataset(project, cfg, raw, options):
         allowed = (Path(project) / "datasets").resolve()
         if root == allowed or not root.is_relative_to(allowed):
             raise RuntimeError("Rebuild is restricted to a child of project/datasets")
-        archive = root.parent / ".web-dataset-trash" / f"{root.name}-{uuid4().hex}"
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        root.replace(archive)
-        print(f"Previous dataset archived at {archive}", flush=True)
+        shutil.rmtree(root)
+        print(f"Previous dataset removed; rebuilding at {root}", flush=True)
 
 
 def prepare_web_postprocess(project, cfg, raw, options):

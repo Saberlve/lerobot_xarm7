@@ -1,3 +1,4 @@
+defer_processing: true
 robot:
   type: uf::robot
   id: "uf_robot"
