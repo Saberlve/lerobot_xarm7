@@ -102,6 +102,24 @@ def test_removed_controller_backend_is_rejected():
         UFRobotConfig(robot_dof=7, min_tcp_z_mm=95.0, tcp_z_guard_backend="controller_rpc")
 
 
+@pytest.mark.parametrize("state,error_code", [(4, 0), (5, 0), (0, 23)])
+@pytest.mark.parametrize("manual_mode", [False, True])
+def test_stopped_or_faulted_controller_rejects_actions(state, error_code, manual_mode):
+    robot = make_guard_robot()
+    robot._is_connected = True
+    robot._last_logged_controller_error = 0
+    robot.real_arm.state = state
+    robot.real_arm.error_code = error_code
+    robot.config = SimpleNamespace(manual_mode=manual_mode, gripper_error_log_path=None)
+    calls = []
+    robot.real_arm.set_state = lambda state: calls.append("state")
+    robot.real_arm.set_servo_angle = lambda **kwargs: calls.append("move")
+    robot._send_gripper_action = lambda target: calls.append("gripper")
+    with pytest.raises(RuntimeError, match="controller stopped or faulted"):
+        robot.send_action({})
+    assert calls == [], "A stopped controller must not be re-enabled or sent motion"
+
+
 def test_non_finite_tcp_floor_is_rejected():
     with pytest.raises(ValueError, match="min_tcp_z_mm"):
         UFRobotConfig(robot_dof=7, min_tcp_z_mm=float("nan"))

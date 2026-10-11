@@ -1,7 +1,7 @@
-"""RGB history on the action clock, using exposure metadata when available.
+"""Host-clock timestamp queues for ordinary RGB cameras.
 
-RealSense's sole SDK reader returns pixels and mapped exposure time together.
-Other backends use explicitly labelled host receipt timestamps.
+The adapter timestamps fresh ``async_read`` frames when they reach the host,
+retains a short history, and selects frames on the monotonic action clock.
 """
 
 from collections import deque
@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 
 @dataclass(frozen=True)
 class TimestampedRGBSample:
-    """An RGB frame with a capture time and same-frame timing diagnostics."""
+    """An RGB frame with its host receipt time and timing diagnostics."""
 
     frame: NDArray[Any]
     capture_monotonic_s: float
@@ -34,10 +34,9 @@ def select_synchronized_samples(
     """Select the latest causal sample from every ordinary RGB stream.
 
     ``max_skew_ms`` is the maximum age relative to the target and
-    ``pair_max_skew_ms`` bounds the spread among selected capture timestamps.
-    Exposure readers wait for a post-target exposure watermark: a causal
-    exposure can still be in flight after the action. All sources share one
-    wait budget; the post-target frame itself is never selected.
+    ``pair_max_skew_ms`` bounds the spread among selected host receipt timestamps.
+    Selection uses only frames already in each stream's history and never
+    waits for a post-target frame. ``wait_ms`` is retained for API compatibility.
     """
     if not all(
         np.isfinite(v) and v >= 0
@@ -48,10 +47,6 @@ def select_synchronized_samples(
         return {}
     bound = max_skew_ms / 1_000
     pair_bound = pair_max_skew_ms / 1_000
-    deadline = perf_counter() + wait_ms / 1_000
-    for source in sources.values():
-        if getattr(source, "uses_exposure_timestamps", False) and wait_ms > 0:
-            source.wait_until_after(target_monotonic_s, deadline)
     histories = {name: source.sync_samples() for name, source in sources.items()}
     chosen = {}
     ages_ms = {}
@@ -85,7 +80,7 @@ def select_synchronized_samples(
 
 
 class TimestampedCameraBuffer:
-    """Continuously collect a camera's fresh frames with capture timestamps.
+    """Continuously timestamp a camera's fresh asynchronous frames.
 
     The queue pairs a frame to a host monotonic action anchor. Only a frame at
     or before the anchor is eligible; stale frames are rejected.
@@ -98,7 +93,6 @@ class TimestampedCameraBuffer:
         history_size: int,
         read_timeout_ms: float = 200.0,
         stop_timeout_ms: float = 2_000.0,
-        require_exposure_timestamp: bool = False,
     ) -> None:
         if not isinstance(history_size, int) or isinstance(history_size, bool) or history_size <= 0:
             raise ValueError("history_size must be a positive integer")
@@ -107,8 +101,6 @@ class TimestampedCameraBuffer:
         if not np.isfinite(stop_timeout_ms) or stop_timeout_ms <= 0:
             raise ValueError("stop_timeout_ms must be finite and positive")
         self.camera = camera
-        self.uses_exposure_timestamps = callable(getattr(camera, "read_timestamped", None))
-        self._require_exposure_timestamp = require_exposure_timestamp
         self._history = deque(maxlen=history_size)
         self._newest_evicted_s = None
         self._read_timeout_ms = float(read_timeout_ms)
@@ -141,31 +133,12 @@ class TimestampedCameraBuffer:
 
     def _capture_loop(self) -> None:
         previous_frame = None
-        previous_frame_number = None
         previous_capture_s = None
         try:
             while not self._stop.is_set():
                 started_at = perf_counter()
                 try:
-                    if self.uses_exposure_timestamps:
-                        sample = self.camera.read_timestamped(
-                            timeout_ms=self._read_timeout_ms,
-                            require_exposure_timestamp=self._require_exposure_timestamp,
-                        )
-                        frame = sample.frame
-                        frame_number = sample.timing.get("frame_number")
-                        if frame_number is not None and frame_number == previous_frame_number:
-                            self._stop.wait(0.001)
-                            continue
-                        if (
-                            previous_frame_number is not None
-                            and frame_number is not None
-                            and frame_number < previous_frame_number
-                        ):
-                            raise RuntimeError("RealSense frame counter moved backwards")
-                        previous_frame_number = frame_number
-                    else:
-                        frame = self.camera.async_read(timeout_ms=self._read_timeout_ms)
+                    frame = self.camera.async_read(timeout_ms=self._read_timeout_ms)
                 except TimeoutError:
                     # A transient camera wait timeout is not a capture failure.
                     continue
@@ -185,24 +158,21 @@ class TimestampedCameraBuffer:
                     raise ValueError(
                         f"Camera {self.camera} returned shape {frame.shape}, expected HxWx3"
                     )
-                if not self.uses_exposure_timestamps:
-                    sample = TimestampedRGBSample(
-                        frame=frame.copy(),
-                        capture_monotonic_s=received_at,
-                        capture_monotonic_ns=received_at_ns,
-                        timing={
-                            "timestamp_source": "host_receipt",
-                            "clock_mapping_method": "host_receipt",
-                            "received_monotonic_s": received_at,
-                            "received_monotonic_ns": received_at_ns,
-                        },
-                    )
+                sample = TimestampedRGBSample(
+                    frame=frame.copy(),
+                    capture_monotonic_s=received_at,
+                    capture_monotonic_ns=received_at_ns,
+                    timing={
+                        "timestamp_source": "host_receipt",
+                        "received_monotonic_s": received_at,
+                        "received_monotonic_ns": received_at_ns,
+                    },
+                )
                 if not np.isfinite(sample.capture_monotonic_s) or (
                     previous_capture_s is not None
                     and sample.capture_monotonic_s <= previous_capture_s
                 ):
-                    # A reset, clock jump or fallback transition invalidates
-                    # ordered watermarks. Never silently publish that interval.
+                    # Ordered interval boundaries require a monotonic clock.
                     raise RuntimeError("RGB capture clock moved backwards or repeated")
                 previous_capture_s = sample.capture_monotonic_s
                 previous_frame = frame
@@ -214,10 +184,9 @@ class TimestampedCameraBuffer:
                 # Standard LeRobot async readers wait for a new frame. The
                 # period cap also protects CPU use for a backend that returns
                 # immediately after producing a frame.
-                if not self.uses_exposure_timestamps:
-                    self._stop.wait(
-                        max(0.0, self._minimum_period_s - (perf_counter() - started_at))
-                    )
+                self._stop.wait(
+                    max(0.0, self._minimum_period_s - (perf_counter() - started_at))
+                )
         except BaseException as exc:
             with self._condition:
                 self._error = exc
@@ -285,15 +254,13 @@ class TimestampedCameraBuffer:
     ) -> tuple[NDArray[Any], dict[str, Any]]:
         """Return the latest frame at/before ``target_monotonic_s``.
 
-        Exposure readers wait for in-flight causal frames within ``wait_ms``.
+        Use existing history immediately; ``wait_ms`` is kept for compatibility.
         """
         if not all(
             np.isfinite(value) and value >= 0
             for value in (target_monotonic_s, max_skew_ms, wait_ms)
         ):
             raise ValueError("camera synchronization values must be finite and non-negative")
-        if self.uses_exposure_timestamps and wait_ms > 0:
-            self.wait_until_after(target_monotonic_s, perf_counter() + wait_ms / 1_000)
         with self._condition:
             self.sync_samples()
             samples = tuple(

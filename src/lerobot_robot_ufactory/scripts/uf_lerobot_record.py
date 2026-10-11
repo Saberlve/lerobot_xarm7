@@ -50,6 +50,7 @@ class UFRecordConfig(LeRobotRecordConfig):
     # available by default for GELLO recording.
     synchronize: bool = True
     offline_mesh3dflow: bool = False
+    defer_processing: bool = False
 
     def __post_init__(self):
         self.web_preview.validate()
@@ -334,13 +335,7 @@ class EpisodeSynchronization:
             if "sensor_timestamp_s" in timing:
                 camera_timestamp["sensor_timestamp_s"] = timing["sensor_timestamp_s"]
             for name in (
-                "timestamp_source", "clock_mapping_method", "timestamp_fallback_reason",
-                "received_monotonic_ns", "received_monotonic_s", "frame_number",
-                "sensor_timestamp_us", "frame_timestamp_us", "actual_exposure_us",
-                "sensor_timestamp_supported", "frame_timestamp_supported",
-                "actual_exposure_supported", "sdk_timestamp_ms", "sdk_timestamp_domain",
-                "wall_to_monotonic_offset_ns", "clock_bridge_uncertainty_ns",
-                "exposure_to_receipt_ms",
+                "timestamp_source", "received_monotonic_ns", "received_monotonic_s",
             ):
                 if name in timing:
                     camera_timestamp[name] = timing[name]
@@ -804,6 +799,10 @@ class _EpisodeSynchronizationOwner:
         finally:
             self.release(synchronization)
 
+    def discard_all(self):
+        for synchronization in tuple(self._owned.values()):
+            self.discard(synchronization)
+
     def __exit__(self, exc_type, exc_value, traceback):
         errors = []
         for synchronization in tuple(self._owned.values()):
@@ -891,22 +890,54 @@ class _RawDatasetFinalize:
         return False
     
 
+def _recoverable_recording_control_error(exc):
+    """Recognize a stopped control worker; never retry motion automatically."""
+    while exc is not None:
+        if isinstance(exc, RuntimeError) and (
+            "Realtime joint control thread failed" in str(exc)
+            or "set_servo_angle failed" in str(exc)
+        ):
+            return True
+        exc = exc.__cause__
+    return False
+
+
 def _safe_stop_recording_image_writer(func):
-    """Keep the shared image writer alive after a recoverable capture timeout."""
+    """Discard failed captures before stopping or reusing the image writer."""
     parameters = signature(func)
 
     @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except TimeoutError:
-            raise
-        except Exception:
-            dataset = parameters.bind(*args, **kwargs).arguments.get("dataset")
+        except BaseException as exc:
+            arguments = parameters.bind(*args, **kwargs).arguments
+            dataset = arguments.get("dataset")
+            control = arguments.get("recording_control")
+            owner = arguments.get("synchronization_owner")
+            if owner is not None:
+                try:
+                    owner.discard_all()
+                except BaseException:
+                    logging.exception("Failed to discard interrupted episode sidecars")
+            if dataset is not None:
+                try:
+                    _discard_current_episode(dataset)
+                    if control is not None:
+                        control.progress(has_unsaved=False, frames=0, elapsed=0.0)
+                except BaseException:
+                    logging.exception("Failed to discard the interrupted episode")
+            # Every exception above discards the capture. Only writer lifetime
+            # differs when the caller can continue the recording session.
+            if isinstance(exc, TimeoutError) or _recoverable_recording_control_error(exc):
+                raise
             image_writer = getattr(dataset, "image_writer", None)
             if image_writer is not None:
                 print("Waiting for image writer to terminate...")
-                image_writer.stop()
+                try:
+                    image_writer.stop()
+                except BaseException:
+                    logging.exception("Failed to stop the image writer after capture failure")
             raise
 
     return wrapper
@@ -918,10 +949,12 @@ def _discard_current_episode(dataset, async_episode_saver=None):
         async_episode_saver.wait_idle()
     episode_buffer = _get_episode_buffer(dataset)
     episode_index = _episode_buffer_index(episode_buffer)
-    discard_episode_images(dataset, episode_index)
-    _set_episode_buffer(
-        dataset, _create_empty_episode_buffer(dataset, episode_index, episode_buffer)
-    )
+    try:
+        discard_episode_images(dataset, episode_index)
+    finally:
+        _set_episode_buffer(
+            dataset, _create_empty_episode_buffer(dataset, episode_index, episode_buffer)
+        )
 
 
 @_safe_stop_recording_image_writer
@@ -990,6 +1023,9 @@ def record_loop(
         preprocessor.reset()
         postprocessor.reset()
 
+    check_recording_health = getattr(robot, "check_recording_health", None)
+    if callable(check_recording_health):
+        check_recording_health()
     last_robot_cmd = robot.get_observation()
     # only positional cmd for now: Remove velo from observation for cmd if needed!
     last_robot_cmd = { k: v for k,v in last_robot_cmd.items() if not "vel" in k }
@@ -1115,6 +1151,9 @@ def record_loop(
             if events["exit_early"]:
                 events["exit_early"] = False
                 break
+
+            if callable(check_recording_health):
+                check_recording_health()
 
             # Get robot observation
             if realtime_controller is not None:
@@ -1431,33 +1470,36 @@ def record_loop(
 
             timestamp = time.perf_counter() - start_episode_t
 
-        record_loop_succeeded = True
-        if synchronization_owner is not None:
-            synchronization_owner.track(episode_synchronization)
-    except InterruptedError:
-        if not events.get('pause_recording'):
-            raise
+        if callable(check_recording_health):
+            check_recording_health()
         record_loop_succeeded = True
         if synchronization_owner is not None:
             synchronization_owner.track(episode_synchronization)
     finally:
         try:
-            if realtime_controller is not None:
-                if events.get('pause_recording'):
-                    realtime_controller.request_pause()
-                # Preserve the capture exception instead of replacing it with
-                # the same latched control fault during worker cleanup.
-                if sys.exc_info()[0] is None:
-                    realtime_controller.stop()
-                else:
-                    realtime_controller.stop(raise_on_fault=False)
+            try:
+                if realtime_controller is not None:
+                    if events.get('pause_recording'):
+                        realtime_controller.request_pause()
+                    # Preserve the capture exception instead of replacing it with
+                    # the same latched control fault during worker cleanup.
+                    if sys.exc_info()[0] is None:
+                        realtime_controller.stop()
+                    else:
+                        realtime_controller.stop(raise_on_fault=False)
+            finally:
+                if recording_control is not None:
+                    recording_control.realtime_controller = None
+                try:
+                    if realtime_controller is None and events.get('pause_recording'):
+                        robot.pause_motion()
+                finally:
+                    if sync_log_file is not None:
+                        sync_log_file.close()
+        except BaseException:
+            record_loop_succeeded = False
+            raise
         finally:
-            if recording_control is not None:
-                recording_control.realtime_controller = None
-            if realtime_controller is None and events.get('pause_recording'):
-                robot.pause_motion()
-            if sync_log_file is not None:
-                sync_log_file.close()
             if not record_loop_succeeded and episode_synchronization is not None:
                 episode_synchronization.discard()
     return episode_synchronization
@@ -1634,7 +1676,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
         recording_control.prepare_dataset()
     _prepare_dataset_root(cfg)
 
-    if cfg.resume and not postprocess_only:
+    if cfg.resume and not postprocess_only and not getattr(cfg, "defer_processing", False):
         root = Path(cfg.dataset.root)
         info = json.loads((root / "meta/info.json").read_text())
         pending = [
@@ -1747,7 +1789,10 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
         from lerobot_robot_ufactory.tactile import TactileCamera
         cameras = {name: cam for name, cam in robot.cameras.items() if isinstance(cam, TactileCamera)}
         with _RawDatasetFinalize(dataset):
-            result = postprocess_raw_episodes(dataset, cameras)
+            result = postprocess_raw_episodes(
+                dataset, cameras,
+                progress=recording_control.postprocess_progress if recording_control is not None else None,
+            )
         return result
 
     # Load pretrained policy
@@ -1894,6 +1939,13 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
 
     frame_callback = None
     mesh_cameras = tactile_cameras if cfg.offline_mesh3dflow else {}
+    raw_store = None
+    if getattr(cfg, "defer_processing", False):
+        if async_save:
+            raise ValueError("defer_processing saves raw checkpoints synchronously; omit --async-save")
+        raw_store = RawEpisodeStore(dataset, runtime_dir=runtime_dir, offline_mesh_fields=offline_mesh_fields)
+        buffer = _get_episode_buffer(dataset)
+        _set_episode_buffer(dataset, _create_empty_episode_buffer(dataset, raw_store.next_episode_index(), buffer))
     async_episode_saver = (
         AsyncEpisodeSaver(dataset, mesh_cameras=mesh_cameras, runtime_dir=runtime_dir)
         if async_save else None
@@ -1904,13 +1956,13 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
     episode_owner = _EpisodeSynchronizationOwner()
     # Close pending async saves before VideoEncodingManager finalizes Parquet
     # writers, including when capture or device cleanup raises an exception.
-    dataset_cleanup = VideoEncodingManager(dataset)
+    dataset_cleanup = _RawDatasetFinalize(dataset) if raw_store is not None else VideoEncodingManager(dataset)
     with dataset_cleanup, _RecordingCleanup(
         robot, teleop, listener, async_episode_saver, web_preview
     ), episode_owner:
         # num_episodes is a dataset-wide limit.  Count existing episodes so a
         # resumed recording cannot exceed it by recording another full batch.
-        recorded_episodes = dataset.num_episodes
+        recorded_episodes = _current_episode_index(dataset)
         if recorded_episodes >= cfg.dataset.num_episodes:
             print(
                 f"Episode limit already reached ({recorded_episodes}/"
@@ -2019,7 +2071,13 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                 log_say(f"Save episode {episode_index}", cfg.play_sounds)
                 if is_uf_teleop:
                     teleop.set_teleop_enabled(False)
-                if async_episode_saver is None:
+                if raw_store is not None:
+                    buffer = _get_episode_buffer(dataset)
+                    raw_store.save(buffer, episode_synchronization)
+                    episode_owner.release(episode_synchronization)
+                    _set_episode_buffer(dataset, _create_next_episode_buffer(dataset, buffer))
+                    log_say(f"[RawSaved] Episode {episode_index}; processing after recording", cfg.play_sounds)
+                elif async_episode_saver is None:
                     try:
                         validate_episode_images(dataset, _get_episode_buffer(dataset))
                         if mesh_cameras:
@@ -2078,6 +2136,9 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
             async_episode_saver.close()
 
     print("\n********** Episode Record Loop Exit **********")
+
+    if raw_store is not None:
+        dataset = postprocess_raw_episodes(dataset, tactile_cameras)
 
     if cfg.dataset.push_to_hub:
         dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)

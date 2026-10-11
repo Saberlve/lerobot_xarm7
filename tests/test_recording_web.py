@@ -20,6 +20,22 @@ from lerobot_robot_ufactory.utils.webapp.recording_web_worker import prepare_web
 from lerobot_robot_ufactory.utils.webapp.recording_web_config import dataset_stamp
 
 
+def test_postprocessing_blocks_recording_commands_and_survives_disconnect():
+    control, teleop, messages, now = mailbox()
+    progress = {"stage": "mesh", "total_episodes": 2, "completed_episodes": 0,
+                "episode_index": 0, "streams": {}, "elapsed_s": 1}
+    control.postprocess_progress(progress)
+    assert control.state["phase"] == "postprocessing"
+    for action in ("start", "save", "discard", "exit", "joint_mode"):
+        command(control, action)
+        assert messages[-1]["ok"] is False
+    control.disconnect()
+    assert not any(control.events.values())
+    assert control.state["postprocess"] == progress
+    control.postprocess_progress({**progress, "stage": "complete", "completed_episodes": 2})
+    assert messages[-1]["state"]["postprocess"]["completed_episodes"] == 2
+
+
 @pytest.fixture
 def project(tmp_path):
     root = tmp_path / "project"
@@ -377,10 +393,134 @@ def test_simulated_session_preview_lease_pause_save_and_exit(project):
             await wait_phase(manager, "ready")
             assert manager.state["saved"] == 1
             assert manager.state["joint_mode"] == "all"
+            # One save command ends capture and saves the episode.
+            async def owner_action(action):
+                await observer.send_json({"action": action,
+                    "session_id": manager.state["session_id"],
+                    "version": manager.state["version"], "request_id": str(time.time_ns())})
+            await owner_action("start")
+            await wait_phase(manager, "recording")
+            await owner_action("save")
+            await wait_phase(manager, "ready")
+            assert manager.state["saved"] == 2
+            assert not manager.state["has_unsaved"]
+            assert (manager.folder / "simulated_episode_000002.json").exists()
+            await owner_action("start")
+            await wait_phase(manager, "recording")
+            await owner_action("discard")
+            await wait_phase(manager, "ready")
+            assert manager.state["saved"] == 2
+            assert not (manager.folder / "simulated_episode_000003.json").exists()
             await observer.send_json({"action": "exit", "session_id": manager.state["session_id"],
                 "version": manager.state["version"], "request_id": str(time.time_ns())})
             await wait_phase(manager, "finished")
             assert (manager.folder / "simulated_episode_000001.json").exists()
             await preview.close()
             await observer.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("action,phase", [("save", "saving"), ("discard", "resetting")])
+def test_capture_command_selects_save_or_discard_immediately(action, phase):
+    control, teleop, messages, now = mailbox()
+    control.transition("recording", has_unsaved=True)
+    command(control, action)
+    assert messages[-1]["ok"] is True
+    assert control.state["phase"] == phase
+    assert control.events["exit_early"]
+    assert control.events["rerecord_episode"] is (action == "discard")
+    assert control.actions.empty()
+
+
+def test_stage_change_bypasses_progress_throttle():
+    control, teleop, messages, now = mailbox()
+    now[0] = 1.0
+    control.progress(frames=2)
+    control.transition("saving", stage="Validating images")
+    now[0] += 0.01
+    control.progress(stage="Computing Mesh3DFlow")
+    assert messages[-1]["state"]["stage"] == "Computing Mesh3DFlow"
+
+
+def test_standalone_postprocess_web_job_uses_selected_dataset(project, tmp_path, monkeypatch):
+    """Exercise the actual spawned offline worker and HTTP detection, without cameras."""
+    import numpy as np
+    from lerobot_robot_ufactory.datasets.native_dataset import NativeRateLeRobotDataset
+    from lerobot_robot_ufactory.datasets.raw_episodes import RawEpisodeStore
+    from lerobot_robot_ufactory.scripts import uf_lerobot_record as recording
+
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf-cache"))
+    import datasets.config
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", tmp_path / "hf-cache")
+    store = ConfigStore(project)
+    item = store.read("tasks/example/example.yaml")
+    raw = yaml.safe_load(item["text"])
+    raw["offline_mesh3dflow"] = False
+    raw["robot"]["cameras"] = {}
+    raw["robot"]["record_space"] = "joint"
+    raw["robot"]["calibration_dir"] = str(tmp_path / "calibration")
+    item = store.save(item["path"], yaml.safe_dump(raw), item["revision"])
+    _, cfg = validate_text(item["text"])
+    robot = recording.make_robot_from_config(cfg.robot)
+    processors = recording.make_default_processors()
+    features = recording.combine_feature_dicts(
+        recording.aggregate_pipeline_dataset_features(
+            pipeline=processors[0], initial_features=recording.create_initial_features(action=robot.action_features),
+            use_videos=cfg.dataset.video),
+        recording.aggregate_pipeline_dataset_features(
+            pipeline=processors[2], initial_features=recording.create_initial_features(observation=robot.observation_features),
+            use_videos=cfg.dataset.video),
+    )
+    dataset = NativeRateLeRobotDataset.create(
+        cfg.dataset.repo_id, fps=cfg.dataset.fps, root=project / cfg.dataset.root,
+        features=features, robot_type="xarm7", use_videos=cfg.dataset.video,
+    )
+    for index in range(3):
+        dataset.add_frame({**{key: np.full(feature["shape"], index, dtype=feature["dtype"])
+                              for key, feature in features.items()}, "task": "offline web test"})
+    RawEpisodeStore(dataset).save(dataset.episode_buffer)
+    dataset.finalize()
+
+    async def scenario():
+        async with TestClient(TestServer(create_app(project))) as client:
+            manager = client.app[MANAGER_KEY]
+            origin = str(client.make_url("")).rstrip("/")
+            headers = {"Origin": origin, "X-Record-Token": manager.token}
+            ws = await client.ws_connect("/ws/control?token=" + manager.token, headers={"Origin": origin})
+            owner = (await ws.receive_json())["client_id"]
+            status_url = "/api/postprocess-status?path=" + item["path"]
+            status = await (await client.get(status_url)).json()
+            assert status["revision"] == item["revision"]
+            assert status["ready"] and status["pending_episodes"] == 1 and status["pending_frames"] == 3
+            response = await client.post("/api/postprocess", json={"path": item["path"],
+                "revision": "stale", "client_id": owner}, headers=headers)
+            assert response.status == 409
+            response = await client.post("/api/postprocess", json={"path": item["path"],
+                "revision": item["revision"], "client_id": "observer"}, headers=headers)
+            assert response.status == 409
+            response = await client.post("/api/postprocess", json={"path": item["path"],
+                "revision": item["revision"], "client_id": owner}, headers=headers)
+            assert response.status == 200, await response.text()
+            assert (await response.json())["state"]["operation"] == "postprocess"
+            assert not manager.images
+            state = await wait_phase(manager, "finished", timeout=30)
+            assert state["saved"] == 1
+            assert state["postprocess"]["stage"] == "complete"
+            assert state["postprocess"]["completed_episodes"] == 1
+            assert not manager.images
+            await asyncio.to_thread(manager.process.join, 5)
+            assert manager.process.exitcode == 0
+            status = await (await client.get(status_url)).json()
+            assert status["processed_episodes"] == 1
+            assert status["pending_episodes"] == status["pending_frames"] == 0
+            assert not status["ready"]
+            response = await client.post("/api/postprocess", json={"path": item["path"],
+                "revision": item["revision"], "client_id": owner}, headers=headers)
+            assert response.status == 400
+            empty = yaml.safe_load(item["text"])
+            empty["dataset"]["root"] = "datasets/empty"
+            store.save("tasks/example/empty.yaml", yaml.safe_dump(empty), None)
+            status = await (await client.get("/api/postprocess-status?path=tasks/example/empty.yaml")).json()
+            assert status["pending_episodes"] == 0 and not status["ready"]
+            await ws.close()
     asyncio.run(scenario())

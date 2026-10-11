@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+
 import json
 import logging
 import os
@@ -17,6 +21,41 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _prefetched_tactile_images(staged: Path, frame_count: int):
+    """Decode ahead with at most four queued frames, yielding in capture order."""
+    def read_frame(index):
+        path = staged / "frames" / f"frame_{index:06d}.png"
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image is None:
+            raise TactilePersistenceError(f"Missing original tactile image: {path}")
+        return index, image
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mesh-png") as reader:
+        pending = deque()
+        next_index = 0
+
+        def images():
+            nonlocal next_index
+            while next_index < min(4, frame_count):
+                pending.append(reader.submit(read_frame, next_index))
+                next_index += 1
+            while pending:
+                frame = pending.popleft().result()
+                if next_index < frame_count:
+                    pending.append(reader.submit(read_frame, next_index))
+                    next_index += 1
+                yield frame
+
+        iterator = images()
+        try:
+            yield iterator
+        finally:
+            iterator.close()
+            for future in pending:
+                future.cancel()
 
 
 class TactilePersistenceError(RuntimeError):
@@ -495,38 +534,41 @@ class TactileStreamRecorder:
             raise TactilePersistenceError("Lossless Mesh3DFlow round-trip validation failed")
         os.replace(temporary, path)
 
-    def compute_mesh(self, cameras, runtime_dir):
-        """Infer every native-rate frame from PNGs before they enter a codec."""
+    def compute_mesh(self, cameras, runtime_dir, *, progress=None):
+        """Infer ordered native frames with two independent solvers and PNG prefetch."""
         import hashlib
 
         from .deferred_mesh import deferred_sessions
 
         self._close_writer()
-        result = {}
-        for name, camera in cameras.items():
-            if name not in self._rows:
-                continue
+
+        def compute_stream(name, camera):
+            started = time.monotonic()
             rows = self._rows[name]
-            if not rows:
-                continue
+            reported_at = started
+
+            def report_frames(count):
+                if progress is not None:
+                    progress({"camera": name, "stage": "mesh", "completed_frames": count,
+                              "total_frames": len(rows)})
+
+            report_frames(0)
             staged = self._staging_root / name
             path = staged / "mesh3dflow.npy"
             if path.is_file() and all(row["mesh_path"] for row in rows):
-                result[name] = np.load(path, allow_pickle=False, mmap_mode="r")
-                continue
+                report_frames(len(rows))
+                return np.load(path, allow_pickle=False, mmap_mode="r")
             expected = tuple(camera.deferred_feature_shapes["mesh_motion_3d"])
             temporary = path.with_suffix(".npy.tmp")
             values = None
             expected_dtype = None
             expected_digest = hashlib.sha256()
-            with deferred_sessions({name: camera}, runtime_dir):
-                for index in range(len(rows)):
-                    image_path = staged / "frames" / f"frame_{index:06d}.png"
-                    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-                    if image is None:
-                        raise TactilePersistenceError(
-                            f"Missing original tactile image: {image_path}"
-                        )
+            # Solver creation, sequential inference and release stay on this
+            # stream's worker. PNG decoding alone runs on its prefetch thread.
+            with deferred_sessions({name: camera}, runtime_dir), _prefetched_tactile_images(
+                staged, len(rows)
+            ) as images:
+                for index, image in images:
                     computed = camera.compute_deferred_features(image, Path(runtime_dir))
                     flow = np.asarray(computed["mesh_motion_3d"])
                     if (
@@ -551,6 +593,10 @@ class TactileStreamRecorder:
                         )
                     values[index] = flow
                     expected_digest.update(flow.tobytes())
+                    now = time.monotonic()
+                    if now - reported_at >= 0.2:
+                        report_frames(index + 1)
+                        reported_at = now
             values.flush()
             del values
             saved = np.load(temporary, allow_pickle=False, mmap_mode="r")
@@ -586,10 +632,24 @@ class TactileStreamRecorder:
                 )
                 + "\n"
             )
-            result[name] = values
-        return result
+            elapsed = time.monotonic() - started
+            report_frames(len(rows))
+            logger.info(
+                "[Mesh3DFlow] %s: %d frames in %.2fs (%.1f frames/s)",
+                name, len(rows), elapsed, len(rows) / max(elapsed, 1e-9),
+            )
+            return values
 
-    def prepare(self, episode_index: int) -> None:
+        streams = [(name, camera) for name, camera in cameras.items() if self._rows.get(name)]
+        if not streams:
+            return {}
+        # Bound SDK concurrency to two independent sensors. Wait for every
+        # worker to release its solver before returning or propagating errors.
+        with ThreadPoolExecutor(max_workers=min(2, len(streams)), thread_name_prefix="mesh") as pool:
+            futures = {name: pool.submit(compute_stream, name, camera) for name, camera in streams}
+            return {name: future.result() for name, future in futures.items()}
+
+    def prepare(self, episode_index: int, *, progress=None) -> None:
         """Flush and validate all raw files while they are still private."""
         if int(episode_index) != self.episode_index:
             raise RuntimeError("Tactile stream episode mismatch")
@@ -621,6 +681,7 @@ class TactileStreamRecorder:
                 ("mesh_frame_index", pa.int64()),
             ]
         )
+        raw_checkpoint = getattr(self, "raw_checkpoint", False)
         for name in self.stream_names:
             staged = self._staging_root / name
             for index, row in enumerate(self._rows[name]):
@@ -637,7 +698,7 @@ class TactileStreamRecorder:
                     raise TactilePersistenceError(
                         f"Missing staged tactile motion for {name}:{index}"
                     )
-                if name in self.required_mesh_streams and not (
+                if not raw_checkpoint and name in self.required_mesh_streams and not (
                     row["mesh_path"] or row["motion_path"]
                 ):
                     raise TactilePersistenceError(
@@ -645,7 +706,14 @@ class TactileStreamRecorder:
                     )
                 if row["mesh_path"] is not None and not (staged / "mesh3dflow.npy").is_file():
                     raise TactilePersistenceError(f"Missing staged Mesh3DFlow for {name}:{index}")
-            if name in self.video_streams and self._rows[name]:
+
+        def prepare_stream(name):
+            started = time.perf_counter()
+            staged = self._staging_root / name
+            if progress is not None:
+                progress({"camera": name, "stage": "encoding", "completed_frames": 0,
+                          "total_frames": len(self._rows[name])})
+            if not raw_checkpoint and name in self.video_streams and self._rows[name]:
                 from lerobot_robot_ufactory.datasets.camera_streams import encode_camera_interval
 
                 encode_camera_interval(
@@ -661,12 +729,31 @@ class TactileStreamRecorder:
             table = pa.Table.from_pylist(self._rows[name], schema=schema)
             pq.write_table(table, temporary)
             os.replace(temporary, index_path)
+            if progress is not None:
+                progress({"camera": name, "stage": "encoding",
+                          "completed_frames": len(self._rows[name]),
+                          "total_frames": len(self._rows[name])})
+
+            logger.info(
+                "[CameraSave] %s: %d frames encoded/indexed in %.2fs",
+                name, len(self._rows[name]), time.perf_counter() - started,
+            )
+
+        # Validate every original first, then encode independent streams.
+        # Join all workers even on failure before allowing retry or discard.
+        if self.stream_names:
+            with ThreadPoolExecutor(
+                max_workers=min(2, len(self.stream_names)), thread_name_prefix="camera-save"
+            ) as pool:
+                futures = [pool.submit(prepare_stream, name) for name in self.stream_names]
+                for future in futures:
+                    future.result()
 
         # Keep every original input until all streams have valid videos and
         # indexes. A later camera's encoding failure must not erase an earlier
         # camera's originals, so the whole preparation can be retried.
         for name in self.stream_names:
-            if name in self.video_streams and self._rows[name]:
+            if not raw_checkpoint and name in self.video_streams and self._rows[name]:
                 shutil.rmtree(self._staging_root / name / "frames")
 
         self._prepared = True

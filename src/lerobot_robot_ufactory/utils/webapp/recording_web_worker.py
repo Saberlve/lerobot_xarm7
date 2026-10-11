@@ -27,8 +27,21 @@ def worker_main(project, folder, session_id, connection, images, options):
         from lerobot_robot_ufactory.utils.webapp.recording_web_config import (
             validate_text,
         )
-        from lerobot_robot_ufactory.utils.webapp.web_preview import RecordingWebPreview
         raw, cfg = validate_text((folder / "effective.yaml").read_text())
+        if options["dataset_mode"] == "postprocess":
+            from lerobot_robot_ufactory.scripts.uf_lerobot_record import record
+
+            control.state["operation"] = "postprocess"
+            control.transition("postprocessing", stage="Postprocessing saved episodes")
+            cfg.resume = True
+            cfg.display_data = False
+            cfg.play_sounds = False
+            control.prepare_dataset = lambda: prepare_web_postprocess(project, cfg, raw, options)
+            dataset = record(cfg, postprocess_only=True, recording_control=control)
+            control.transition("finished", saved=dataset.num_episodes, has_unsaved=False,
+                               stage="Postprocessing complete")
+            return
+        from lerobot_robot_ufactory.utils.webapp.web_preview import RecordingWebPreview
         camera_types = {name: camera["type"] for name, camera in raw["robot"].get("cameras", {}).items()}
         preview = RecordingWebPreview(cfg.web_preview, camera_types=camera_types)
 
@@ -84,6 +97,18 @@ def prepare_web_dataset(project, cfg, raw, options):
         archive.parent.mkdir(parents=True, exist_ok=True)
         root.replace(archive)
         print(f"Previous dataset archived at {archive}", flush=True)
+
+
+def prepare_web_postprocess(project, cfg, raw, options):
+    """Recheck the selected dataset under the recording lock without rebuilding it."""
+    from lerobot_robot_ufactory.utils.webapp.recording_web_config import dataset_stamp, postprocess_status
+
+    root = (Path(project) / cfg.dataset.root).resolve()
+    if dataset_stamp(root) != options["dataset_stamp"]:
+        raise RuntimeError("Dataset changed before postprocessing; refresh and launch again")
+    status = postprocess_status(project, raw)
+    if not status["ready"]:
+        raise RuntimeError(status["reason"] or "No raw episodes need postprocessing")
 
 
 def _simulate(cfg, control, preview, folder):

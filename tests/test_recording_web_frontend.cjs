@@ -17,6 +17,15 @@ class Element {
   }
   append(...items) { this.children.push(...items); }
   replaceChildren() { this.children = []; }
+  querySelector(selector) {
+    for (const child of this.children) {
+      if (!(child instanceof Element)) continue;
+      if (child.type === 'radio' && (selector === 'input' || selector === 'input:checked' && child.checked)) return child;
+      const found = child.querySelector(selector);
+      if (found) return found;
+    }
+    return null;
+  }
   querySelectorAll() { return []; }
   closest() { return null; }
   focus() {}
@@ -113,3 +122,113 @@ assert.equal(elements.get('save').disabled, true);
 assert.equal(elements.get('discard').disabled, true);
 assert.equal(elements.get('closeGripper').disabled, true);
 console.log('Frontend behavior checks passed: focus isolation, deduplication, release, J7 feedback, source gating, phase gating.');
+
+// Arrow keys send one save/discard command without an episode decision dialog.
+assert.doesNotMatch(html, /episodeDialog|renderEpisodeDecision/);
+snapshot('recording');
+before = control.sent.length;
+key('keydown', 'ArrowRight');
+key('keydown', 'ArrowRight', true);
+assert.equal(control.sent.length, before + 1);
+assert.equal(control.sent.at(-1).action, 'save');
+key('keyup', 'ArrowRight');
+snapshot('recording');
+before = control.sent.length;
+key('keydown', 'ArrowLeft');
+key('keydown', 'ArrowLeft', true);
+assert.equal(control.sent.length, before + 1);
+assert.equal(control.sent.at(-1).action, 'discard');
+key('keyup', 'ArrowLeft');
+snapshot('saving');
+before = control.sent.length;
+key('keydown', 'ArrowRight');
+key('keydown', 'ArrowLeft');
+assert.equal(control.sent.length, before, 'Save/discard keys must be disabled during saving');
+console.log('Single-command arrow save/discard checks passed.');
+
+// Offline processing must stay bound to the selected saved configuration.
+vm.runInContext(`
+  selected={path:'tasks/a.yaml',revision:'rev-a',text:'config-a'};loadedText=selected.text;
+  $('yamlEditor').value=loadedText;$('configPath').value=selected.path;
+  processingStatus={path:selected.path,revision:selected.revision,root:'/datasets/a',
+    ready:true,processed_episodes:1,pending_episodes:2,pending_frames:60};
+  state={phase:'idle'};renderPostprocessing();
+`, context);
+assert.equal(elements.get('postprocess').disabled, false);
+assert.match(elements.get('postprocessStatus').textContent, /待处理 2 条 \/ 60 帧/);
+elements.get('yamlEditor').value = 'unsaved';
+vm.runInContext('updateDirty()', context);
+assert.equal(elements.get('postprocess').disabled, true);
+assert.match(elements.get('postprocessStatus').textContent, /保存配置/);
+elements.get('yamlEditor').value = 'config-a';
+vm.runInContext(`selected={path:'tasks/b.yaml',revision:'rev-b'};$('configPath').value=selected.path;renderPostprocessing()`, context);
+assert.equal(elements.get('postprocess').disabled, true, 'Previous configuration detection must not enable a different dataset');
+snapshot('postprocessing', {postprocess:{stage:'mesh',total_episodes:2,completed_episodes:1,
+  episode_index:1,elapsed_s:12,streams:{photon:{stage:'mesh',completed_frames:3,total_frames:6}}}});
+assert.equal(elements.get('launch').disabled, true);
+assert.equal(elements.get('exit').disabled, true);
+assert.equal(elements.get('postprocessBar').max, 2);
+assert.equal(elements.get('postprocessBar').value, 1);
+assert.match(elements.get('postprocessDetail').textContent, /已转换 1 \/ 2 条.*Mesh3DFlow/);
+assert.match(elements.get('postprocessStreams').children.at(-1).textContent, /photon.*3 \/ 6 帧/);
+console.log('Postprocessing checks passed: saved configuration, dataset isolation, mutual exclusion, stage and frame progress.');
+
+// Rebuild confirmation shows the inspected path and never asks the user to type it.
+(async () => {
+  assert.doesNotMatch(html, /id="confirmRoot"|输入完整数据集路径/);
+  vm.runInContext(`
+    selected={path:'tasks/a.yaml',revision:'rev-a',text:'config-a'};loadedText=selected.text;
+    $('yamlEditor').value=loadedText;$('configPath').value=selected.path;
+  `, context);
+  let dataset = {root:'/datasets/任务 a',exists:true,resumable:true,episodes:2};
+  const starts = [], confirmations = [];
+  let accepted = false;
+  context.confirm = message => { confirmations.push(message); return accepted; };
+  context.fetch = async (url, options) => {
+    if (url === '/api/preflight') return {ok:true,json:async()=>({ticket:'launch-ticket',dataset})};
+    assert.equal(url, '/api/start');
+    starts.push(JSON.parse(options.body));
+    return {ok:true,json:async()=>({state:{phase:'initializing'},controller:true,client_id:'owner',effective:null})};
+  };
+  const run = code => vm.runInContext(code, context);
+  function choose(mode) {
+    for (const label of elements.get('datasetChoices').children) {
+      const radio = label.children[0];
+      radio.checked = radio.value === mode;
+      if (radio.checked) radio.onchange();
+    }
+  }
+  await run('launch()');
+  choose('rebuild');
+  await run('confirmLaunch()');
+  assert.equal(starts.length, 0, 'Cancelling the second confirmation must not start or rebuild');
+  assert.equal(elements.get('launchDialog').open, true, 'Cancellation must keep launch choices available');
+  assert.equal(elements.get('confirmLaunch').disabled, false);
+  assert.ok(confirmations[0].includes(dataset.root), 'Confirmation must show the full inspected path');
+  accepted = true;
+  await run('confirmLaunch()');
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].dataset_mode, 'rebuild');
+  assert.equal(starts[0].confirm_root, dataset.root, 'Send the inspected path automatically after approval');
+  assert.equal(starts[0].ticket, 'launch-ticket');
+  assert.equal(elements.get('launchDialog').open, false);
+  assert.equal(elements.get('confirmLaunch').disabled, false);
+
+  dataset = {...dataset, root:'/datasets/other-task'};
+  await run('launch()');
+  choose('rebuild');
+  await run('confirmLaunch()');
+  assert.ok(confirmations.at(-1).includes(dataset.root), 'A later launch must confirm its own path');
+  assert.equal(starts.at(-1).confirm_root, dataset.root);
+  const count = confirmations.length;
+  await run('launch()');
+  choose('resume');
+  await run('confirmLaunch()');
+  assert.equal(starts.at(-1).dataset_mode, 'resume');
+  dataset = {...dataset, exists:false, resumable:false, episodes:0};
+  await run('launch()');
+  await run('confirmLaunch()');
+  assert.equal(starts.at(-1).dataset_mode, 'new');
+  assert.equal(confirmations.length, count, 'Resume and new launches must not show a rebuild confirmation');
+  console.log('Launch checks passed: rebuild path display, cancellation, automatic path confirmation, resume and new.');
+})().catch(error => { console.error(error); process.exitCode = 1; });

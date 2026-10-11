@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from time import monotonic
 
 import cv2
 import numpy as np
@@ -21,7 +22,8 @@ def deferred_sessions(cameras, runtime_dir):
 
 
 def compute_episode_mesh(
-    dataset, cameras, runtime_dir, episode_index, episode_buffer=None, synchronization=None
+    dataset, cameras, runtime_dir, episode_index, episode_buffer=None, synchronization=None,
+    *, progress=None,
 ):
     buffer = dataset.episode_buffer if episode_buffer is None else episode_buffer
     if int(buffer["episode_index"]) != episode_index:
@@ -29,7 +31,7 @@ def compute_episode_mesh(
     dataset._wait_image_writer()
     native = {}
     if synchronization is not None and synchronization.tactile_recorder is not None:
-        native = synchronization.tactile_recorder.compute_mesh(cameras, runtime_dir)
+        native = synchronization.tactile_recorder.compute_mesh(cameras, runtime_dir, progress=progress)
     results = {}
     range_keys = {name: key for key, name in tactile_range_fields(buffer).items()}
     for name, camera in cameras.items():
@@ -56,6 +58,10 @@ def compute_episode_mesh(
         if len(paths) != int(buffer["size"]):
             raise RuntimeError(f"Offline mesh frame count mismatch: {name}")
         values = {suffix: [] for suffix in camera.deferred_feature_shapes}
+        reported_at = monotonic()
+        if progress is not None:
+            progress({"camera": name, "stage": "mesh", "completed_frames": 0,
+                      "total_frames": len(paths)})
         with deferred_sessions({name: camera}, runtime_dir):
             for frame_index, path in enumerate(paths):
                 if name in native:
@@ -76,6 +82,14 @@ def compute_episode_mesh(
                     raise RuntimeError(f"Unexpected deferred tactile features: {name}")
                 for suffix, value in computed.items():
                     values[suffix].append(np.asarray(value, dtype=np.float32).copy())
+                now = monotonic()
+                if progress is not None and now - reported_at >= 0.2:
+                    progress({"camera": name, "stage": "mesh", "completed_frames": frame_index + 1,
+                              "total_frames": len(paths)})
+                    reported_at = now
         for suffix, feature_values in values.items():
             results[f"observation.{name}.{suffix}"] = feature_values
+        if progress is not None:
+            progress({"camera": name, "stage": "mesh", "completed_frames": len(paths),
+                      "total_frames": len(paths)})
     buffer.update(results)

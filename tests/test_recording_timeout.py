@@ -229,7 +229,7 @@ def session(tmp_path, monkeypatch):
         ]
         state.mesh_episodes.append(episode_index)
 
-    def postprocess(dataset, cameras):
+    def postprocess(dataset, cameras, *, progress=None):
         store = recording.RawEpisodeStore(dataset)
         for path in store.checkpoints(dataset.root):
             buffer, manifest = store.load(path)
@@ -306,6 +306,47 @@ def test_non_timeout_recording_failure_still_exits(session):
     assert session.dataset.image_writer._stopped
     assert session.dataset.finalized
     assert session.retry_prompts == 0
+    assert session.dataset.episode_buffer["size"] == 0
+    assert not session.dataset._get_image_file_dir(0, "observation.images.photon").exists()
+
+
+def test_timeout_is_discarded_before_caller_recovers(session, monkeypatch):
+    session.robot.outcomes = [False, True, False]
+    original_loop = recording.record_loop
+    discarded = []
+
+    def loop(**kwargs):
+        try:
+            return original_loop(**kwargs)
+        except TimeoutError:
+            dataset = session.dataset
+            assert dataset.episode_buffer["episode_index"] == 1
+            assert dataset.episode_buffer["size"] == 0
+            assert not dataset._get_image_file_dir(1, "observation.images.photon").exists()
+            assert not dataset.image_writer._stopped
+            discarded.append(1)
+            raise
+
+    monkeypatch.setattr(recording, "record_loop", loop)
+    dataset = recording.record(session.cfg)
+    assert discarded == [1]
+    assert dataset.num_episodes == 2
+
+
+def test_capture_cleanup_failure_still_clears_buffer_and_preserves_error(session, monkeypatch, caplog):
+    session.robot.outcomes = [True]
+    session.robot.failure = ValueError
+
+    def fail_cleanup(*args):
+        raise OSError("cannot remove temporary images")
+
+    monkeypatch.setattr(recording, "discard_episode_images", fail_cleanup)
+    with pytest.raises(ValueError, match="camera synchronization failed"):
+        recording.record(session.cfg)
+    assert session.dataset.episode_buffer["size"] == 0
+    assert session.dataset.num_episodes == 0
+    assert session.dataset.finalized and not session.robot._is_connected
+    assert "cannot remove temporary images" in caplog.text
 
 
 def test_save_timeout_is_not_recovered_as_recording_timeout(session, monkeypatch):
@@ -337,6 +378,12 @@ def test_device_error_preserves_previously_saved_episode(session, async_save, mo
         session.dataset.root / "tactile_streams/photon/episode_000000/samples.parquet"
     ).is_file()
     assert session.dataset.finalized
+
+    assert session.dataset.episode_buffer["size"] == 0
+    assert not session.dataset._get_image_file_dir(1, "observation.images.photon").exists()
+    assert not (session.dataset.root / "timestamps/episode_000001.parquet").exists()
+    staging = session.dataset.root / "tactile_streams/.staging"
+    assert not staging.exists() or not any(staging.iterdir())
 
 
 def test_keyboard_timeout_requires_release_and_new_start(session, monkeypatch):

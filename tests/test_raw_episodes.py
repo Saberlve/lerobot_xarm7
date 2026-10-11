@@ -101,6 +101,57 @@ def test_checkpoint_survives_exception_and_reopens_without_encoding(dataset):
     reopened.finalize()
 
 
+def test_checkpoint_images_survive_source_directory_cleanup(dataset):
+    import shutil
+
+    store, manifest = checkpoint(dataset)
+    dataset.stop_image_writer()
+    shutil.rmtree(dataset.root / "images")
+    restored, metadata = store.load(manifest)
+    assert metadata["size"] == 3
+    from PIL import Image
+    for index, path in enumerate(restored["observation.images.photon"]):
+        np.testing.assert_array_equal(
+            np.asarray(Image.open(path)), np.full((64, 64, 3), index * 20, dtype=np.uint8)
+        )
+
+
+def test_deferred_web_resume_counts_pending_checkpoints(dataset, monkeypatch):
+    from lerobot_robot_ufactory.utils.webapp.recording_web_config import dataset_status
+    from lerobot_robot_ufactory.scripts import uf_lerobot_record as recording
+
+    checkpoint(dataset)
+    checkpoint(dataset, 1)
+    monkeypatch.setattr(recording, "_missing_dataset_files", lambda root: [])
+    raw = {"dataset": {"root": str(dataset.root)}, "defer_processing": True}
+    status = dataset_status(dataset.root.parent, raw)
+    assert status["resumable"]
+    assert status["episodes"] == 2
+    raw["defer_processing"] = False
+    assert not dataset_status(dataset.root.parent, raw)["resumable"]
+    raw["defer_processing"] = True
+    monkeypatch.setattr(recording, "_missing_dataset_files", lambda root: ["data/file.parquet"])
+    assert not dataset_status(dataset.root.parent, raw)["resumable"]
+
+
+def test_web_postprocess_detection_counts_pending_and_rejects_incompatible_data(dataset):
+    from lerobot_robot_ufactory.utils.webapp.recording_web_config import postprocess_status
+
+    raw = {"dataset": {"root": str(dataset.root), "fps": dataset.fps}}
+    assert not postprocess_status(dataset.root.parent, raw)["ready"]
+    checkpoint(dataset)
+    status = postprocess_status(dataset.root.parent, raw)
+    assert status["ready"] and status["processed_episodes"] == 0
+    assert status["pending_episodes"] == 1 and status["pending_frames"] == 3
+    raw["dataset"]["fps"] += 1
+    status = postprocess_status(dataset.root.parent, raw)
+    assert not status["ready"] and "FPS" in status["reason"]
+    raw["dataset"]["fps"] = dataset.fps
+    checkpoint(dataset, 2)
+    status = postprocess_status(dataset.root.parent, raw)
+    assert not status["ready"] and "contiguous" in status["reason"]
+
+
 @pytest.mark.parametrize("resume", [False, True])
 @pytest.mark.parametrize("processed_first", [False, True])
 def test_immediate_resume_rejects_pending_raw_before_creating_robot(
@@ -174,7 +225,14 @@ def test_raw_resume_guard_allows_safe_modes(dataset, monkeypatch, mode):
 def test_normal_postprocessing_saves_all_episodes_and_removes_pngs(dataset):
     _, first = checkpoint(dataset)
     _, second = checkpoint(dataset, 1)
-    result = postprocess_raw_episodes(dataset, {})
+    progress = []
+    result = postprocess_raw_episodes(dataset, {}, progress=progress.append)
+    assert progress[0]["stage"] == "preparing"
+    assert [p["episode_index"] for p in progress if p["stage"] == "loading"] == [0, 1]
+    assert {p["stage"] for p in progress} >= {"loading", "saving", "publishing", "complete"}
+    assert progress[-1]["total_episodes"] == progress[-1]["completed_episodes"] == 2
+    assert progress[-1]["stage"] == "complete"
+    assert all(p["elapsed_s"] >= 0 for p in progress)
     assert result.num_episodes == 2
     assert result.num_frames == 6
     assert len(list((result.root / "videos").rglob("*.mp4"))) == int(bool(result.meta.video_keys))
@@ -201,8 +259,16 @@ def test_failed_conversion_keeps_original_dataset_and_can_retry(dataset, monkeyp
         raise RuntimeError("encoding failed after writing output")
 
     monkeypatch.setattr(LeRobotDataset, "save_episode", fail_save)
+    progress = []
     with pytest.raises(RuntimeError, match="encoding failed"):
-        postprocess_raw_episodes(completed, {})
+        postprocess_raw_episodes(completed, {}, progress=progress.append)
+    assert progress[-1]["stage"] == "failed"
+    assert "encoding failed" in progress[-1]["error"]
+    assert progress[-1]["completed_episodes"] == 0
+    from lerobot_robot_ufactory.utils.webapp.recording_web_config import postprocess_status
+    status = postprocess_status(completed.root.parent,
+                                {"dataset": {"root": str(completed.root), "fps": completed.fps}})
+    assert status["ready"] and status["pending_episodes"] == 1
     assert (completed.root / "meta/info.json").read_bytes() == old_info
     assert first.exists() and second.exists()
     assert len(list((completed.root / "images").rglob("*.png"))) == 3

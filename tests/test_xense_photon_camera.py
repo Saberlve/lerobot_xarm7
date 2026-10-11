@@ -493,8 +493,11 @@ def test_mesh_displacement_has_distinct_dataset_key(sdk):
 def test_deferred_solver_reused_and_released(sdk, tmp_path, monkeypatch, fail, dtype):
     sensor, _ = sdk
     created = []
+    monkeypatch.setattr(camera_xense_photon, "_prepare_offline_gpu", lambda: None)
 
     class Solver:
+        infer_engine_using_gpu = True
+
         def __init__(self):
             self.calls = self.releases = 0
             self.buffer = np.zeros((35, 20, 3), dtype)
@@ -533,3 +536,25 @@ def test_deferred_solver_reused_and_released(sdk, tmp_path, monkeypatch, fail, d
     with camera.deferred_session(tmp_path / "next"):
         camera.compute_deferred_features(np.zeros((12, 8, 3), np.uint8), tmp_path / "next")
     assert len(created) == 2 and created[1].releases == 1
+
+
+def test_deferred_solver_rejects_cpu_fallback_and_releases(sdk, tmp_path, monkeypatch):
+    sensor, _ = sdk
+    released = []
+    solver = SimpleNamespace(infer_engine_using_gpu=False, release=lambda: released.append(True))
+    monkeypatch.setattr(camera_xense_photon, "_prepare_offline_gpu", lambda: None)
+    monkeypatch.setattr(sensor, "createSolver", lambda *args, **kwargs: solver, raising=False)
+    camera = XensePhotonCamera(config())
+    with pytest.raises(RuntimeError, match="did not select GPU"):
+        with camera.deferred_session(tmp_path):
+            pytest.fail("CPU fallback must not begin offline inference")
+    assert released == [True]
+    assert camera._solver is camera._solver_runtime is None
+
+
+def test_offline_gpu_rejects_cpu_only_onnxruntime(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(
+        get_available_providers=lambda: ["CPUExecutionProvider"]))
+    with pytest.raises(RuntimeError, match="CUDAExecutionProvider is unavailable"):
+        camera_xense_photon._prepare_offline_gpu()

@@ -57,6 +57,8 @@ uf-test-gripper-force-feedback = "lerobot_robot_ufactory.scripts.uf_test_gripper
 [project.optional-dependencies]
 # Xense Photon tactile images (inference disabled by default).
 xense = ["xensesdk>=2.0.0,<3"]
+# Offline Mesh3DFlow on NVIDIA GPUs; CUDA/cuDNN libraries come from PyTorch.
+xense-gpu = ["xensesdk>=2.0.0,<3", "onnxruntime-gpu==1.23.2"]
 # GELLO 遥操作
 gello = [
     "gello @ git+https://github.com/xArm-Developer/gello_software.git",

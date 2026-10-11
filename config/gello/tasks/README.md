@@ -47,3 +47,5 @@ teleop:
 弹簧小车只提供了任务名称，目前使用通用描述 `Manipulate the spring-loaded cart.`，具体运动方向和终止条件需补充。USB 插入配置以完全插入并短暂保持为结束条件。
 
 所有任务沿用 base 的 `min_tcp_z_mm: 2`，实际接触高度需按各任务布置确认。鸡蛋配置同时适用于生鸡蛋和熟鸡蛋；如需分别统计，可复制配置并为两组设置不同的数据集路径和 repo_id。
+
+旋下螺母配置启用 `defer_processing: true`：每条只提交完整原始图像、动作和时间索引，随后可开始下一条；退出整场录制后统一计算 Mesh3DFlow 和编码视频，录制期间不后台推理。后处理失败时原始 checkpoint 保留，可使用原配置加 `--postprocess-only` 重试。

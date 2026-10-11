@@ -30,14 +30,10 @@ def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> dict[s
         raise ValueError("Each Xense Photon camera must have a distinct serial_number")
     lerobot_camera_configs = {
         key: cfg for key, cfg in camera_configs.items()
-        if not cfg.type.startswith("uf::") and cfg.type != "intelrealsense"
+        if not cfg.type.startswith("uf::")
     }
     uf_camera_configs = {key: cfg for key, cfg in camera_configs.items() if cfg.type.startswith("uf::")}
     cameras = lerobot_make_cameras_from_configs(lerobot_camera_configs)
-    for key, cfg in camera_configs.items():
-        if cfg.type == "intelrealsense":
-            from .realsense import ExposureRealSenseCamera
-            cameras[key] = ExposureRealSenseCamera(cfg)
     
     for key, cfg in uf_camera_configs.items():
         if cfg.type == "uf::umi_camera":

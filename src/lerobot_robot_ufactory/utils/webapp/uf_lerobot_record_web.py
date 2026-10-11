@@ -18,6 +18,7 @@ import yaml
 
 from lerobot_robot_ufactory.utils.webapp.recording_web_config import (
     ConfigStore, ConfigError, Conflict, validate_text, dataset_status, dataset_stamp,
+    postprocess_status, StrictLoader,
 )
 
 
@@ -66,16 +67,25 @@ class SessionManager:
             raise Conflict("Configuration changed; reload before launch")
         raw, _ = await asyncio.to_thread(validate_text, item["text"])
         status = await asyncio.to_thread(dataset_status, self.project, raw)
+        processing = await asyncio.to_thread(postprocess_status, self.project, raw)
         stamp = None if self.simulate else await asyncio.to_thread(dataset_stamp, status["root"])
         if self.simulate:
             status = {"root": "SIMULATION: session-local files only", "exists": False,
                       "episodes": 0, "resumable": False, "reason": None}
+            processing = {**processing, "ready": False,
+                          "reason": "Postprocessing is unavailable in simulation mode"}
         ticket = secrets.token_urlsafe(24)
         self.confirmations = {k: v for k, v in self.confirmations.items() if v["expires"] > time.monotonic()}
         self.confirmations[ticket] = {"path": item["path"], "revision": item["revision"],
-                                     "status": status, "stamp": stamp,
+                                     "status": status, "processing": processing, "stamp": stamp,
                                      "expires": time.monotonic() + 300}
-        return {"ticket": ticket, "dataset": status, "config": raw}
+        return {"ticket": ticket, "dataset": status, "config": raw,
+                "postprocess": processing}
+
+    async def launch_postprocess(self, payload, client_id):
+        inspection = await self.inspect(payload)
+        return await self.launch({"ticket": inspection["ticket"],
+                                  "dataset_mode": "postprocess"}, client_id)
 
     async def launch(self, payload, client_id):
         async with self.lock:
@@ -92,7 +102,11 @@ class SessionManager:
             raw, _ = await asyncio.to_thread(validate_text, item["text"])
             mode = payload.get("dataset_mode", "new")
             status = ticket["status"]
-            if status["exists"]:
+            if mode == "postprocess":
+                processing = ticket["processing"]
+                if not processing["ready"]:
+                    raise ConfigError(processing["reason"] or "No raw episodes need postprocessing")
+            elif status["exists"]:
                 if mode == "resume" and not status["resumable"]:
                     raise ConfigError(status["reason"])
                 if mode not in ("resume", "rebuild"):
@@ -145,6 +159,7 @@ class SessionManager:
             self.logs.clear()
             self.log_offset = 0
             self.state = {"phase": "initializing", "session_id": sid, "version": 0,
+                          "operation": "postprocess" if mode == "postprocess" else "recording",
                           "saved": status["episodes"] if mode == "resume" else 0,
                           "frames": 0, "elapsed": 0, "stage": "Starting worker", "has_unsaved": False,
                           "gripper_mode": gripper_mode, "j7_enabled": j7, "joint_mode": "all"}
@@ -266,6 +281,16 @@ async def api(request):
             return web.json_response({"items": manager.store.trash()})
         if request.path == "/api/status":
             return web.json_response(manager.snapshot())
+        if request.path == "/api/postprocess-status":
+            item = await asyncio.to_thread(manager.store.read, request.query["path"])
+            try:
+                raw = yaml.load(item["text"], Loader=StrictLoader)
+            except yaml.YAMLError as exc:
+                raise ConfigError(str(exc)) from exc
+            status = await asyncio.to_thread(postprocess_status, manager.project, raw)
+            if manager.simulate:
+                status.update(ready=False, reason="Postprocessing is unavailable in simulation mode")
+            return web.json_response({"path": item["path"], "revision": item["revision"], **status})
         if request.path == "/api/log":
             if manager.folder is None or not (manager.folder / "console.log").exists():
                 return web.Response(text="")
@@ -286,6 +311,8 @@ async def api(request):
         result = await manager.inspect(data)
     elif request.path == "/api/start":
         result = await manager.launch(data, data["client_id"])
+    elif request.path == "/api/postprocess":
+        result = await manager.launch_postprocess(data, data["client_id"])
     else:
         raise web.HTTPNotFound()
     return web.json_response(result)
@@ -370,9 +397,9 @@ def create_app(project, simulate=False):
     app.router.add_get("/", index)
     app.router.add_get("/ws/control", control_socket)
     app.router.add_get("/ws/preview", preview_socket)
-    for path in ("configs", "config", "status", "log", "trash"):
+    for path in ("configs", "config", "status", "log", "trash", "postprocess-status"):
         app.router.add_get(f"/api/{path}", api)
-    for path in ("config", "validate", "preflight", "start", "restore"):
+    for path in ("config", "validate", "preflight", "start", "restore", "postprocess"):
         app.router.add_post(f"/api/{path}", api)
     app.router.add_delete("/api/config", api)
 

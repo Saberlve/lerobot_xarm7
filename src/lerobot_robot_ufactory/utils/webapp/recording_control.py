@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+import logging
 import queue
 import threading
 import time
@@ -80,6 +81,7 @@ class RecordingControl:
 
     def progress(self, **values):
         with self.lock:
+            stage_changed = "stage" in values and values["stage"] != self.state.get("stage")
             self.state.update(values)
             if self.teleop is not None:
                 mode = "j7" if getattr(self.teleop, "_joint7_only_active", False) else "all"
@@ -87,7 +89,7 @@ class RecordingControl:
                     self.state["joint_mode"] = mode
                     self.state["version"] += 1
             now = self.clock()
-            if now - self._last_progress < 0.2:
+            if not stage_changed and now - self._last_progress < 0.2:
                 return
             self._last_progress = now
             snapshot = dict(self.state)
@@ -98,6 +100,15 @@ class RecordingControl:
         cfg = getattr(teleop, "config", None)
         self.state.update(gripper_mode=getattr(cfg, "gripper_control_mode", "keyboard"),
                           j7_enabled=getattr(cfg, "joint7_only_mode_enabled", False))
+
+    def postprocess_progress(self, progress):
+        values = {"stage": "Postprocessing: " + progress["stage"],
+                  "postprocess": progress, "has_unsaved": False,
+                  "episode": progress.get("episode_index")}
+        if self.state["phase"] != "postprocessing" or progress["stage"] == "complete":
+            self.transition("postprocessing", **values)
+        else:
+            self.progress(**values)
 
     def release_keys(self):
         with self.lock:
@@ -190,7 +201,7 @@ class RecordingControl:
                         self.transition("saving" if action == "save" else "resetting")
                         self.actions.put_nowait(action)
                 elif action == "exit":
-                    if phase in ("saving", "resetting", "stopping", "finished", "error"):
+                    if phase in ("saving", "postprocessing", "resetting", "stopping", "finished", "error"):
                         raise ValueError("Wait for the current operation to finish")
                     self.release_keys()
                     self.events["stop_recording"] = True
@@ -246,19 +257,49 @@ def controlled_recording(
     control.bind(teleop)
     control.preview = preview
     preview_at = 0.0
+    preview_warning_at = float("-inf")
     reset_after_discard = False
     synchronization = None
+    raw_store = None
+    if getattr(cfg, "defer_processing", False):
+        raw_store = recording.RawEpisodeStore(
+            dataset, runtime_dir=runtime_dir,
+            offline_mesh_fields=getattr(dataset, "_offline_mesh_fields", {}),
+        )
+        index = raw_store.next_episode_index()
+        buffer = recording._get_episode_buffer(dataset)
+        recording._set_episode_buffer(dataset, recording._create_empty_episode_buffer(dataset, index, buffer))
+    saved_count = recording._current_episode_index(dataset)
 
     def idle_preview():
-        nonlocal preview_at
-        if preview is not None and time.monotonic() >= preview_at:
-            preview_at = time.monotonic() + 0.2
-            preview.publish(robot_observation_processor(robot.get_observation()))
+        nonlocal preview_at, preview_warning_at
+        now = time.monotonic()
+        if preview is not None and now >= preview_at:
+            preview_at = now + 0.2
+            try:
+                observation = robot.get_observation()
+            except (TimeoutError, RuntimeError) as exc:
+                # A missed preview sample must not end an idle/paused session.
+                # Capture keeps its strict synchronization checks in record_loop.
+                if now >= preview_warning_at:
+                    logging.getLogger(__name__).warning(
+                        "Skipping idle preview frame; retrying: %s", exc
+                    )
+                    preview_warning_at = now + 5.0
+                return
+            preview.publish(robot_observation_processor(observation))
 
     def save_current(sync):
         index = recording._current_episode_index(dataset)
         control.transition("saving", stage="Validating images", has_unsaved=True)
         recording.validate_episode_images(dataset, recording._get_episode_buffer(dataset))
+        if raw_store is not None:
+            control.progress(stage="Checkpointing raw episode")
+            buffer = recording._get_episode_buffer(dataset)
+            raw_store.save(buffer, sync)
+            recording._set_episode_buffer(dataset, recording._create_next_episode_buffer(dataset, buffer))
+            print(f"[RawSaved] Episode {index}; processing after recording", flush=True)
+            return
         if cfg.offline_mesh3dflow and tactile_cameras:
             from lerobot_robot_ufactory.datasets.deferred_mesh import compute_episode_mesh
             control.progress(stage="Computing Mesh3DFlow")
@@ -278,16 +319,18 @@ def controlled_recording(
             finish_native(index)
         print(f"[Finish] Save episode {index}", flush=True)
 
-    with recording.VideoEncodingManager(dataset), recording._RecordingCleanup(
+    dataset_cleanup = (recording._RawDatasetFinalize(dataset) if raw_store is not None
+                       else recording.VideoEncodingManager(dataset))
+    with dataset_cleanup, recording._RecordingCleanup(
         robot, teleop, None, None, preview
     ), recording._EpisodeSynchronizationOwner() as owner:
         teleop.set_teleop_enabled(False)
-        if dataset.num_episodes >= cfg.dataset.num_episodes:
+        if saved_count >= cfg.dataset.num_episodes and raw_store is None:
             return dataset
-        control.transition("ready", saved=dataset.num_episodes, episode=dataset.num_episodes,
+        control.transition("ready", saved=saved_count, episode=saved_count,
                            stage="Check previews, then press Space / Start")
         try:
-            while not control.events["stop_recording"] and dataset.num_episodes < cfg.dataset.num_episodes:
+            while not control.events["stop_recording"] and saved_count < cfg.dataset.num_episodes:
                 action = control.wait_action(idle_preview)
                 if action != "start":
                     break
@@ -305,13 +348,18 @@ def controlled_recording(
                     teleop.set_teleop_enabled(False)
                     control.transition("ready", stage="Preparation paused; reconnect to start")
                     continue
+                except RuntimeError as exc:
+                    teleop.set_teleop_enabled(False)
+                    control.transition("ready", error=str(exc), has_unsaved=False,
+                                       stage="Robot preparation failed; check controller before retry")
+                    continue
                 reset_after_discard = False
                 if control.events["pause_recording"]:
                     teleop.set_teleop_enabled(False)
                     robot.pause_motion()
                     control.transition("ready", stage="Disconnected during preparation; reconnect to start")
                     continue
-                control.transition("recording", frames=0, elapsed=0.0, joint_mode="all",
+                control.transition("recording", frames=0, elapsed=0.0, joint_mode="all", error=None,
                                    has_unsaved=False, stage="Recording")
                 try:
                     synchronization = recording.record_loop(
@@ -329,6 +377,21 @@ def controlled_recording(
                 except TimeoutError as exc:
                     print(f"Capture timeout; discarding episode: {exc}", flush=True)
                     control.events["rerecord_episode"] = True
+                except RuntimeError as exc:
+                    if not recording._recoverable_recording_control_error(exc):
+                        raise
+                    print(f"Capture control failed; previous checkpoints retained: {exc}", flush=True)
+                    teleop.set_teleop_enabled(False)
+                    control.release_keys()
+                    control.realtime_controller = None
+                    owner.discard_all()
+                    synchronization = None
+                    recording._discard_current_episode(dataset)
+                    control.events.update(exit_early=False, rerecord_episode=False, pause_recording=False)
+                    control.transition("ready", error=str(exc), has_unsaved=False,
+                                       saved=saved_count, episode=saved_count, joint_mode="all",
+                                       stage="Control failed; current take discarded; check robot before retry")
+                    continue
                 owner.track(synchronization)
                 teleop.set_teleop_enabled(False)
                 control.release_keys()
@@ -364,6 +427,7 @@ def controlled_recording(
                 else:
                     if recording._episode_buffer_size(recording._get_episode_buffer(dataset)) > 0:
                         save_current(synchronization)
+                        saved_count += 1
                         owner.release(synchronization)
                         synchronization = None
                     else:
@@ -371,12 +435,18 @@ def controlled_recording(
                         synchronization = None
                         recording._discard_current_episode(dataset)
                 control.events.update(exit_early=False, rerecord_episode=False, pause_recording=False)
-                if dataset.num_episodes >= cfg.dataset.num_episodes:
-                    control.progress(saved=dataset.num_episodes, has_unsaved=False)
+                if saved_count >= cfg.dataset.num_episodes:
+                    control.progress(saved=saved_count, has_unsaved=False)
                     break
-                control.transition("ready", saved=dataset.num_episodes, episode=dataset.num_episodes,
+                control.transition("ready", saved=saved_count, episode=saved_count,
                                    has_unsaved=False, frames=0, elapsed=0.0, joint_mode="all",
                                    stage="Ready for next episode")
         finally:
             control.release_keys()
+    if raw_store is not None:
+        control.transition("postprocessing", stage="Postprocessing saved episodes", has_unsaved=False)
+        dataset = recording.postprocess_raw_episodes(
+            dataset, tactile_cameras, progress=control.postprocess_progress
+        )
+        control.progress(saved=dataset.num_episodes)
     return dataset

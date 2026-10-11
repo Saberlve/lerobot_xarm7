@@ -466,9 +466,8 @@ class UFRobot(Robot, Thread):
         """Timestamp every non-Photon RGB stream in a dedicated reader.
 
         Once started, these buffers are the only callers of ``async_read`` for
-        regular RGB backends.  This preserves their new-frame semantics and
-        RealSense reads exposure metadata directly from its SDK pipeline;
-        other backends use their fresh ``async_read`` host receipt time.
+        regular RGB backends. This preserves their new-frame semantics and
+        timestamps each fresh frame when ``async_read`` returns it to the host.
         """
         self._stop_rgb_sync_buffers()
         try:
@@ -478,7 +477,6 @@ class UFRobot(Robot, Thread):
                 buffer = TimestampedCameraBuffer(
                     camera,
                     history_size=self.config.sync_history_size,
-                    require_exposure_timestamp=self.config.realsense_require_exposure_timestamp,
                 )
                 buffer.start()
                 self._rgb_sync_buffers[camera_key] = buffer
@@ -1763,10 +1761,18 @@ class UFRobot(Robot, Thread):
         if code is not None and code != 0:
             raise RuntimeError(f"{command} failed, code={code}, {self._motion_status()}")
 
+    def check_recording_health(self) -> None:
+        """Reject capture or actions while the controller is stopped or faulted."""
+        if not self._is_connected or self.real_arm is None:
+            raise ConnectionError("xArm is disconnected")
+        if self.real_arm.error_code != 0 or getattr(self.real_arm, "state", 0) in (4, 5):
+            raise RuntimeError(f"xArm controller stopped or faulted, {self._motion_status()}")
+
     def send_action(self, action: dict) -> np.ndarray:
         if not self._is_connected:
             raise ConnectionError()
         self._log_controller_error_if_changed("send_action")
+        self.check_recording_health()
         if self.config.manual_mode:
             gripper_key = f"{self.prefix}gripper.pos"
             if (
@@ -1776,8 +1782,6 @@ class UFRobot(Robot, Thread):
                 and not self.config.no_action
             ):
                 self._send_gripper_action(action[gripper_key])
-            return action
-        if self.real_arm.error_code != 0:
             return action
         if self.config.no_action:
             return action

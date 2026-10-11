@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 replay_IDM_output.py — 用 xArm 笛卡尔在线轨迹规划（set_mode(7) + set_position_aa）
-以 30Hz 回放本目录下的 TCP 动作 chunk。
+以指定频率回放 TCP 动作 chunk（默认 25Hz）。
 
 数据格式: (N, 7) = [x_mm, y_mm, z_mm, rx_rad, ry_rad, rz_rad, gripper_mm]
   - x/y/z   : 基坐标系 TCP 位置, mm
@@ -11,10 +11,14 @@ replay_IDM_output.py — 用 xArm 笛卡尔在线轨迹规划（set_mode(7) + se
               (数据里 roll 贴着 ±pi, 通用轴角提取公式在 pi 附近奇异, 已特判)
   - gripper : xArm Gripper G2 开口, mm (0-84)
 
+--format tcp-rot6d-m 支持 (N, 10):
+  [x_m, y_m, z_m, r11, r21, r31, r12, r22, r32, gripper_norm]
+  位置为基坐标系绝对目标；夹爪 0=全开、1=全闭，超出 [0,1] 的值裁剪。
+
 用法:
-  python replay_tcp_chunk.py sgrasp_ep00000_w0000            # 回放指定 chunk
-  python replay_tcp_chunk.py sgrasp_ep00000_w0000 --dry-run  # 只打印校验, 不动机械臂
-  python replay_tcp_chunk.py --list                          # 列出目录里所有 chunk
+  python scripts/idm/replay_IDM_output.py sgrasp_ep00000_w0000
+  python scripts/idm/replay_IDM_output.py /home/wsx/下载/ema05.npy --format tcp-rot6d-m --fps 15 --dry-run
+  python scripts/idm/replay_IDM_output.py --list
 
 运行环境 (xarm SDK + numpy):
   /usr/share/EmbodiedAI/VLArmory/examples/realRobots/xArm7/lerobot_xarm7/.venv/bin/python
@@ -30,8 +34,15 @@ from pathlib import Path
 import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# 数据目录候选: 脚本所在目录及常见的兄弟目录, 也可用 --dir 显式指定
-DATA_DIR_CANDIDATES = [SCRIPT_DIR, SCRIPT_DIR.parent / "action1", SCRIPT_DIR.parent / "真机可跑action"]
+SCRIPTS_DIR = SCRIPT_DIR.parent
+PROJECT_ROOT = SCRIPTS_DIR.parent
+# 优先查找 IDM 目录，同时保留移动前的数据目录；也可用 --dir 显式指定。
+DATA_DIR_CANDIDATES = [
+    SCRIPT_DIR,
+    SCRIPTS_DIR,
+    PROJECT_ROOT / "action1",
+    PROJECT_ROOT / "真机可跑action",
+]
 
 FPS = 25.0                    # 下发频率 Hz
 PERIOD = 1.0 / FPS
@@ -64,7 +75,7 @@ def list_chunks(data_dir: Path) -> list[str]:
     return names
 
 
-def load_chunk(name: str, data_dir: Path) -> np.ndarray:
+def load_chunk(name: str, data_dir: Path, data_format: str = "tcp-rpy-mm") -> np.ndarray:
     """按名字加载 chunk, 接受完整文件名或裸 sample_id。"""
     base = name
     for suffix in ("_tcp_action.npy", "_tcp_action.csv", ".npy", ".csv"):
@@ -74,10 +85,13 @@ def load_chunk(name: str, data_dir: Path) -> np.ndarray:
     if base.endswith("_tcp_action"):
         base = base[: -len("_tcp_action")]
 
-    npy = data_dir / f"{base}_tcp_action.npy"
-    csv_path = data_dir / f"{base}_tcp_action.csv"
+    explicit = Path(name).expanduser()
+    if not explicit.is_file():
+        explicit = data_dir / explicit
+    npy = explicit if explicit.is_file() and explicit.suffix == ".npy" else data_dir / f"{base}_tcp_action.npy"
+    csv_path = explicit if explicit.is_file() and explicit.suffix == ".csv" else data_dir / f"{base}_tcp_action.csv"
     if npy.exists():
-        data = np.load(npy)
+        data = np.load(npy, allow_pickle=False)
     elif csv_path.exists():
         with open(csv_path, newline="") as f:
             rows = list(csv.reader(f))
@@ -85,11 +99,41 @@ def load_chunk(name: str, data_dir: Path) -> np.ndarray:
     else:
         raise FileNotFoundError(f"找不到 chunk: {name} (尝试过 {npy.name} / {csv_path.name})")
 
-    if data.ndim != 2 or data.shape[1] != 7:
-        raise ValueError(f"数据维度应为 (N, 7), 实际 {data.shape}")
+    columns = 10 if data_format == "tcp-rot6d-m" else 7
+    if data.ndim != 2 or data.shape[1] != columns or len(data) == 0:
+        raise ValueError(f"数据应为非空 (N, {columns}), 实际 {data.shape}")
     if not np.all(np.isfinite(data)):
         raise ValueError("数据含 NaN/Inf")
     return data
+
+
+def convert_rot6d_chunk(data: np.ndarray) -> np.ndarray:
+    """Metres + column-based 6D rotation + closure -> mm + axis-angle + G2 opening."""
+    converted = np.empty((len(data), 7), dtype=np.float64)
+    converted[:, :3] = data[:, :3] * 1000.0
+    converted[:, 6] = GRIPPER_MAX_MM * (1.0 - np.clip(data[:, 9], 0.0, 1.0))
+    previous = None
+    for i, row in enumerate(data):
+        a1, a2 = np.asarray(row[3:9], dtype=np.float64).reshape(2, 3)
+        norm1 = np.linalg.norm(a1)
+        if norm1 < 1e-8:
+            raise ValueError(f"step {i}: 6D 旋转第一列为零")
+        b1 = a1 / norm1
+        b2 = a2 - np.dot(b1, a2) * b1
+        norm2 = np.linalg.norm(b2)
+        if norm2 < 1e-8:
+            raise ValueError(f"step {i}: 6D 旋转两列共线")
+        b2 /= norm2
+        rotation = np.column_stack((b1, b2, np.cross(b1, b2)))
+        aa = matrix_to_axis_angle(rotation)
+        angle = np.linalg.norm(aa)
+        if previous is not None and angle > 1e-9:
+            alternative = -aa / angle * (2.0 * math.pi - angle)
+            if np.linalg.norm(alternative - previous) < np.linalg.norm(aa - previous):
+                aa = alternative
+        converted[i, 3:6] = aa
+        previous = aa
+    return converted
 
 
 # ------------------------------------------------------- RPY -> 轴角转换
@@ -151,7 +195,7 @@ def sanity_check(data: np.ndarray) -> list[str]:
     steps = np.linalg.norm(np.diff(data[:, :3], axis=0), axis=1)
     jump = float(steps.max()) if steps.size else 0.0
     if jump > MAX_STEP_JUMP_MM:
-        warns.append(f"相邻点最大步进 {jump:.1f} mm (> {MAX_STEP_JUMP_MM} mm), 30Hz 下可能超速")
+        warns.append(f"相邻点最大步进 {jump:.1f} mm (> {MAX_STEP_JUMP_MM} mm)")
     g = data[:, 6]
     if g.min() < GRIPPER_MIN_MM - 1e-6 or g.max() > GRIPPER_MAX_MM + 1e-6:
         warns.append(f"夹爪范围 [{g.min():.1f}, {g.max():.1f}] mm 超出 G2 量程 [0, 84]")
@@ -161,14 +205,17 @@ def sanity_check(data: np.ndarray) -> list[str]:
 # ---------------------------------------------------------------- 主流程
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="30Hz 回放 TCP 动作 chunk (xArm mode 7 在线轨迹规划)")
-    parser.add_argument("chunk", nargs="?", help="chunk 名, 如 sgrasp_ep00000_w0000")
+    parser = argparse.ArgumentParser(description="回放 TCP 动作 chunk (xArm mode 7 在线轨迹规划)")
+    parser.add_argument("chunk", nargs="?", help="chunk 名或 .npy/.csv 文件路径")
+    parser.add_argument("--format", choices=("tcp-rpy-mm", "tcp-rot6d-m"), default="tcp-rpy-mm", help="7维 mm/RPY/夹爪mm，或10维 m/6D旋转/夹爪闭合比例")
     parser.add_argument("--list", action="store_true", help="列出所有可用 chunk")
     parser.add_argument("--ip", default="192.168.1.245", help="xArm 控制器 IP")
-    parser.add_argument("--dir", default=None, help="数据目录 (默认自动探测脚本目录 / action1)")
-    parser.add_argument("--fps", type=float, default=FPS, help="下发频率 (默认 30Hz)")
+    parser.add_argument("--dir", default=None, help="数据目录 (默认自动探测 scripts/idm、scripts 和项目根目录下的 action1 / 真机可跑action)")
+    parser.add_argument("--fps", type=float, default=FPS, help=f"下发频率 (默认 {FPS:g}Hz)")
     parser.add_argument("--dry-run", action="store_true", help="只加载校验和打印, 不连接机械臂")
     args = parser.parse_args()
+    if not math.isfinite(args.fps) or args.fps <= 0:
+        parser.error("--fps 必须为正有限数")
 
     data_dir = resolve_data_dir(args.dir)
     if args.list:
@@ -179,7 +226,11 @@ def main() -> int:
     if not args.chunk:
         parser.error("请指定 chunk 名, 或用 --list 查看")
 
-    data = load_chunk(args.chunk, data_dir)
+    data = load_chunk(args.chunk, data_dir, args.format)
+    if args.format == "tcp-rot6d-m":
+        clipped = int(np.count_nonzero((data[:, 9] < 0) | (data[:, 9] > 1)))
+        print(f"[format] m/6D旋转/夹爪闭合比例 -> mm/轴角/G2开口; {clipped} 帧夹爪值裁剪到 [0,1]")
+        data = convert_rot6d_chunk(data)
     n = len(data)
     period = 1.0 / args.fps
     print(f"[load] {args.chunk}: {n} 步, {n / args.fps:.2f} s @ {args.fps:g} Hz")
@@ -194,7 +245,8 @@ def main() -> int:
         return 2
 
     # 预转换全部轴角位姿
-    aa_targets = [pose_rpy_to_aa(row[:6]) for row in data]
+    aa_targets = (data[:, :6].tolist() if args.format == "tcp-rot6d-m"
+                  else [pose_rpy_to_aa(row[:6]) for row in data])
 
     if args.dry_run:
         print("[dry-run] 前 3 步轴角位姿:")
@@ -265,7 +317,7 @@ def main() -> int:
                 last_gripper = g
                 last_gripper_t = now
 
-            # 精确到 30Hz 节拍
+            # 按指定频率下发
             next_t = t0 + (i + 1) * period
             remain = next_t - time.perf_counter()
             if remain > 0:

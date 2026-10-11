@@ -445,11 +445,18 @@ def test_original_pixels_reach_sdk_before_encoding_and_all_png_cleanup(
 
     encode = camera_streams.encode_camera_interval
     failed_once = False
+    from threading import Barrier
+
+    encoders_started = Barrier(2)
 
     def checked_encode(staged, rows, fps, codec, relative, **kwargs):
         nonlocal failed_once
-        assert sdk_calls == [(name, i) for name in names for i in range(2)]
-        assert len(list(recorder.staging_root.rglob("*.png"))) == 4
+        # Both encoders must start before either finishes, including retries.
+        encoders_started.wait(timeout=5)
+        assert {name: [i for stream, i in sdk_calls if stream == name] for name in names} == {
+            name: list(range(2)) for name in names
+        }
+        assert len(list(recorder.staging_root.glob("*/frames/*.png"))) == 4
         expected = np.stack([flow_for_image(s.frame_bgr, np.float64) for s in samples[staged.name]])
         mesh = np.load(staged / "mesh3dflow.npy", allow_pickle=False)
         assert mesh.dtype == np.float64 and mesh.tobytes() == expected.tobytes()
@@ -468,7 +475,7 @@ def test_original_pixels_reach_sdk_before_encoding_and_all_png_cleanup(
         if fail_second_encoder:
             with pytest.raises(RuntimeError, match="second camera encoding failed"):
                 recorder.prepare(0)
-            assert len(list(recorder.staging_root.rglob("*.png"))) == 4
+            assert len(list(recorder.staging_root.glob("*/frames/*.png"))) == 4
         recorder.prepare(0)
         assert not list(recorder.staging_root.rglob("*.png"))
         recorder.finalize(0)
@@ -560,3 +567,60 @@ def test_prestart_representative_survives_native_save_and_read(
     finally:
         sync.discard()
         dataset.finalize()
+
+
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_deferred_native_checkpoint_preserves_frames_until_session_postprocess(tmp_path, fail_first):
+    from lerobot_robot_ufactory.datasets.raw_episodes import RawEpisodeStore, postprocess_raw_episodes
+
+    dataset = create_dataset(tmp_path)
+    runtime = dataset.root / "runtime/test"
+    runtime.mkdir(parents=True)
+    samples = [make_sample(10 + i / 60, i) for i in range(1, 5)]
+    sync = EpisodeSynchronization(
+        None, 15, dataset_root=dataset.root, episode_index=0,
+        tactile_stream_names=("photon",), stream_fps={"photon": 60},
+        video_streams={"photon": "h264"}, required_mesh_streams=("photon",),
+    )
+    sync.add_frame(0, 10.08, None, action_send_start_s=10.08,
+                   tactile_window_start_s=10.0, tactile_samples={"photon": tuple(samples)},
+                   camera_timing={"photon": {"capture_monotonic_s": samples[-1].capture_monotonic_s,
+                                              "capture_monotonic_ns": samples[-1].capture_monotonic_ns}})
+    image = samples[-1].frame_bgr[:, :, ::-1].copy()
+    dataset.add_frame({"action": np.array([0], np.float32),
+                       "observation.state": np.array([0], np.float32),
+                       "observation.images.photon": image, "observation.images.rgb": image,
+                       "task": "test", **frame_tactile_ranges(dataset.features, sync)})
+    store = RawEpisodeStore(dataset, runtime_dir=runtime)
+    store.save(dataset.episode_buffer, sync)
+    assert dataset.num_episodes == 0
+    assert len(list(dataset.root.glob("tactile_streams/photon/episode_000000/frames/*.png"))) == 4
+    assert not list(dataset.root.rglob("*.mp4"))
+    assert not list(dataset.root.rglob("mesh3dflow.npy"))
+    if fail_first:
+        class FailedCamera(Camera):
+            def compute_deferred_features(self, image, runtime_dir):
+                raise RuntimeError("injected offline failure")
+        with pytest.raises(RuntimeError, match="injected offline failure"):
+            postprocess_raw_episodes(dataset, {"photon": FailedCamera()})
+        assert len(list(dataset.root.glob("tactile_streams/photon/episode_000000/frames/*.png"))) == 4
+        assert not list(dataset.root.rglob("mesh3dflow.npy"))
+        assert len(RawEpisodeStore.checkpoints(dataset.root)) == 1
+    progress = []
+    result = postprocess_raw_episodes(dataset, {"photon": Camera()}, progress=progress.append)
+    mesh_updates = [p["streams"]["photon"] for p in progress
+                    if p["streams"].get("photon", {}).get("stage") == "mesh"]
+    assert mesh_updates[0]["completed_frames"] == 0
+    assert mesh_updates[-1]["completed_frames"] == mesh_updates[-1]["total_frames"] == 4
+    encoding_updates = [p["streams"]["photon"] for p in progress
+                        if p["streams"].get("photon", {}).get("stage") == "encoding"]
+    assert encoding_updates[-1]["completed_frames"] == 4
+    assert progress[-1]["stage"] == "complete"
+    assert result.num_episodes == 1
+    mesh = np.load(result.root / "tactile_streams/photon/episode_000000/mesh3dflow.npy")
+    expected = np.stack([flow_for_image(sample.frame_bgr) for sample in samples])
+    assert mesh.tobytes() == expected.tobytes()
+    assert not list(result.root.glob("tactile_streams/photon/episode_000000/frames/*.png"))
+    rows = pq.read_table(result.root / "tactile_streams/photon/episode_000000/samples.parquet").to_pylist()
+    assert len(rows) == 4
+    assert all((result.root / row["video_path"]).is_file() for row in rows)

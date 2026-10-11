@@ -217,6 +217,20 @@ episode 保存完成后再开始下一条；使用 `-a` 时，每条 episode 在
 uv run record --config_path config/gello/xarm7_gello_base.yaml --postprocess-only
 ```
 
+Photon 的离线 Mesh3DFlow 使用 NVIDIA GPU，两个传感器各自按帧顺序并行计算。
+安装后处理依赖时启用 `xense-gpu`，并保留需要的其他 extras，例如：
+
+```bash
+uv sync --extra gello --extra xense-gpu
+```
+
+不要同时安装 `onnxruntime` 与 `onnxruntime-gpu`，两者共享同一个 Python 包。
+GPU 版会复用 PyTorch 的 CUDA/cuDNN 动态库，创建 solver 后检查实际后端，
+并在控制台显示 `GPU inference (CUDAExecutionProvider)`。GPU 不可用时后处理
+报错，原始数据保留供修复后重试。首次 GPU 推理可能需要较长的初始化时间；
+GPU 与此前 CPU 结果可能存在微小浮点差异，保存仍保留 SDK 输出的原始精度。
+CUDA/cuDNN 兼容要求参见 [ONNX Runtime 官方说明](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html)。
+
 > 采集过程中**机械臂与相机（D435 / D435i）的相对位置必须保持不变**，推理时的相机位置必须与采集时一致。若机械臂或相机发生变化，此前采集的数据将失效。
 
 默认 `synchronize: true`。每个已保存的 GELLO episode 会在数据集根目录的
@@ -224,20 +238,11 @@ uv run record --config_path config/gello/xarm7_gello_base.yaml --postprocess-onl
 sidecar，并在控制台输出同步统计；它不改变 LeRobot 训练数据的 schema。若只需
 普通录制，可在 YAML 顶层设置 `synchronize: false` 关闭这些文件和统计。
 
-四触觉配置的三个 RealSense RGB 流按 `SENSOR_TIMESTAMP`（设备曝光中点，微秒）
-对齐动作的 `perf_counter()` 时间。读取同一个 color frame 时保留图像、设备帧号、
-原始曝光/读出时间和主机接收时间；以 SDK global time 映射读出时间，补上同帧
-曝光与读出时间差，再通过主机系统时钟与单调时钟的配对读数转换到动作时钟。
-`FRAME_TIMESTAMP` 仅用于映射，不作为曝光时间。该方案依赖 SDK 时钟映射精度，
-不是硬件触发同步；`exposure_to_receipt_ms` 包含曝光到读出及 SDK 交付延迟。
-元数据定义见 [RealSense 官方头文件](https://github.com/realsenseai/librealsense/blob/master/include/librealsense2/h/rs_frame.h)。
-
-`robot.realsense_require_exposure_timestamp: true` 在缺少曝光元数据或映射不可用时
-报错；设为 `false` 时明确回退到主机接收时间，并记录来源、原因和警告。四触觉
-配置使用严格模式和 `sync_wait_ms: 200`：等待曝光时间超过动作边界的下一帧，
-然后按曝光时间选择 `(前一动作, 当前动作]` 内的帧；超过等待预算会报同步超时。
-设备重置或映射时间倒退会使有序窗口失效并报错。每帧诊断保存在动作时间 sidecar
-以及原始 RGB 流 `samples.parquet` 的 `camera_timing_json` 中。
+所有普通 RGB 相机（包括 RealSense）都按新鲜 `async_read` 帧到达主机的时间，
+选择不晚于动作发送起点的最新帧。RealSense 使用 LeRobot 原有相机后端。
+单帧选择不等待下一帧；原始相机时间窗口仍可等待窗口结束的标记帧。
+主机接收时间保存在动作时间 sidecar，以及原始 RGB 流 `samples.parquet` 的
+`camera_timing_json` 中。
 
 > 如果数据集目录已存在且未加 `-r`，脚本会询问是覆盖、续录还是取消。
 
@@ -440,3 +445,5 @@ lerobot_xarm7/
 ## GELLO 网页录制工作台
 
 使用 `.venv/bin/uf-lerobot-record-web --port 8769` 启动统一配置管理、录制控制和相机预览。支持浏览器键盘与仅 J7 模式，Photon 预览默认关闭。参见 [网页录制说明](docs/recording_web.md)。
+
+选择并保存配置后，“数据后处理”面板会自动检测该数据目录中的待处理原始条，每 5 秒刷新，也可手动刷新。点击“单独后处理”可在不连接机器人、GELLO 或相机的情况下处理这些数据，并显示已转换条数、当前阶段和各相机的帧数进度。后处理与录制互斥，网页断线不会终止处理；失败后原始数据保留，可修复问题后重试。`defer_processing` 会话退出时的自动后处理也显示同样的进度。

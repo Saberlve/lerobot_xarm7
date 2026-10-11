@@ -7,6 +7,8 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from uuid import uuid4
@@ -80,7 +82,16 @@ class RawEpisodeStore:
                     raise ValueError(f"Raw episode {index}: incorrect frame count for {key}")
                 feature = self.dataset.features.get(key, {})
                 if feature.get("dtype") in ("image", "video"):
-                    values = [str(Path(path).resolve().relative_to(self.root)) for path in values]
+                    retained = []
+                    for frame_index, path in enumerate(values):
+                        source = Path(path).resolve()
+                        source.relative_to(self.root)
+                        relative = Path("images") / key / f"frame-{frame_index:06d}.png"
+                        target = staging / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        os.link(source, target)
+                        retained.append(str((destination / relative).relative_to(self.root)))
+                    values = retained
                 elif key != "task":
                     values = np.asarray(values).tolist()
                 columns[key] = pa.array(values)
@@ -103,6 +114,16 @@ class RawEpisodeStore:
                     else str(Path(self.runtime_dir).resolve().relative_to(self.root))
                 ),
             }
+            recorder = getattr(synchronization, "tactile_recorder", None)
+            if recorder is not None:
+                manifest["native_streams"] = {
+                    "names": list(recorder.stream_names),
+                    "fps": recorder.stream_fps,
+                    "videos": recorder.video_streams,
+                    "crf": recorder.video_crf,
+                    "mesh": sorted(recorder.required_mesh_streams),
+                }
+                recorder.raw_checkpoint = True
             _write_json(staging / "manifest.json", manifest)
             if synchronization is not None:
                 # Include the checkpoint in the existing tactile transaction so
@@ -199,7 +220,7 @@ def open_recording_dataset(repo_id, root, **kwargs):
 
 def _publish_output(root, output, work):
     items = []
-    for name in ("data", "videos", "meta"):
+    for name in ("data", "videos", "meta", "tactile_streams"):
         source, destination, backup = output / name, root / name, work / "backup" / name
         if source.exists():
             items.append(
@@ -237,7 +258,7 @@ def _cleanup_processed_images(dataset):
             discard_episode_images(dataset, index)
 
 
-def postprocess_raw_episodes(dataset, cameras):
+def postprocess_raw_episodes(dataset, cameras, *, progress=None):
     """Keep raw inputs until conversion is published and can be reopened."""
     from .native_dataset import NativeRateLeRobotDataset as LeRobotDataset
 
@@ -249,9 +270,31 @@ def postprocess_raw_episodes(dataset, cameras):
         for path in store.checkpoints(store.root)
         if json.loads(path.read_text())["episode_index"] >= dataset.num_episodes
     ]
+    started = time.monotonic()
+    progress_lock = threading.RLock()
+    state = {"total_episodes": len(pending), "completed_episodes": 0,
+             "episode_index": None, "streams": {}, "stage": "preparing"}
+
+    def report(stage=None, **updates):
+        if progress is None:
+            return
+        with progress_lock:
+            if stage is not None:
+                state["stage"] = stage
+            state.update(updates)
+            progress({**state, "streams": {key: dict(value) for key, value in state["streams"].items()},
+                      "elapsed_s": time.monotonic() - started})
+
+    def stream_progress(update):
+        with progress_lock:
+            state["streams"][update["camera"]] = update
+            report()
+
+    report()
     if not pending:
         # Also finish cleanup interrupted after a previous successful publication.
         _cleanup_processed_images(dataset)
+        report("complete")
         return dataset
     dataset._wait_image_writer()
     dataset.finalize()
@@ -280,7 +323,12 @@ def postprocess_raw_episodes(dataset, cameras):
                 vcodec=dataset.vcodec,
             )
         # Reuse each session's offline solvers across its episodes.
-        converted._native_stream_root = store.root
+        # Private hard links preserve the complete native inputs on failure.
+        for name in ("tactile_streams", "timestamps"):
+            source = store.root / name
+            if source.is_dir():
+                shutil.copytree(source, output / name, copy_function=os.link)
+        converted._native_stream_root = output
         converted._camera_stream_plan = getattr(dataset, "_camera_stream_plan", None)
         if converted._camera_stream_plan is None:
             plan_path = store.root / "meta/camera_streams.json"
@@ -288,6 +336,7 @@ def postprocess_raw_episodes(dataset, cameras):
         active_runtime = None
         with ExitStack() as sessions:
             for ordinal, path in enumerate(pending, 1):
+                report("loading", episode_index=json.loads(path.read_text())["episode_index"], streams={})
                 buffer, manifest = store.load(path)
                 index = manifest["episode_index"]
                 if index != converted.num_episodes:
@@ -296,7 +345,51 @@ def postprocess_raw_episodes(dataset, cameras):
                         f"expected {converted.num_episodes}, got {index}"
                     )
                 logging.info("[Postprocess] Episode %s (%s/%s)", index, ordinal, len(pending))
+                native = manifest.get("native_streams")
+                if native:
+                    from .stream_recorder import TactileStreamRecorder
+
+                    recorder = TactileStreamRecorder.__new__(TactileStreamRecorder)
+                    recorder._staging_root = output / "tactile_streams"
+                    # Methods operate on <staging>/<camera>, so use private links
+                    # to this episode without creating capture threads.
+                    stage = work / f"native_{index:06d}"
+                    stage.mkdir()
+                    for name in native["names"]:
+                        shutil.copytree(output / "tactile_streams" / name / f"episode_{index:06d}",
+                                        stage / name, copy_function=os.link)
+                    recorder._staging_root = stage
+                    recorder._base = f"episode_{index:06d}"
+                    recorder.episode_index = index
+                    recorder.stream_names = native["names"]
+                    recorder.stream_fps = native["fps"]
+                    recorder.video_streams = native["videos"]
+                    recorder.video_crf = native["crf"]
+                    recorder.required_mesh_streams = set(native["mesh"])
+                    recorder._published = recorder._prepared = False
+                    recorder._close_writer = lambda: None
+                    recorder._rows = {
+                        name: pq.read_table(stage / name / "samples.parquet").to_pylist()
+                        for name in native["names"]
+                    }
+                    if native["mesh"]:
+                        if manifest["runtime_dir"] is None:
+                            raise ValueError("Raw native episode has no saved runtime")
+                        report("mesh")
+                        recorder.compute_mesh(
+                            {name: cameras[name] for name in native["mesh"]},
+                            _within_root(store.root, manifest["runtime_dir"]),
+                            progress=stream_progress if progress is not None else None,
+                        )
+                    report("encoding")
+                    recorder.prepare(index, progress=stream_progress if progress is not None else None)
+                    for name in native["names"]:
+                        destination = output / "tactile_streams" / name / recorder._base
+                        shutil.rmtree(destination)
+                        os.replace(stage / name, destination)
+                    stage.rmdir()
                 if manifest["offline_mesh_fields"]:
+                    report("mesh")
                     available = {
                         f"observation.{name}.{suffix}": list(shape)
                         for name, camera in cameras.items()
@@ -316,7 +409,10 @@ def postprocess_raw_episodes(dataset, cameras):
                         sessions.close()
                         sessions.enter_context(deferred_sessions(cameras, runtime))
                         active_runtime = runtime
-                    compute_episode_mesh(dataset, cameras, runtime, index, episode_buffer=buffer)
+                    compute_episode_mesh(
+                        dataset, cameras, runtime, index, episode_buffer=buffer,
+                        progress=stream_progress if progress is not None else None,
+                    )
                 # LeRobot's encoder deletes its input directory. Give it private
                 # hard links, never a directory symlink to the raw originals.
                 for key in converted.meta.video_keys:
@@ -329,7 +425,12 @@ def postprocess_raw_episodes(dataset, cameras):
                             if exc.errno != errno.EXDEV:
                                 raise
                             shutil.copyfile(source, destination)
+                report("saving")
                 converted.save_episode(episode_data=buffer)
+                if native:
+                    converted.finish_native_episode(index)
+                report(completed_episodes=ordinal)
+        report("publishing")
         converted.finalize()
         plan_path = store.root / "meta/camera_streams.json"
         if plan_path.is_file():
@@ -339,7 +440,11 @@ def postprocess_raw_episodes(dataset, cameras):
             dataset.repo_id, root=store.root, batch_encoding_size=1, vcodec=dataset.vcodec
         )
         _cleanup_processed_images(result)
+        report("complete")
         return result
+    except BaseException as exc:
+        report("failed", error=str(exc))
+        raise
     finally:
         if converted is not None:
             converted.finalize()

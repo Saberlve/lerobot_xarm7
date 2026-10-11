@@ -84,12 +84,68 @@ def dataset_status(project, raw):
         missing = _missing_dataset_files(root)
         pending = [p for p in RawEpisodeStore.checkpoints(root)
                    if json.loads(p.read_text())["episode_index"] >= result["episodes"]]
-        if pending:
-            result["reason"] = "Raw episodes require --postprocess-only before resuming"
-        elif missing:
+        if missing:
             result["reason"] = "Incomplete dataset: " + ", ".join(missing)
+        elif pending and raw.get("defer_processing", False):
+            indices = [json.loads(p.read_text())["episode_index"] for p in pending]
+            if indices != list(range(result["episodes"], max(indices) + 1)):
+                result["reason"] = "Raw episode indexes are not contiguous"
+            else:
+                result["episodes"] = max(indices) + 1
+                result["resumable"] = True
+        elif pending:
+            result["reason"] = "Raw episodes require --postprocess-only before resuming"
         else:
             result["resumable"] = True
+    except Exception as exc:
+        result["reason"] = str(exc)
+    return result
+
+
+def postprocess_status(project, raw):
+    """Inspect committed manifests without reading images or opening devices."""
+    from lerobot_robot_ufactory.datasets.raw_episodes import RawEpisodeStore
+
+    root = (Path(project) / raw["dataset"]["root"]).resolve()
+    result = {"root": str(root), "processed_episodes": 0, "pending_episodes": 0,
+              "pending_frames": 0, "ready": False, "reason": None}
+    if not root.exists():
+        return result
+    try:
+        info_path = root / "meta/info.json"
+        journal_path = root / ".raw_postprocessing_transaction.json"
+        if journal_path.exists():
+            # Report the pre-publication count; startup recovery restores it.
+            journal = json.loads(journal_path.read_text())
+            for item in journal["items"]:
+                if item["destination"] == "meta":
+                    backup = (root / item["backup"] / "info.json").resolve()
+                    if not backup.is_relative_to(root):
+                        raise ValueError("Invalid postprocessing recovery path")
+                    if backup.is_file():
+                        info_path = backup
+        info = json.loads(info_path.read_text())
+        processed = int(info["total_episodes"])
+        result["processed_episodes"] = processed
+        pending = [(path, json.loads(path.read_text())) for path in RawEpisodeStore.checkpoints(root)]
+        pending = [(path, item) for path, item in pending if item["episode_index"] >= processed]
+        result["pending_episodes"] = len(pending)
+        result["pending_frames"] = sum(int(item["size"]) for _, item in pending)
+        if not pending:
+            return result
+        indices = [item["episode_index"] for _, item in pending]
+        if indices != list(range(processed, processed + len(pending))):
+            raise ValueError("Raw episode indexes are not contiguous")
+        if any(int(item["size"]) <= 0 for _, item in pending):
+            raise ValueError("Raw episode has no frames")
+        for path, item in pending:
+            if item["version"] != 1 or item["fps"] != info["fps"]:
+                raise ValueError(f"Incompatible raw episode: {path.parent.name}")
+            if not (path.parent / "frames.parquet").is_file():
+                raise ValueError(f"Missing raw frame data: {path.parent.name}")
+        if info["fps"] != raw["dataset"]["fps"]:
+            raise ValueError("Dataset FPS differs from the selected configuration")
+        result["ready"] = True
     except Exception as exc:
         result["reason"] = str(exc)
     return result

@@ -4,6 +4,7 @@ Each sensor has its own capture thread. Only that thread reads the SDK;
 consumers receive timestamped copies with bounded cache age.
 """
 
+import logging
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -29,6 +30,24 @@ def _sensor_class():
     except ImportError as exc:
         raise ImportError('Xense Photon requires xensesdk: pip install -e ".[xense]"') from exc
     return Sensor
+
+
+def _prepare_offline_gpu():
+    """Load the CUDA/cuDNN libraries used by the project's PyTorch installation."""
+    try:
+        import torch  # noqa: F401 -- preload CUDA/cuDNN before SDK session creation
+        import onnxruntime
+    except ImportError as exc:
+        raise ImportError(
+            'Offline Mesh3DFlow requires GPU inference: install the project with '
+            'the xense-gpu extra (uv sync --extra gello --extra xense-gpu).'
+        ) from exc
+    if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+        raise RuntimeError(
+            'Offline Mesh3DFlow requires ONNX Runtime GPU; CUDAExecutionProvider is unavailable. '
+            'Remove onnxruntime and install onnxruntime-gpu '
+            '(uv sync --extra gello --extra xense-gpu).'
+        )
 
 
 @dataclass(frozen=True)
@@ -120,11 +139,19 @@ class XensePhotonCamera(TactileCamera):
                 yield self
                 return
             sensor_class = _sensor_class()
+            _prepare_offline_gpu()
             solver = sensor_class.createSolver(runtime, overrides={"dev.disable_infer": False})
             if not solver:
                 raise RuntimeError(f"Cannot create offline solver: {runtime}")
             self._solver, self._solver_runtime = solver, runtime
             try:
+                if not getattr(solver, "infer_engine_using_gpu", False):
+                    raise RuntimeError(
+                        f"Offline Mesh3DFlow solver did not select GPU for {self.config.serial_number}; "
+                        "check the NVIDIA driver and CUDA/cuDNN libraries in the SDK log."
+                    )
+                logging.info("[Mesh3DFlow] %s: GPU inference (CUDAExecutionProvider)",
+                             self.config.serial_number)
                 yield self
             finally:
                 self._solver = self._solver_runtime = None

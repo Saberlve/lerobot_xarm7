@@ -217,6 +217,22 @@ with the original configuration before resuming. It does not connect devices:
 uv run record --config_path config/gello/xarm7_gello_base.yaml --postprocess-only
 ```
 
+Photon offline Mesh3DFlow uses NVIDIA GPU inference, with two independent sensors
+processed concurrently and frames kept in order. Enable `xense-gpu` when installing
+postprocessing dependencies, retaining any other extras you need, for example:
+
+```bash
+uv sync --extra gello --extra xense-gpu
+```
+
+Do not install `onnxruntime` and `onnxruntime-gpu` together; they share a Python
+package. GPU inference loads the CUDA/cuDNN libraries supplied by PyTorch and
+verifies the solver's actual backend, logging `GPU inference (CUDAExecutionProvider)`.
+If GPU initialization fails, processing reports an error and preserves raw data for
+retry. Initial GPU inference can take longer to initialize. GPU results can differ
+slightly from earlier CPU results due to floating point calculations; saved arrays
+retain the SDK's original output precision. See the [ONNX Runtime compatibility guide](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html).
+
 The xArm7 GELLO example also enables a lightweight browser camera preview at
 `http://127.0.0.1:8765/` (or `http://<recorder-ip>:8765/` from another machine).
 It reuses frames already captured by the recorder: JPEG encoding and HTTP
@@ -228,19 +244,13 @@ sidecars under `timestamps/` for state, GELLO-action, and camera-read arrival
 timing, and prints a synchronization summary. These files do not change the
 LeRobot training schema. Set top-level `synchronize: false` to disable them.
 
-The four-Photon configuration aligns all three RealSense RGB streams using
-`SENSOR_TIMESTAMP` (exposure midpoint). Pixels, device frame number, raw exposure
-and readout timestamps, and host receipt time come from the same color frame.
-SDK global time maps readout time to the system clock; the same-frame exposure
-delta and a paired system/monotonic clock read map exposure to the action clock.
-This depends on SDK clock accuracy. Metadata definitions are in the
-[official RealSense header](https://github.com/realsenseai/librealsense/blob/master/include/librealsense2/h/rs_frame.h).
-The configuration requires exposure metadata (`realsense_require_exposure_timestamp: true`)
-and waits up to 200 ms for a post-boundary exposure before closing an action
-window. Setting the requirement to `false` permits a labelled host-receipt
-fallback. Timestamp resets or reversals fail capture. Timing provenance and
-exposure-to-receipt delay are saved in action sidecars and each native RGB
-stream's `samples.parquet` under `camera_timing_json`.
+All ordinary RGB cameras, including RealSense, use host receipt timestamps
+from fresh `async_read` frames to select the latest frame at or before each
+action send-start. RealSense uses the standard LeRobot camera backend.
+Single-frame selection never waits for the next frame; native camera intervals
+may wait for their end watermark.
+Host receipt timing is saved in action sidecars and each native RGB stream's
+`samples.parquet` under `camera_timing_json`.
 When `robot.enable_logs` is enabled for diagnostics, one
 `logs/gello_record_sync_*.csv` file is written per episode. The
 `preview_clients`, `record_period_ms`, `frame_overrun_ms`, `action_age_ms`, and
@@ -423,3 +433,5 @@ This project is released under the Apache License 2.0. See [LICENSE](LICENSE).
 ## GELLO web recording console
 
 Run `.venv/bin/uf-lerobot-record-web --port 8769` for configuration management, recording control, and preview on one page. Browser shortcuts and J7-only mode are supported; Photon previews are opt-in. See the [web recording guide](docs/recording_web_en.md).
+
+After selecting and saving a configuration, the data postprocessing panel detects pending raw episodes in its dataset directory every 5 seconds, with a manual refresh option. The standalone postprocessing button processes them without connecting the robot, GELLO, or cameras, and shows converted episode counts, processing stages, and per-camera frame progress. Recording and postprocessing cannot run together. Processing continues if the browser disconnects; failures preserve raw inputs for retry. Automatic processing at the end of a `defer_processing` session shows the same progress.

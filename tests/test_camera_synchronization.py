@@ -186,3 +186,121 @@ def test_latest_state_before_action_is_strictly_causal(tmp_path):
     selected = robot.latest_state_before(10.000, max_age_ms=70)
     assert selected.capture_monotonic_s == pytest.approx(9.998)
     assert selected.capture_monotonic_s <= 10.000
+
+
+def test_factory_uses_standard_lerobot_realsense_backend():
+    from lerobot.cameras.realsense.camera_realsense import RealSenseCamera
+    from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
+
+    from lerobot_robot_ufactory.cameras.utils import make_cameras_from_configs
+
+    configs = {
+        name: RealSenseCameraConfig(serial_number_or_name=serial, width=3, height=2, fps=15)
+        for name, serial in (("wrist", "123"), ("third", "456"))
+    }
+    cameras = make_cameras_from_configs(configs)
+    assert list(cameras) == list(configs)
+    assert all(type(camera) is RealSenseCamera for camera in cameras.values())
+
+
+def test_rgb_selection_never_waits_for_a_post_target_frame():
+    from types import SimpleNamespace
+
+    source = TimestampedCameraBuffer(SimpleNamespace(), history_size=8)
+    image = np.zeros((2, 2, 3), np.uint8)
+    source._history.extend(
+        TimestampedRGBSample(image, stamp) for stamp in (99.97, 100.01)
+    )
+
+    def unexpected_wait(*args):
+        pytest.fail("RGB selection must use existing history immediately")
+
+    source.wait_until_after = unexpected_wait
+    chosen = select_synchronized_samples({"rgb": source}, 100.0, 70, 90, 1000)
+    assert chosen["rgb"].capture_monotonic_s == 99.97
+    assert source.latest_before(100.0, 70, 1000)[1]["capture_monotonic_s"] == 99.97
+    with pytest.raises(TimeoutError, match="ms old"):
+        select_synchronized_samples({"rgb": source}, 100.1, 70, 90, 1000)
+    with pytest.raises(TimeoutError, match="ms old"):
+        source.latest_before(100.1, 70, 1000)
+
+
+def test_host_receipt_timing_survives_capture_and_sidecars(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    import pyarrow.parquet as pq
+
+    from lerobot_robot_ufactory.cameras import synchronization
+    from lerobot_robot_ufactory.datasets.camera_streams import camera_samples_between
+    from lerobot_robot_ufactory.scripts.uf_lerobot_record import EpisodeSynchronization
+
+    image = np.full((2, 3, 3), 42, np.uint8)
+    camera = SimpleNamespace()
+    source = TimestampedCameraBuffer(camera, history_size=8)
+    reads = []
+
+    def read_once(timeout_ms):
+        reads.append(timeout_ms)
+        source._stop.set()
+        return image
+
+    camera.async_read = read_once
+    monkeypatch.setattr(synchronization, "perf_counter_ns", lambda: 100_020_000_000)
+    source._capture_loop()
+    source._stop.clear()
+    sample, = source.sync_samples()
+    assert reads == [200]
+    assert sample.capture_monotonic_ns == 100_020_000_000
+    assert sample.timing == {
+        "timestamp_source": "host_receipt",
+        "received_monotonic_s": 100.02,
+        "received_monotonic_ns": 100_020_000_000,
+    }
+    assert np.array_equal(sample.frame, image)
+    assert sample.frame is not image
+    with pytest.raises(TimeoutError, match="No causal RGB frame"):
+        source.latest_before(100.01, 70)
+
+    robot = SimpleNamespace(cameras={"rgb": camera}, _rgb_sync_buffers={"rgb": source})
+    samples = camera_samples_between(robot, 99.9, 100.03, ("rgb",))
+    sync = EpisodeSynchronization(
+        None, 15, dataset_root=tmp_path, episode_index=0, tactile_stream_names=("rgb",)
+    )
+    try:
+        _, timing = source.export_sync_sample(sample)
+        sync.add_frame(
+            0, 100.03, None, action_send_start_s=100.03,
+            camera_timing={"rgb": timing}, tactile_window_start_s=99.9,
+            tactile_samples=samples,
+        )
+        action_timing = json.loads(sync.frames[0]["camera_timing_json"])["rgb"]
+        assert action_timing["timestamp_source"] == "host_receipt"
+        assert action_timing["received_monotonic_ns"] == sample.capture_monotonic_ns
+        sync.write(tmp_path, 0)
+        rows = pq.read_table(
+            tmp_path / "tactile_streams/rgb/episode_000000/samples.parquet"
+        ).to_pylist()
+        assert rows[0]["sensor_timestamp_s"] is None
+        assert rows[0]["device_to_host_offset_s"] is None
+        assert json.loads(rows[0]["camera_timing_json"]) == sample.timing
+    finally:
+        sync.discard()
+
+
+def test_host_receipt_clock_rewind_is_rejected(monkeypatch):
+    from types import SimpleNamespace
+
+    from lerobot_robot_ufactory.cameras import synchronization
+
+    ticks = iter((1_000_000_000, 1_020_000_000, 990_000_000))
+    monkeypatch.setattr(synchronization, "perf_counter_ns", lambda: next(ticks))
+    source = TimestampedCameraBuffer(
+        SimpleNamespace(async_read=lambda **kwargs: np.zeros((2, 2, 3), np.uint8)),
+        history_size=8,
+    )
+    source._capture_loop()
+    assert [s.capture_monotonic_s for s in source._history] == [1.0, 1.02]
+    assert "clock moved backwards" in str(source._error)
+    with pytest.raises(RuntimeError, match="capture failed"):
+        source.samples_between(0, 2)
