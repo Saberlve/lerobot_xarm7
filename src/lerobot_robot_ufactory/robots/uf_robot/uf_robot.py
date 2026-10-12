@@ -55,6 +55,7 @@ G2_EXTERNAL_REPORT_FORMAT = ">BBhhh"
 G2_EXTERNAL_REPORT_SIZE = struct.calcsize(G2_EXTERNAL_REPORT_FORMAT)
 G2_EXTERNAL_REPORT_END = G2_EXTERNAL_REPORT_OFFSET + G2_EXTERNAL_REPORT_SIZE
 G2_MONITOR_STARTUP_DELAY_S = 1.0
+GRIPPER_POSITION_POLL_INTERVAL_S = 1 / 30
 
 
 def _perf_counter_ns() -> int:
@@ -126,6 +127,7 @@ class TimestampedStateSample:
     tcp_velocity: tuple[float, ...]
     gripper_position: float | None
     capture_monotonic_ns: int | None = None
+    gripper_sample_monotonic_s: float | None = None
 
 
 def _decode_g2_external_device_report(data: bytes) -> G2ExternalDeviceReport | None:
@@ -162,9 +164,10 @@ class GripperParam:
         return int(min(max(min_pos, pos), max_pos))
 
     def get_gripper_norm(self, grippos):
-        if grippos is None:
-            return self.gripper_norm
-        self.gripper_norm = (self.open_pos - grippos) / (self.open_pos - self.close_pos)
+        if grippos is None or not math.isfinite(float(grippos)):
+            raise ValueError("Actual gripper position is unavailable or nonfinite")
+        normalized = (self.open_pos - float(grippos)) / (self.open_pos - self.close_pos)
+        self.gripper_norm = min(max(normalized, 0.0), 1.0)
         return self.gripper_norm
 
 
@@ -206,7 +209,9 @@ class UFRobot(Robot, Thread):
 
         self._cmd_cnt = 0
         self._last_gripper_command = None
-        self._gripper_command_history = deque(maxlen=self.config.sync_history_size)
+        self._gripper_position_history = deque(maxlen=self.config.sync_history_size)
+        self._gripper_position_stop_event = Event()
+        self._gripper_position_thread = None
         self._last_gripper_command_attempt_s = float("-inf")
         self._last_logged_controller_error = 0
 
@@ -237,12 +242,16 @@ class UFRobot(Robot, Thread):
         self._last_realtime_sync_timing = {}
         self._realtime_camera_frame_index = {key: 0 for key in self.cameras}
         self._gripper_current_monitor_requested = bool(config.gripper_current_monitor)
+        # Actual G2 position is required even when current diagnostics are off.
+        self._gripper_external_report_requested = (
+            config.gripper_type == GripperType.xArmGripperG2
+        )
         self._gripper_current_monitor_active = False
         self._gripper_current_monitor_error = None
         self._gripper_current_ma = None
         self._gripper_current_sample_monotonic_s = None
         self._gripper_current_state = None
-        self._gripper_actual_pos_mm = None  # 新增：用于缓存真实的夹爪毫米级位置
+        self._gripper_actual_pos_mm = None
         self._camera_cond = Condition()
         self._camera_stop_event = Event()
         self._camera_thread = None
@@ -261,7 +270,7 @@ class UFRobot(Robot, Thread):
             or bool(self.cameras)
         )
         self._use_rt_report = (
-            self._rt_report_required_for_control or self._gripper_current_monitor_requested
+            self._rt_report_required_for_control or self._gripper_external_report_requested
         )
         self._cart_obs_has_vel = any('velo.' in key for key in CARTESIAN_OBS_KEYS)
         self._jnt_obs_has_vel = self.config.observe_joint_vel
@@ -1006,6 +1015,7 @@ class UFRobot(Robot, Thread):
         if self._gripper_type > GripperType.NoGripper:
             self._configure_gripper(move_to_open=move_gripper_to_open and not self.config.manual_mode)
         self._configure_g2_current_monitor()
+        self._start_gripper_position_reader_if_needed()
 
         if self.config.manual_mode:
             if self.config.teach_sensitivity is not None:
@@ -1049,8 +1059,8 @@ class UFRobot(Robot, Thread):
         time.sleep(0.2)
 
     def _configure_g2_current_monitor(self) -> None:
-        """Enable optional G2 reporting before the TCP 30000 reader starts."""
-        if not self._gripper_current_monitor_requested:
+        """Enable G2 actual-position/current reports before the RT reader starts."""
+        if not self._gripper_external_report_requested:
             return
         with self._update_lock:
             if self._gripper_current_monitor_active:
@@ -1088,14 +1098,14 @@ class UFRobot(Robot, Thread):
             self._gripper_current_monitor_error = error
         if not self._rt_report_required_for_control:
             self._use_rt_report = False
-        logger.warning("Gripper G2 current monitor unavailable: %s", error)
+        logger.warning("Gripper G2 position/current report unavailable: %s", error)
 
     def _start_rt_report_thread_if_needed(self) -> None:
         if not self._use_rt_report or self._rt_report_normal or self.is_alive():
             return
         if self.ident is not None:
             error = "TCP 30000 report thread has already exited and cannot be restarted"
-            if self._gripper_current_monitor_requested:
+            if self._gripper_external_report_requested:
                 self._mark_g2_current_monitor_unavailable(error)
             else:
                 logger.warning(error)
@@ -1161,7 +1171,65 @@ class UFRobot(Robot, Thread):
             self._gripper_param.gripper_norm = 0.0
             with self._update_lock:
                 self._last_gripper_command = 0.0
-                self._gripper_command_history.append((time.perf_counter(), 0.0))
+
+    def _read_actual_gripper_position(self) -> float:
+        """Read measured opening; never substitute a commanded goal on failure."""
+        if self._gripper_type == GripperType.xArmGripper:
+            code, position = self.real_arm.get_gripper_position()
+        elif self._gripper_type == GripperType.xArmGripperG2:
+            code, position = self.real_arm.get_gripper_g2_position()
+        elif self._gripper_type == GripperType.BioGripperG2:
+            code, position = self.real_arm.get_bio_gripper_g2_position()
+        elif self._gripper_type == GripperType.PikaGripper:
+            code, position = 0, self.pika_gripper.get_gripper_distance()
+        elif self._gripper_type == GripperType.RobotiqGripper:
+            code, _ = self.real_arm.robotiq_get_status(number_of_registers=3)
+            position = self.real_arm.robotiq_status.get('gPO')
+        else:
+            raise RuntimeError("No gripper position feedback is configured")
+        if code != 0:
+            raise RuntimeError(f"Actual gripper position read failed, code={code}")
+        return float(self._gripper_param.get_gripper_norm(position))
+
+    def _start_gripper_position_reader_if_needed(self) -> None:
+        """Poll measured positions off the control thread if RT feedback is absent."""
+        if self._gripper_type == GripperType.NoGripper or self._gripper_current_monitor_active:
+            self._stop_gripper_position_reader()
+            return
+        if self._gripper_position_thread is not None and self._gripper_position_thread.is_alive():
+            return
+        self._gripper_position_stop_event.clear()
+        self._gripper_position_thread = Thread(
+            target=self._gripper_position_read_worker,
+            daemon=True,
+            name="uf-gripper-position",
+        )
+        self._gripper_position_thread.start()
+
+    def _stop_gripper_position_reader(self) -> None:
+        self._gripper_position_stop_event.set()
+        thread = self._gripper_position_thread
+        if thread is not None:
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                logger.warning("Gripper position reader did not stop within 2 seconds")
+            else:
+                self._gripper_position_thread = None
+
+    def _gripper_position_read_worker(self) -> None:
+        error_logged = False
+        while not self._gripper_position_stop_event.is_set():
+            try:
+                position = self._read_actual_gripper_position()
+                received_s = time.perf_counter()
+                with self._update_lock:
+                    self._gripper_position_history.append((received_s, position))
+                error_logged = False
+            except Exception as exc:
+                if not error_logged:
+                    logger.warning("Actual gripper position read failed: %s", exc)
+                    error_logged = True
+            self._gripper_position_stop_event.wait(GRIPPER_POSITION_POLL_INTERVAL_S)
 
     def calibrate(self) -> None:
         self._is_calibrated = True
@@ -1208,27 +1276,7 @@ class UFRobot(Robot, Thread):
             ValueError(f"Please check the given control space of uf_robot! got {self._control_space}")
         
         if self._gripper_type > GripperType.NoGripper:
-            if self._gripper_type == GripperType.xArmGripper:
-                code, grippos = self.real_arm.get_gripper_position()
-                if code != 0 or grippos is None:
-                    self._log_gripper_error("get_gripper_position", code, f"position={grippos}")
-                grippos_norm = self._gripper_param.get_gripper_norm(grippos)
-            elif self._gripper_type == GripperType.xArmGripperG2:
-                code, grippos = self.real_arm.get_gripper_g2_position()
-                if code != 0 or not isinstance(grippos, (int, float, np.number)):
-                    self._log_gripper_error("get_gripper_g2_position", code, f"position={grippos}")
-                    grippos = None
-                grippos_norm = self._gripper_param.get_gripper_norm(grippos)
-            elif self._gripper_type == GripperType.BioGripperG2:
-                code, grippos = self.real_arm.get_bio_gripper_g2_position()
-                grippos_norm = self._gripper_param.get_gripper_norm(grippos)
-            elif self._gripper_type == GripperType.PikaGripper:
-                grippos = self.pika_gripper.get_gripper_distance()
-                grippos_norm = self._gripper_param.get_gripper_norm(grippos)
-            elif self._gripper_type == GripperType.RobotiqGripper:
-                self.real_arm.robotiq_get_status(number_of_registers=3)
-                grippos = self.real_arm.robotiq_status['gPO']  # 0..255
-                grippos_norm = self._gripper_param.get_gripper_norm(grippos) # 0=open, 1=closed
+            grippos_norm = self._read_actual_gripper_position()
             if logs_enabled:
                 self.logs["read_pos_dt_s"] = time.perf_counter() - before_read_t
             obs_dict[f"{self.prefix}gripper.pos"] = grippos_norm
@@ -1348,8 +1396,17 @@ class UFRobot(Robot, Thread):
             )
         if self._gripper_type > GripperType.NoGripper:
             gripper = state_sample.gripper_position
-            if gripper is None:
-                gripper = self._gripper_param.gripper_norm
+            gripper_sample_s = state_sample.gripper_sample_monotonic_s
+            if gripper_sample_s is None:
+                gripper_sample_s = state_rt_receive_s
+            if gripper is None or not math.isfinite(gripper):
+                raise TimeoutError("Actual gripper position unavailable for the selected state sample")
+            gripper_age_ms = (selection_request_s - gripper_sample_s) * 1_000
+            if not 0 <= gripper_age_ms <= self.config.sync_max_skew_ms:
+                raise TimeoutError(
+                    f"Actual gripper position is {gripper_age_ms:.3f} ms old; "
+                    f"limit is {self.config.sync_max_skew_ms:.3f} ms"
+                )
             obs_dict[f"{self.prefix}gripper.pos"] = float(gripper)
 
         before_cameras_s = time.perf_counter()
@@ -1538,12 +1595,8 @@ class UFRobot(Robot, Thread):
             return
         if logs_enabled:
             self._log_gripper_command(gripper_norm, grippos, command_dt_ms)
-        command_recorded_s = time.perf_counter()
         with self._update_lock:
             self._last_gripper_command = gripper_norm
-            self._gripper_command_history.append(
-                (command_recorded_s, gripper_norm)
-            )
 
     def stop_gripper_at_current_position(self) -> float:
         """Replace an active goal with actual position on keyboard release."""
@@ -1551,8 +1604,7 @@ class UFRobot(Robot, Thread):
             raise ConnectionError()
         if self.config.no_action:
             return float(self._last_gripper_command or 0.0)
-        # Observations can contain the commanded goal when monitoring is off.
-        # Read the physical position once per release, never on every tick.
+        # Read once per release so the hold uses the latest measurement.
         if self._gripper_type == GripperType.xArmGripperG2:
             code, position = self.real_arm.get_gripper_g2_position()
         elif self._gripper_type == GripperType.xArmGripper:
@@ -1582,7 +1634,7 @@ class UFRobot(Robot, Thread):
 
     def get_cached_gripper_position(self) -> float | None:
         """Return the freshest normalized G2 position without controller I/O."""
-        if not self._gripper_current_monitor_requested:
+        if not self._gripper_external_report_requested:
             return None
         if not self._update_lock.acquire(blocking=False):
             return None
@@ -1855,6 +1907,7 @@ class UFRobot(Robot, Thread):
         pass
 
     def disconnect(self) -> None:
+        self._stop_gripper_position_reader()
         if not self._is_connected and self.real_arm is None:
             return
         self._camera_stop_event.set()
@@ -1884,7 +1937,7 @@ class UFRobot(Robot, Thread):
 
         with self._update_lock:
             self._rt_state_history.clear()
-            self._gripper_command_history.clear()
+            self._gripper_position_history.clear()
         self._is_connected = False
 
     @property
@@ -1951,7 +2004,7 @@ class UFRobot(Robot, Thread):
                 sample_monotonic_s = sample_monotonic_ns / 1_000_000_000
                 external_report = None
                 monitor_error = None
-                if self._gripper_current_monitor_requested:
+                if self._gripper_external_report_requested:
                     external_report = _decode_g2_external_device_report(data)
                     if len(data) < G2_EXTERNAL_REPORT_END:
                         monitor_error = (
@@ -1984,7 +2037,7 @@ class UFRobot(Robot, Thread):
                         self._gripper_current_ma = external_report.current_ma
                         self._gripper_current_sample_monotonic_s = sample_monotonic_s
                         self._gripper_current_state = external_report.gripper_state
-                        self._gripper_actual_pos_mm = external_report.position_mm  # 新增：接住真实位置
+                        self._gripper_actual_pos_mm = external_report.position_mm
                         self._gripper_current_monitor_error = None
                     elif monitor_error is not None:
                         self._gripper_current_monitor_error = monitor_error
@@ -1994,22 +2047,21 @@ class UFRobot(Robot, Thread):
                                 external_report.position_mm
                             )
                         )
+                        gripper_sample_s = sample_monotonic_s
                     else:
-                        gripper_position = next(
+                        position_sample = next(
                             (
-                                command
-                                for command_time, command in reversed(
-                                    self._gripper_command_history
+                                (received_s, position)
+                                for received_s, position in reversed(
+                                    self._gripper_position_history
                                 )
-                                if command_time <= sample_monotonic_s
+                                if received_s <= sample_monotonic_s
                             ),
                             None,
                         )
-                        if (
-                            gripper_position is None
-                            and self._gripper_type > GripperType.NoGripper
-                        ):
-                            gripper_position = float(self._gripper_param.gripper_norm)
+                        gripper_sample_s, gripper_position = (
+                            (None, None) if position_sample is None else position_sample
+                        )
                     self._rt_state_history.append(
                         TimestampedStateSample(
                             capture_monotonic_s=sample_monotonic_s,
@@ -2019,6 +2071,7 @@ class UFRobot(Robot, Thread):
                             tcp_velocity=tuple(float(value) for value in actual_tcp_speed),
                             gripper_position=gripper_position,
                             capture_monotonic_ns=sample_monotonic_ns,
+                            gripper_sample_monotonic_s=gripper_sample_s,
                         )
                     )
                 self._rt_report_normal = True
@@ -2029,13 +2082,13 @@ class UFRobot(Robot, Thread):
                     self.config.robot_ip,
                     exc,
                 )
-                if self._gripper_current_monitor_requested:
+                if self._gripper_external_report_requested:
                     self._mark_g2_current_monitor_unavailable(
                         f"TCP 30000 report reader failed: {exc!r}"
                     )
         finally:
             self._rt_report_normal = False
-            if self._gripper_current_monitor_requested:
+            if self._gripper_external_report_requested:
                 with self._update_lock:
                     self._gripper_current_monitor_active = False
             if sock is not None:

@@ -1,4 +1,14 @@
+# Base recording config: both joint/TCP states, Photon tactile streams and GELLO joint current control.
+# Run from the project root:
+# .venv/bin/uf-lerobot-record --config_path config/gello/xarm7_gello_base.yaml
+
 defer_processing: true
+synchronize: true
+# Save each episode with video encoding and offline Mesh3DFlow before the next recording.
+# Compute Mesh3DFlow from saved Rectify images and write the results to the dataset:
+# observation.photon_right.mesh_motion_3d / observation.photon_left.mesh_motion_3d.
+# This offline output is enabled even though save_marker_motion_3d above is false.
+offline_mesh3dflow: true
 robot:
   type: uf::robot
   id: "uf_robot"
@@ -7,44 +17,56 @@ robot:
   # Saved dataset representation: "joint" records J1..J7 (rad); "tcp" records
   # the FK-converted TCP pose (mm; continuous 6D rotation, Zhou et al. CVPR 2019);
   # "both" records joints and TCP pose side by side. Control stays in joint space.
-  record_space: "joint"
-  robot_ip: "192.168.1.229"
-  # 2: xArm Gripper G2 (0-84 mm opening range).
-  gripper_type: 2
-  enable_logs: false
-  # xArm Gripper G2 speed, 15-225 mm/s; 100 is the SDK default.
+  record_space: "both"
+  robot_ip: "192.168.1.245"
   gripper_speed: 50
-  # Use the high-frequency servo interface for lower-latency GELLO tracking.
+  gripper_command_interval_s: 0.03334
+  enable_logs: false
+  # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
   joint_command_mode: 6
   max_joint_velocity: 120
   # TCP z floor in the xArm base coordinate system (mm).
-  min_tcp_z_mm: -2.0
-  # CPU-local FK/Jacobian projection keeps mode-6 commands free of synchronous SDK queries.
-  tcp_z_guard_backend: "local_projection"
-  tcp_z_soft_margin_mm: 0.5
-  local_kinematics_max_error_mm: 2.0
-  controller_safety_boundary: false
-  # Append gripper initialization/read/write failures here.
-  gripper_error_log_path: "logs/xarm7_gripper_errors.log"
-  # Minimum interval between gripper RS485 commands: 0.1 s = 10 Hz.
-  gripper_command_interval_s: 0.03334
+  min_tcp_z_mm: 2
   cameras:
-    camera:
+    wrist_camera:
       type: intelrealsense
       serial_number_or_name: "242622070583"
       width: 640
       height: 480
-      fps: 30
-    camera2:
+      # Select the latest host-received frame at/before each action send-start.
+      fps: 15
+    third_camera:
       type: intelrealsense
       serial_number_or_name: "148522072685"
       width: 640
       height: 480
-      fps: 30
+      fps: 15
+    # Physical left/right mapping verified by pressing the left sensor: OG001932.
+    # These dimensions are saved image sizes, not a Photon hardware mode.
+    photon_right: # 右边
+      type: photon
+      serial_number: "OG001931"
+      width: 400
+      height: 700
+      fps: 60  # 最终按60hz采触觉
+
+    photon_left:  # 左边
+      type: photon
+      serial_number: "OG001932"
+      width: 400
+      height: 700
+      fps: 60
+
+      # config_path: /absolute/path/to/xense/calibrations
   # Redundant args, indicating the initial pose of xarm7. Set by 192.168.1.245:18333
   # start_joints: [0, -30, 0, 0, 0, 30, 0]
 # make sure to edit with your correct configurations!
 teleop:
+  current_control:
+    enabled: false
+    # profile_path: config/current_control/gello_A_working.yaml
+    # experimental: false
+    # Running current slew is loaded from the shared device profile.
   type: uf::gello_teleop
   id: "gello_teleop"
   # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.
@@ -52,27 +74,18 @@ teleop:
   port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
-  gripper_id: 8
-  # Gripper input: "gello" or keyboard C/O hold control.
-  gripper_control_mode: gello
-  # Gripper move per keyboard C/O tap, in mm of the G2 stroke.
-  gripper_keyboard_step_mm: 2.0
-  # Hold C/O for this long (seconds) before continuous open/close starts.
-  gripper_keyboard_hold_delay_s: 0.5
-  gripper_open_deg: 198.28125
-  gripper_close_deg: 155.75
+  gripper_control_mode: keyboard
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are
-# dropped instead of delaying the 30 Hz recorder or GELLO control loop.
+# dropped instead of delaying the 15 Hz recorder or 30 Hz GELLO control loop.
 web_preview:
   enabled: true
   host: "0.0.0.0"
-  port: 8765
+  port: 8769
   fps: 8
   width: 480
   jpeg_quality: 65
-synchronize: true
 dataset:
   # Dataset path relative to the directory where the command is started.
   root: "datasets/xarm7_gello_test"

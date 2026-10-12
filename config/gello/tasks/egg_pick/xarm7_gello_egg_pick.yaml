@@ -102,7 +102,7 @@ dataset:
   root: "datasets/xarm7_gello_tasks/egg_pick"
   repo_id: "ufactory/xarm7_gello_egg_pick"
   # Task description stored in the dataset.
-  single_task: "Gently grasp an intact egg, lift it, hold it stably, transfer it to the target area, and place it in an egg tray without cracking or dropping it."
+  single_task: "Pick up the egg and place it in the green egg tray."
   fps: 15
   episode_time_s: 960  # max duration for one episode
   push_to_hub: False

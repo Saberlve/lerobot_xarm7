@@ -939,9 +939,8 @@ def test_xarm_gripper_g2_uses_sdk_units_and_dedicated_api(monkeypatch, tmp_path,
     assert observation["gripper.pos"] == pytest.approx(0.5)
 
     arm.get_gripper_g2_position = lambda: (1, None)
-    observation = robot.get_observation()
-    assert observation["gripper.pos"] == pytest.approx(0.5)
-    assert "get_gripper_g2_position" in caplog.text
+    with pytest.raises(RuntimeError, match="Actual gripper position read failed, code=1"):
+        robot.get_observation()
     robot.disconnect()
 
 

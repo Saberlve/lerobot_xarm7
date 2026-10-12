@@ -85,6 +85,7 @@ ls /dev/serial/by-id/
 - `robot.robot_dof` — `7`
 - `robot.record_space` — 数据集保存格式：`"joint"`（默认）记录 J1..J7 关节角（弧度）；`"tcp"` 记录经 FK 转换的 TCP 位姿（`pose.x/y/z` 单位 mm，旋转用连续 6D 表示 `pose.r11/r21/r31/r12/r22/r32`，即旋转矩阵的前两列，参考 [Zhou et al., CVPR 2019](https://arxiv.org/abs/1812.07035)，不存在欧拉角/轴角的跳变问题）；`"both"` 同时记录关节角和 TCP 位姿。GELLO 控制仍保持在关节空间
 - `robot.gripper_type` — `2` 表示 xArm Gripper G2
+- `observation.state` 中的 `gripper.pos` 记录夹爪实际开度，归一化到 `[0, 1]`：`0` 全开、`1` 全闭。G2 使用 `clip((84 - 当前开度毫米值) / 84, 0, 1)`。实际位置回传默认启用，不依赖 `robot.gripper_current_monitor`（该开关只控制电流诊断）；回传接口不可用时由后台线程读取真实位置。同步录制只使用动作锚点之前且在 `robot.sync_max_skew_ms` 内收到的反馈；反馈缺失或过期时拒绝该帧，不用控制目标补 state。`action` 仍记录控制目标。此修改仅影响后续录制，旧数据无法恢复未记录的实际位置。
 - `robot.gripper_speed` — G2 开合速度，单位 mm/s（范围 `15`–`225`，当前配置为 `100`）
 - `robot.gripper_force` — G2 夹持力（范围 `1`–`100`，当前配置为 `50`）
 - `teleop.port` — GELLO 串口路径（`/dev/serial/by-id/...`）

@@ -25,8 +25,9 @@ class UFRobotConfig(RobotConfig):
     gripper_command_threshold: float = 0.01  # normalized change required before sending a new command
     gripper_command_interval_s: float = 0.1  # minimum interval between tool RS485 goals
     gripper_error_log_path: str | None = "logs/xarm_gripper_errors.log"
-    # Opt-in asynchronous Gripper G2 actual-current reporting via TCP 30000.
-    # This remains outside the LeRobot observation/dataset schema.
+    # Opt-in G2 current diagnostics; actual-position reports are enabled
+    # automatically for G2 state recording regardless of this flag.
+    # Current remains outside the LeRobot observation/dataset schema.
     gripper_current_monitor: bool = False
     gripper_current_monitor_frequency_hz: int = 250
     gripper_current_stale_timeout_s: float = 0.25

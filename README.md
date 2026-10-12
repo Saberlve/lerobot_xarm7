@@ -98,6 +98,18 @@ video encoding and Mesh computation when enabled.
 
 > The xArm7 config already contains the correct joint mapping; only edit the port, IP, and dataset fields for your setup.
 
+The `gripper.pos` component of `observation.state` records the measured gripper
+opening, normalized to `[0, 1]`: `0` is fully open and `1` is fully closed. For
+the G2's 84 mm stroke, the value is `clip((84 - opening_mm) / 84, 0, 1)`.
+G2 position reports are enabled automatically even when
+`robot.gripper_current_monitor` is false; that flag only controls current
+diagnostics. If native reports cannot be enabled, actual positions are read in
+a background thread. Synchronized recording uses only feedback received before
+the action anchor and within `robot.sync_max_skew_ms`. Missing or stale feedback
+rejects the frame instead of substituting a commanded goal. `action` continues
+to record the control target. This changes future recordings; existing datasets
+cannot recover unrecorded physical positions.
+
 ### Manual-drag config
 
 - `robot.manual_mode: true` — enable xArm teach mode (joint free-drive)
