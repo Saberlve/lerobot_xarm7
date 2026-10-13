@@ -36,6 +36,7 @@ class SessionManager:
         self.image_connection = None
         self.folder = None
         self.owner = None
+        self.owner_resume_token = None
         self.clients = {}
         self.log_cursors = {}
         self.preview_clients = {}
@@ -121,6 +122,10 @@ class SessionManager:
             j7 = payload.get("j7_enabled", raw["teleop"].get("joint7_only_mode_enabled", False))
             if type(j7) is not bool:
                 raise ConfigError("j7_enabled must be boolean")
+            xy_plane = payload.get("xy_plane_enabled", raw["teleop"].get("xy_plane_only_mode_enabled", False))
+            if type(xy_plane) is not bool:
+                raise ConfigError("xy_plane_enabled must be boolean")
+            raw["teleop"]["xy_plane_only_mode_enabled"] = xy_plane
             raw["teleop"]["gripper_control_mode"] = gripper_mode
             raw["teleop"]["joint7_only_mode_enabled"] = j7
             text = yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
@@ -162,12 +167,13 @@ class SessionManager:
                           "operation": "postprocess" if mode == "postprocess" else "recording",
                           "saved": status["episodes"] if mode == "resume" else 0,
                           "frames": 0, "elapsed": 0, "stage": "Starting worker", "has_unsaved": False,
-                          "gripper_mode": gripper_mode, "j7_enabled": j7, "joint_mode": "all"}
+                          "gripper_mode": gripper_mode, "j7_enabled": j7, "xy_plane_enabled": xy_plane, "joint_mode": "all"}
             return self.snapshot(client_id)
 
     def snapshot(self, client_id=None):
         return {"type": "snapshot", "state": self.state, "effective": self.effective,
-                "simulate": self.simulate, "controller": self.owner == client_id,
+                "simulate": self.simulate, "controller": client_id is not None and self.owner == client_id,
+                "resume_token": self.owner_resume_token if client_id is not None and self.owner == client_id else None,
                 "can_claim": self.owner is None, "client_id": client_id}
 
     async def monitor(self):
@@ -273,6 +279,10 @@ async def index(request):
 async def api(request):
     manager = request.app[MANAGER_KEY]
     if request.method == "GET":
+        if request.path == "/api/bootstrap":
+            # The index already supplies this token. Refresh it after a server
+            # restart so an open page does not reconnect with an obsolete token.
+            return web.json_response({"token": manager.token}, headers={"Cache-Control": "no-store"})
         if request.path == "/api/configs":
             return web.json_response({"configs": await asyncio.to_thread(manager.store.listing)})
         if request.path == "/api/config":
@@ -324,8 +334,17 @@ async def control_socket(request):
     await socket.prepare(request)
     client_id = uuid4().hex
     manager.clients[client_id] = socket
-    if manager.owner is None:
+    resume_token = request.query.get("resume", "")
+    resuming = bool(manager.owner_resume_token and resume_token
+                    and hmac.compare_digest(resume_token, manager.owner_resume_token))
+    if manager.owner is None or resuming:
+        if manager.owner is not None:
+            # Refresh can connect before the old socket has finished closing.
+            # Pause/release the old controller before giving the new one its lease.
+            manager.send({"action": "disconnect"})
         manager.owner = client_id
+        # Rotate on every acquisition so an old socket/tab cannot reclaim later.
+        manager.owner_resume_token = secrets.token_urlsafe(32)
     await socket.send_json(manager.snapshot(client_id))
     try:
         async for message in socket:
@@ -334,8 +353,11 @@ async def control_socket(request):
             try:
                 data = json.loads(message.data)
                 if data.get("type") == "claim":
-                    if manager.owner is None:
+                    if manager.owner is None or (data.get("takeover") is True and manager.owner != client_id):
+                        if manager.owner is not None:
+                            manager.send({"action": "disconnect"})
                         manager.owner = client_id
+                        manager.owner_resume_token = secrets.token_urlsafe(32)
                     await socket.send_json(manager.snapshot(client_id))
                 elif manager.owner != client_id:
                     await socket.send_json({"type": "ack", "ok": False, "error": "This page is read-only"})
@@ -397,7 +419,7 @@ def create_app(project, simulate=False):
     app.router.add_get("/", index)
     app.router.add_get("/ws/control", control_socket)
     app.router.add_get("/ws/preview", preview_socket)
-    for path in ("configs", "config", "status", "log", "trash", "postprocess-status"):
+    for path in ("bootstrap", "configs", "config", "status", "log", "trash", "postprocess-status"):
         app.router.add_get(f"/api/{path}", api)
     for path in ("config", "validate", "preflight", "start", "restore", "postprocess"):
         app.router.add_post(f"/api/{path}", api)

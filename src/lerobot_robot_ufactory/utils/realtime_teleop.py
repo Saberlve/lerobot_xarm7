@@ -17,7 +17,10 @@ GRIPPER_CURRENT_FEEDBACK_KEY = "gripper.current_ma"
 
 
 def update_gello_joint_mode_key(teleop, key, pressed: bool) -> None:
-    """Route S/s to the opt-in mode without importing the keyboard backend."""
+    """Route mode keys without importing the keyboard backend."""
+    xy_mode = getattr(teleop, "_xy_plane_mode", None)
+    if xy_mode is not None and getattr(key, "char", None) in ("x", "X"):
+        xy_mode.key(pressed, teleop._teleop_enabled)
     if getattr(key, "char", None) in ("s", "S"):
         handler = getattr(teleop, "set_joint7_mode_key", None)
         if callable(handler):
@@ -26,6 +29,9 @@ def update_gello_joint_mode_key(teleop, key, pressed: bool) -> None:
 
 def apply_pending_gello_joint_mode(robot, teleop, observation: dict) -> None:
     """Switch on the robot I/O owner; use fresh RT feedback without camera reads."""
+    xy_mode = getattr(teleop, "_xy_plane_mode", None)
+    if xy_mode is not None and teleop._teleop_enabled:
+        xy_mode.prepare(robot, observation)
     pending = getattr(teleop, "joint_control_mode_switch_pending", None)
     if not callable(pending) or not pending():
         return

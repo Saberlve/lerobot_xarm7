@@ -21,7 +21,7 @@ robot:
   # "both" records joints and TCP pose side by side. Control stays in joint space.
   record_space: "both"
   robot_ip: "192.168.1.245"
-  gripper_speed: 50
+  gripper_speed: 150
   gripper_command_interval_s: 0.03334
   enable_logs: false
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
@@ -79,6 +79,8 @@ teleop:
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
   gripper_control_mode: keyboard
+  # 按 X 切换：仅沿基座 XY 平面平移，锁定 Z 和姿态；再按 X 恢复。
+  xy_plane_only_mode_enabled: true
 
 # Lossy browser preview of the frames already captured for the dataset.
 # JPEG encoding and network I/O run in the background; preview frames are

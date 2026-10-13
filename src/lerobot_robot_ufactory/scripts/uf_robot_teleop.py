@@ -293,6 +293,8 @@ def teleop_loop(cfg: TeleopConfig):
                                 print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
                         else:
                             print('⌨   [ESC] Exit  [Space] Pause  [←] Pause / Reset')
+                        if getattr(teleop.config, "xy_plane_only_mode_enabled", False):
+                            print('⌨   [X] XY translation only / All joints')
                         if getattr(teleop.config, "joint7_only_mode_enabled", False):
                             print('⌨   [S] J7 only / All joints')
                 except Exception as e:
@@ -306,6 +308,8 @@ def teleop_loop(cfg: TeleopConfig):
                 controls = '[ESC] Exit  [Space] Reset / Start  [←] Reset'
                 if getattr(teleop.config, "gripper_control_mode", "gello") == "keyboard":
                     controls += '  [C] Close  [O] Open'
+                if getattr(teleop.config, "xy_plane_only_mode_enabled", False):
+                    controls += '  [X] XY translation only / All joints'
                 if getattr(teleop.config, "joint7_only_mode_enabled", False):
                     controls += '  [S] J7 only / All joints'
                 print(f'⌨   {controls}')

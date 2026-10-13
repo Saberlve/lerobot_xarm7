@@ -526,3 +526,127 @@ def test_standalone_postprocess_web_job_uses_selected_dataset(project, tmp_path,
             assert status["pending_episodes"] == 0 and not status["ready"]
             await ws.close()
     asyncio.run(scenario())
+
+
+def test_xy_plane_web_mode_queues_toggle_and_reports_applied_state():
+    from lerobot_robot_ufactory.teleoperators.gello_teleop.xy_plane_mode import XYPlaneMode
+
+    control, teleop, messages, now = mailbox()
+    teleop.config.xy_plane_only_mode_enabled = True
+    teleop._xy_plane_mode = XYPlaneMode()
+    teleop.set_xy_plane_mode_key = lambda pressed: teleop._xy_plane_mode.key(pressed, True)
+    control.bind(teleop)
+    assert control.state['xy_plane_enabled']
+    command(control, 'xy_plane_mode')
+    assert not messages[-1]['ok']
+    assert not teleop._xy_plane_mode.pending
+    control.transition('recording')
+    command(control, 'xy_plane_mode', version=-1)
+    assert not teleop._xy_plane_mode.pending
+    command(control, 'xy_plane_mode')
+    assert messages[-1]['ok']
+    assert teleop._xy_plane_mode.pending
+    # Browser command queues the toggle; status follows the control owner's result.
+    assert control.state['joint_mode'] == 'all'
+    teleop._xy_plane_mode.active = True
+    now[0] += 1
+    control.progress()
+    assert control.state['joint_mode'] == 'xy'
+    teleop._xy_plane_mode.reset()
+    now[0] += 1
+    control.progress()
+    assert control.state['joint_mode'] == 'all'
+    control.state['xy_plane_enabled'] = False
+    command(control, 'xy_plane_mode')
+    assert not messages[-1]['ok']
+    assert not teleop._xy_plane_mode.pending
+
+
+@pytest.mark.parametrize('close_first', [False, True])
+def test_refresh_recovers_control_without_old_socket_releasing_new_owner(project, close_first):
+    async def scenario():
+        async with TestClient(TestServer(create_app(project, simulate=True))) as client:
+            manager = client.server.app[MANAGER_KEY]
+            origin = str(client.make_url('')).rstrip('/')
+            headers = {'Origin': origin}
+            url = '/ws/control?token=' + manager.token
+            commands = []
+            manager.send = commands.append
+            old = await client.ws_connect(url, headers=headers)
+            initial = await old.receive_json()
+            assert initial['controller'] and initial['resume_token']
+            observer = await client.ws_connect(url, headers=headers)
+            observed = await observer.receive_json()
+            assert not observed['controller'] and observed['resume_token'] is None
+            assert manager.snapshot()['resume_token'] is None
+            manager.state['phase'] = 'recording'
+            if close_first:
+                await old.close()
+                for _ in range(100):
+                    if manager.owner is None:
+                        break
+                    await asyncio.sleep(.01)
+                assert manager.owner is None
+            refreshed = await client.ws_connect(url + '&resume=' + initial['resume_token'], headers=headers)
+            resumed = await refreshed.receive_json()
+            assert resumed['controller']
+            assert resumed['client_id'] != initial['client_id']
+            assert resumed['resume_token'] != initial['resume_token']
+            assert commands == [{'action': 'disconnect'}]
+            # Simulate cleanup arriving after the replacement has claimed control.
+            await old.close()
+            await asyncio.sleep(.05)
+            assert manager.owner == resumed['client_id']
+            assert commands == [{'action': 'disconnect'}]
+            stale = await client.ws_connect(url + '&resume=' + initial['resume_token'], headers=headers)
+            stale_state = await stale.receive_json()
+            assert not stale_state['controller'] and stale_state['resume_token'] is None
+            await refreshed.send_json({'action': 'heartbeat'})
+            for _ in range(100):
+                if commands[-1] == {'action': 'heartbeat'}:
+                    break
+                await asyncio.sleep(.01)
+            assert commands[-1] == {'action': 'heartbeat'}
+            assert manager.owner == resumed['client_id']
+            await stale.close()
+            await observer.close()
+            await refreshed.close()
+    asyncio.run(scenario())
+
+
+def test_explicit_takeover_releases_old_owner_and_rotates_credential(project):
+    async def scenario():
+        async with TestClient(TestServer(create_app(project, simulate=True))) as client:
+            manager = client.server.app[MANAGER_KEY]
+            messages = []
+            manager.send = messages.append
+            origin = str(client.make_url('')).rstrip('/')
+            headers = {'Origin': origin}
+            bootstrap = await client.get('/api/bootstrap')
+            assert bootstrap.headers['Cache-Control'] == 'no-store'
+            assert (await bootstrap.json())['token'] == manager.token
+            url = '/ws/control?token=' + manager.token
+            old = await client.ws_connect(url, headers=headers)
+            old_state = await old.receive_json()
+            new = await client.ws_connect(url, headers=headers)
+            assert not (await new.receive_json())['controller']
+            await new.send_json({'type': 'claim'})
+            assert not (await new.receive_json())['controller']
+            manager.state['phase'] = 'recording'
+            await new.send_json({'type': 'claim', 'takeover': True})
+            received = await new.receive_json()
+            assert received['controller']
+            assert received['resume_token'] != old_state['resume_token']
+            assert messages == [{'action': 'disconnect'}]
+            await old.send_json({'action': 'start'})
+            while True:
+                rejection = await old.receive_json()
+                if rejection['type'] == 'ack':
+                    break
+            assert not rejection['ok']
+            await old.close()
+            await asyncio.sleep(.05)
+            assert manager.owner == received['client_id']
+            assert messages == [{'action': 'disconnect'}]
+            await new.close()
+    asyncio.run(scenario())

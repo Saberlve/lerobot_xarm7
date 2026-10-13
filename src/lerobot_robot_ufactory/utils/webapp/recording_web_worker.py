@@ -114,9 +114,15 @@ def _simulate(cfg, control, preview, folder):
     """UI acceptance mode: synthetic cameras and records in the session folder only."""
     import numpy as np
 
+    from types import SimpleNamespace
+
     class Teleop:
         config = cfg.teleop
         _joint7_only_active = False
+        _xy_plane_mode = SimpleNamespace(active=False)
+        def set_xy_plane_mode_key(self, pressed):
+            if pressed:
+                self._xy_plane_mode.active = not self._xy_plane_mode.active
         def set_gripper_keyboard_state(self, **keys):
             pass
         def set_joint7_mode_key(self, pressed):
@@ -149,6 +155,7 @@ def _simulate(cfg, control, preview, folder):
             break
         control.events.update(exit_early=False, rerecord_episode=False, pause_recording=False)
         teleop._joint7_only_active = False
+        teleop._xy_plane_mode.active = False
         control.transition("recording", frames=0, elapsed=0, stage="SIMULATION recording")
         started = time.monotonic()
         while not control.events["exit_early"]:
@@ -161,6 +168,7 @@ def _simulate(cfg, control, preview, folder):
             time.sleep(0.02)
         control.release_keys()
         teleop._joint7_only_active = False
+        teleop._xy_plane_mode.active = False
         decision = "discard" if control.events["rerecord_episode"] else "save"
         if control.events["pause_recording"]:
             control.transition("paused", has_unsaved=True, joint_mode="all", stage="Disconnected; save or discard")

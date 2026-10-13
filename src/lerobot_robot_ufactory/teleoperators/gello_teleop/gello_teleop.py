@@ -8,6 +8,7 @@ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnected
 from ..base_teleop import UFBaseTeleop
 from .gello_adapter import GripperDynamixelInfo, PatchedDynamixelRobotConfig
 from .gello_teleop_config import GelloTeleopConfig
+from .xy_plane_mode import XYPlaneMode
 
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class GelloTeleop(UFBaseTeleop):
         self._is_calibrated = True # CHECK!!
         self._current_runtime = None
         self._current_log = None
+        self._xy_plane_mode = XYPlaneMode() if config.xy_plane_only_mode_enabled else None
         self._joint_mode_lock = threading.Lock()
         self._joint_mode_key_pressed = False
         self._joint_mode_toggle_pending = False
@@ -450,6 +452,8 @@ class GelloTeleop(UFBaseTeleop):
         logger.info("Gello teleoperation %s", "enabled" if enabled else "disabled")
 
     def _reset_joint_control_mode(self) -> None:
+        if getattr(self, "_xy_plane_mode", None) is not None:
+            self._xy_plane_mode.reset()
         if not self.config.joint7_only_mode_enabled:
             return
         with self._joint_mode_lock:
@@ -458,6 +462,10 @@ class GelloTeleop(UFBaseTeleop):
             self._joint_mode_hold = None
             self._joint_mode_offsets[:] = 0.0
             self._joint_mode_realign = None
+
+    def set_xy_plane_mode_key(self, pressed: bool) -> None:
+        if self._xy_plane_mode is not None:
+            self._xy_plane_mode.key(pressed, self._teleop_enabled)
 
     def set_joint7_mode_key(self, pressed: bool) -> None:
         """Queue a toggle on a new S press; callbacks never perform device I/O."""
@@ -653,6 +661,8 @@ class GelloTeleop(UFBaseTeleop):
         fake_obs = dict({"joint_state": np.array([0.0]*(self.dof+1))}) # for agent.act() argument, actually no use
         action_array = self.gello_agent.act(fake_obs) # current gello joint pos as np.ndarray
         action_array = self._apply_joint_control_mode(action_array)
+        if getattr(self, "_xy_plane_mode", None) is not None:
+            action_array = self._xy_plane_mode.apply(action_array)
 
         action = {}
         for i in range(self.dof):

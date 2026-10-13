@@ -51,7 +51,13 @@ class Socket {
   constructor(url) { this.url = url; this.readyState = 1; this.sent = []; sockets.push(this); }
   send(message) { this.sent.push(JSON.parse(message)); }
 }
+const tabStorage = new Map([['gello-record-control-resume', 'saved-before-refresh']]);
 const context = vm.createContext({
+  sessionStorage: {
+    getItem: key => tabStorage.get(key) ?? null,
+    setItem: (key, value) => tabStorage.set(key, value),
+    removeItem: key => tabStorage.delete(key),
+  },
   document: {
     hidden: false,
     getElementById(id) { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
@@ -68,6 +74,13 @@ const context = vm.createContext({
 });
 vm.runInContext(script, context);
 const control = sockets[0];
+assert.equal(new URL(control.url).searchParams.get('resume'), 'saved-before-refresh',
+  'Refresh must send this tab’s saved control credential');
+vm.runInContext("rememberControlLease({controller:true,resume_token:'rotated-on-refresh'})", context);
+assert.equal(tabStorage.get('gello-record-control-resume'), 'rotated-on-refresh');
+vm.runInContext("rememberControlLease({controller:false,resume_token:null})", context);
+assert.equal(tabStorage.has('gello-record-control-resume'), false,
+  'Read-only pages must discard stale credentials');
 control.onopen();
 function snapshot(phase='recording', extra={}) {
   control.onmessage({ data: JSON.stringify({ type: 'snapshot', controller: true, client_id: 'owner',
@@ -267,3 +280,57 @@ console.log('Postprocessing checks passed: saved configuration, dataset isolatio
   assert.equal(confirmations.length, count, 'Resume and new launches must not show a rebuild confirmation');
   console.log('Launch checks passed: rebuild path display, cancellation, automatic path confirmation, resume and new.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+snapshot('recording', {j7_enabled:false, xy_plane_enabled:true});
+before = control.sent.length;
+key('keydown', 'KeyX', false, true);
+assert.equal(control.sent.length, before, 'Typing X must not switch modes');
+key('keydown', 'KeyX');
+key('keydown', 'KeyX', true);
+assert.equal(control.sent.length, before + 1, 'Holding X must switch once');
+assert.equal(control.sent.at(-1).action, 'xy_plane_mode');
+key('keyup', 'KeyX');
+elements.get('xyPlaneModeButton').onclick();
+assert.equal(control.sent.at(-1).action, 'xy_plane_mode');
+snapshot('recording', {xy_plane_enabled:true, joint_mode:'xy'});
+assert.equal(elements.get('jointMode').textContent, '仅 XY 平面平移');
+assert.match(elements.get('jointHint').textContent, /Z 和末端姿态锁定/);
+assert.match(elements.get('xyPlaneModeButton').innerHTML, /恢复全部关节/);
+for (const [phase, extra] of [['ready',{xy_plane_enabled:true}], ['recording',{xy_plane_enabled:false}]]) {
+  snapshot(phase, extra);
+  before = control.sent.length;
+  key('keydown', 'KeyX');
+  assert.equal(control.sent.length, before, 'X requires recording and opt-in');
+}
+console.log('XY-plane checks passed: shortcut, button, debounce, focus isolation, feedback and phase gating.');
+
+snapshot('recording', {joint_mode:'xy', xy_plane_enabled:true, xy_plane_warning:'逆解失败（code=1）'});
+assert.match(elements.get('jointHint').textContent, /逆解失败/);
+snapshot('recording', {joint_mode:'xy', xy_plane_enabled:true, xy_plane_warning:null});
+assert.doesNotMatch(elements.get('jointHint').textContent, /逆解失败/);
+console.log('XY-plane rejection warning display and recovery checks passed.');
+
+control.onmessage({data:JSON.stringify({type:'snapshot',controller:false,can_claim:false,
+  client_id:'observer',effective:null,state:{phase:'idle',session_id:null}})});
+assert.equal(elements.get('claim').disabled, false, 'Observer can explicitly take over an occupied lease');
+assert.equal(elements.get('claim').textContent, '接管控制权');
+elements.get('claim').onclick();
+assert.equal(control.sent.at(-1).type, 'claim');
+assert.equal(control.sent.at(-1).takeover, true);
+console.log('Explicit takeover control checks passed.');
+
+(async () => {
+  const reconnectSource = script.slice(script.indexOf('async function reconnectControl(){'), script.indexOf('function connectControl(){'));
+  const reconnectContext = vm.createContext({
+    fetch: async (url, options) => {
+      assert.equal(url, '/api/bootstrap');
+      assert.equal(options.cache, 'no-store');
+      return {ok:true,json:async()=>({token:'after-restart'})};
+    },
+    setTimeout() { throw new Error('Unexpected retry'); },
+  });
+  vm.runInContext("let TOKEN='before-restart';let connectedToken=null;function connectControl(){connectedToken=TOKEN}"+reconnectSource, reconnectContext);
+  await vm.runInContext('reconnectControl()', reconnectContext);
+  assert.equal(vm.runInContext('connectedToken', reconnectContext), 'after-restart');
+  console.log('Server restart refreshes the connection credential before reconnecting.');
+})().catch(error=>{console.error(error);process.exitCode=1});

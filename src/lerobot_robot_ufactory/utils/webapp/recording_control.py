@@ -22,7 +22,7 @@ class RecordingControl:
         self.state = {"session_id": session_id, "phase": "initializing", "version": 0,
                       "episode": 0, "saved": 0, "frames": 0, "elapsed": 0.0,
                       "joint_mode": "all", "gripper_mode": "keyboard",
-                      "j7_enabled": False, "error": None, "has_unsaved": False,
+                      "j7_enabled": False, "xy_plane_enabled": False, "error": None, "has_unsaved": False,
                       "stage": "Connecting devices"}
         self.actions = queue.Queue(maxsize=32)
         self._seen = deque(maxlen=1024)
@@ -85,6 +85,10 @@ class RecordingControl:
             self.state.update(values)
             if self.teleop is not None:
                 mode = "j7" if getattr(self.teleop, "_joint7_only_active", False) else "all"
+                if getattr(getattr(self.teleop, "_xy_plane_mode", None), "active", False):
+                    mode = "xy"
+                xy_mode = getattr(self.teleop, "_xy_plane_mode", None)
+                self.state["xy_plane_warning"] = getattr(xy_mode, "warning", None) if mode == "xy" else None
                 if mode != self.state["joint_mode"]:
                     self.state["joint_mode"] = mode
                     self.state["version"] += 1
@@ -99,7 +103,8 @@ class RecordingControl:
         self.teleop = teleop
         cfg = getattr(teleop, "config", None)
         self.state.update(gripper_mode=getattr(cfg, "gripper_control_mode", "keyboard"),
-                          j7_enabled=getattr(cfg, "joint7_only_mode_enabled", False))
+                          j7_enabled=getattr(cfg, "joint7_only_mode_enabled", False),
+                          xy_plane_enabled=getattr(cfg, "xy_plane_only_mode_enabled", False))
 
     def postprocess_progress(self, progress):
         values = {"stage": "Postprocessing: " + progress["stage"],
@@ -117,6 +122,9 @@ class RecordingControl:
                 setter = getattr(self.teleop, "set_gripper_keyboard_state", None)
                 if setter:
                     setter(close=False, open=False)
+                setter = getattr(self.teleop, "set_xy_plane_mode_key", None)
+                if setter:
+                    setter(False)
                 setter = getattr(self.teleop, "set_joint7_mode_key", None)
                 if setter:
                     setter(False)
@@ -176,6 +184,11 @@ class RecordingControl:
                     self.keys[message["key"]] = message["pressed"]
                     if self.teleop is not None:
                         self.teleop.set_gripper_keyboard_state(**self.keys)
+                elif action == "xy_plane_mode":
+                    if phase != "recording" or not self.state["xy_plane_enabled"]:
+                        raise ValueError("XY-plane mode can only be switched during supported recording")
+                    self.teleop.set_xy_plane_mode_key(True)
+                    self.teleop.set_xy_plane_mode_key(False)
                 elif action == "joint_mode":
                     if phase != "recording" or not self.state["j7_enabled"]:
                         raise ValueError("J7 mode can only be switched during supported recording")

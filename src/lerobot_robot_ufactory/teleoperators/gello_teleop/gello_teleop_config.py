@@ -34,6 +34,8 @@ class GelloTeleopConfig(TeleoperatorConfig):
     realtime_control_fps: int = 30
     # Explicit opt-in: S toggles holding J1-J6 while GELLO controls J7.
     joint7_only_mode_enabled: bool = False
+    # X toggles base-frame XY translation while holding Z and orientation.
+    xy_plane_only_mode_enabled: bool = False
     # Port to connect to the gello dummy arm
     port: str = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAJZYC7-if00-port0"
 
@@ -77,6 +79,12 @@ class GelloTeleopConfig(TeleoperatorConfig):
             raise ValueError("joint7_only_mode_enabled must be a boolean")
         if self.joint7_only_mode_enabled and tuple(self.joint_ids) != tuple(range(1, 8)):
             raise ValueError("joint7_only_mode_enabled requires arm joint IDs 1..7")
+        if type(self.xy_plane_only_mode_enabled) is not bool:
+            raise ValueError("xy_plane_only_mode_enabled must be a boolean")
+        if self.xy_plane_only_mode_enabled and tuple(self.joint_ids) != tuple(range(1, 8)):
+            raise ValueError("xy_plane_only_mode_enabled requires arm joint IDs 1..7")
+        if self.xy_plane_only_mode_enabled and self.joint7_only_mode_enabled:
+            raise ValueError("XY-plane and J7-only modes cannot be enabled together")
         if len(self.joint_ids) != len(self.joint_signs):
             raise ValueError("joint_ids and joint_signs must have the same length")
         if len(self.joint_ids) != len(self.start_joints):

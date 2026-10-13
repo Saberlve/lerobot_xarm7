@@ -1546,6 +1546,8 @@ def _print_record_controls(is_recorded, manual_mode, teleop=None):
         controls += '  [C] Close  [O] Open'
     if getattr(getattr(teleop, "config", None), "joint7_only_mode_enabled", False):
         controls += '  [S] J7 only / All joints'
+    if getattr(getattr(teleop, "config", None), "xy_plane_only_mode_enabled", False):
+        controls += '  [X] XY translation only / All joints'
     print(f'⌨   {controls}')
 
 
