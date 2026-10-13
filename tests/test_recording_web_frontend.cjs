@@ -304,6 +304,32 @@ for (const [phase, extra] of [['ready',{xy_plane_enabled:true}], ['recording',{x
 }
 console.log('XY-plane checks passed: shortcut, button, debounce, focus isolation, feedback and phase gating.');
 
+snapshot('recording', {precision_enabled:true, precision_scale:0.2, precision_active:false});
+before = control.sent.length;
+key('keydown', 'KeyZ', false, true);
+assert.equal(control.sent.length, before, 'Typing Z must not switch modes');
+key('keydown', 'KeyZ');
+key('keydown', 'KeyZ', true);
+assert.equal(control.sent.length, before + 1, 'Holding Z must switch once');
+assert.equal(control.sent.at(-1).action, 'precision_mode');
+key('keyup', 'KeyZ');
+elements.get('precisionModeButton').onclick();
+assert.equal(control.sent.at(-1).action, 'precision_mode');
+snapshot('recording', {precision_enabled:true, precision_scale:0.2, precision_active:true});
+assert.match(elements.get('jointMode').textContent, /关节精调 ×0\.2/);
+assert.match(elements.get('precisionModeButton').innerHTML, /恢复正常倍率/);
+assert.match(elements.get('jointHint').textContent, /按 Z 恢复正常倍率/);
+snapshot('recording', {precision_enabled:true, precision_scale:0.2, precision_active:false});
+assert.match(elements.get('precisionModeButton').innerHTML, /切换为关节精调/);
+assert.match(elements.get('jointHint').textContent, /按 Z 切换关节精调/);
+for (const [phase, extra] of [['ready',{precision_enabled:true}], ['recording',{precision_enabled:false}]]) {
+  snapshot(phase, extra);
+  before = control.sent.length;
+  key('keydown', 'KeyZ');
+  assert.equal(control.sent.length, before, 'Z requires recording and opt-in');
+}
+console.log('Joint precision checks passed: shortcut, button, debounce, focus isolation, feedback and phase gating.');
+
 snapshot('recording', {joint_mode:'xy', xy_plane_enabled:true, xy_plane_warning:'逆解失败（code=1）'});
 assert.match(elements.get('jointHint').textContent, /逆解失败/);
 snapshot('recording', {joint_mode:'xy', xy_plane_enabled:true, xy_plane_warning:null});
@@ -334,3 +360,71 @@ console.log('Explicit takeover control checks passed.');
   assert.equal(vm.runInContext('connectedToken', reconnectContext), 'after-restart');
   console.log('Server restart refreshes the connection credential before reconnecting.');
 })().catch(error=>{console.error(error);process.exitCode=1});
+
+
+snapshot('recording', {j7_keyboard_enabled:true, j7_keyboard_busy:false});
+before = control.sent.length;
+assert.equal(key('keydown', 'ArrowUp', false, true).prevented, false);
+assert.equal(control.sent.length, before);
+assert.equal(key('keydown', 'ArrowUp').prevented, true);
+key('keydown', 'ArrowUp', true);
+assert.equal(control.sent.length, before + 1);
+assert.equal(control.sent.at(-1).action, 'joint7_plus');
+key('keyup', 'ArrowUp');
+key('keydown', 'ArrowDown');
+assert.equal(control.sent.at(-1).action, 'joint7_minus');
+key('keyup', 'ArrowDown');
+elements.get('joint7Plus').onclick();
+assert.equal(control.sent.at(-1).action, 'joint7_plus');
+snapshot('recording', {j7_keyboard_enabled:true, j7_keyboard_busy:true, joint_mode:'j7_keyboard'});
+assert.match(elements.get('jointMode').textContent, /旋转中/);
+assert.equal(elements.get('joint7Plus').disabled, true);
+assert.equal(elements.get('jointModeButton').disabled, false);
+before = control.sent.length;
+key('keydown', 'ArrowUp');
+assert.equal(control.sent.length, before);
+for (const phase of ['ready','paused','saving','postprocessing','finished']) {
+  snapshot(phase, {j7_keyboard_enabled:true});
+  assert.equal(elements.get('joint7Minus').disabled, true);
+}
+snapshot('recording', {j7_keyboard_enabled:false});
+assert.equal(elements.get('joint7Plus').disabled, true);
+
+snapshot('recording', {j7_keyboard_enabled:true, j7_keyboard_hold_to_rotate:true, j7_keyboard_busy:false});
+key('keyup', 'ArrowUp');
+key('keydown', 'ArrowUp');
+assert.equal(control.sent.at(-1).action, 'joint7_plus');
+assert.equal(control.sent.at(-1).pressed, true);
+snapshot('recording', {j7_keyboard_enabled:true, j7_keyboard_hold_to_rotate:true, j7_keyboard_busy:true});
+assert.equal(elements.get('joint7Plus').disabled, false);
+key('keyup', 'ArrowUp');
+assert.equal(control.sent.at(-1).pressed, false);
+assert.match(elements.get('joint7Plus').textContent, /按住/);
+elements.get('joint7Minus').setPointerCapture=()=>{};
+elements.get('joint7Minus').onpointerdown({preventDefault(){}, pointerId:1});
+assert.equal(control.sent.at(-1).action, 'joint7_minus');
+assert.equal(control.sent.at(-1).pressed, true);
+elements.get('joint7Minus').onpointerup();
+assert.equal(control.sent.at(-1).pressed, false);
+
+snapshot('recording', {j7_keyboard_enabled:true, j7_keyboard_angle_deg:150, j7_keyboard_hold_to_rotate:false});
+assert.match(elements.get('joint7Plus').textContent, /150/);
+assert.match(elements.get('jointHint').textContent, /Ctrl/);
+for (const [modifier,angle] of [['ctrl',10],['shift',60]]) {
+  for (const [code,action] of [['ArrowUp','joint7_plus'],['ArrowDown','joint7_minus']]) {
+    events.keydown({code, ctrlKey:modifier==='ctrl', shiftKey:modifier==='shift', target:{closest:()=>null}, preventDefault(){}});
+    assert.equal(control.sent.at(-1).action, action);
+    assert.equal(control.sent.at(-1).modifier, modifier);
+    key('keyup', code);
+  }
+  elements.get('joint7Plus'+angle).onclick();
+  assert.equal(control.sent.at(-1).modifier, modifier);
+  elements.get('joint7Minus'+angle).onclick();
+  assert.equal(control.sent.at(-1).action, 'joint7_minus');
+  assert.equal(control.sent.at(-1).modifier, modifier);
+}
+snapshot('recording', {j7_keyboard_enabled:true, j7_keyboard_busy:true});
+assert.equal(elements.get('joint7Plus10').disabled, true);
+snapshot('recording', {j7_keyboard_enabled:true, j7_keyboard_hold_to_rotate:true});
+assert.equal(elements.get('joint7Plus10').classList.contains('hidden'), true);
+console.log('Removal shortcuts and buttons route 150/10/60 degree actions; tighten keeps hold controls.');

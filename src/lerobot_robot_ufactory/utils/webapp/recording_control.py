@@ -22,7 +22,9 @@ class RecordingControl:
         self.state = {"session_id": session_id, "phase": "initializing", "version": 0,
                       "episode": 0, "saved": 0, "frames": 0, "elapsed": 0.0,
                       "joint_mode": "all", "gripper_mode": "keyboard",
-                      "j7_enabled": False, "xy_plane_enabled": False, "error": None, "has_unsaved": False,
+                      "j7_enabled": False, "j7_keyboard_enabled": False, "j7_keyboard_busy": False, "xy_plane_enabled": False,
+                      "precision_enabled": False, "precision_active": False,
+                      "precision_scale": 1.0, "error": None, "has_unsaved": False,
                       "stage": "Connecting devices"}
         self.actions = queue.Queue(maxsize=32)
         self._seen = deque(maxlen=1024)
@@ -82,18 +84,31 @@ class RecordingControl:
     def progress(self, **values):
         with self.lock:
             stage_changed = "stage" in values and values["stage"] != self.state.get("stage")
+            mode_changed = False
             self.state.update(values)
             if self.teleop is not None:
                 mode = "j7" if getattr(self.teleop, "_joint7_only_active", False) else "all"
                 if getattr(getattr(self.teleop, "_xy_plane_mode", None), "active", False):
                     mode = "xy"
+                if getattr(self.teleop, "_keyboard_j7_active", False):
+                    mode = "j7_keyboard"
+                busy = bool(getattr(self.teleop, "keyboard_joint7_busy", lambda: False)())
+                if busy != self.state["j7_keyboard_busy"]:
+                    self.state["j7_keyboard_busy"] = busy
+                    mode_changed = True
                 xy_mode = getattr(self.teleop, "_xy_plane_mode", None)
                 self.state["xy_plane_warning"] = getattr(xy_mode, "warning", None) if mode == "xy" else None
                 if mode != self.state["joint_mode"]:
                     self.state["joint_mode"] = mode
                     self.state["version"] += 1
+                    mode_changed = True
+                active = bool(getattr(self.teleop, "_joint_precision_active", False))
+                if active != self.state["precision_active"]:
+                    self.state["precision_active"] = active
+                    self.state["version"] += 1
+                    mode_changed = True
             now = self.clock()
-            if not stage_changed and now - self._last_progress < 0.2:
+            if not stage_changed and not mode_changed and now - self._last_progress < 0.2:
                 return
             self._last_progress = now
             snapshot = dict(self.state)
@@ -103,8 +118,13 @@ class RecordingControl:
         self.teleop = teleop
         cfg = getattr(teleop, "config", None)
         self.state.update(gripper_mode=getattr(cfg, "gripper_control_mode", "keyboard"),
+                          j7_keyboard_enabled=getattr(cfg, "joint7_keyboard_mode_enabled", False),
+                          j7_keyboard_hold_to_rotate=getattr(cfg, "joint7_keyboard_hold_to_rotate", False),
+                          j7_keyboard_angle_deg=getattr(cfg, "joint7_keyboard_angle_deg", 120.0),
                           j7_enabled=getattr(cfg, "joint7_only_mode_enabled", False),
-                          xy_plane_enabled=getattr(cfg, "xy_plane_only_mode_enabled", False))
+                          xy_plane_enabled=getattr(cfg, "xy_plane_only_mode_enabled", False),
+                          precision_enabled=getattr(cfg, "joint_precision_mode_enabled", False),
+                          precision_scale=getattr(cfg, "joint_precision_scale", 1.0))
 
     def postprocess_progress(self, progress):
         values = {"stage": "Postprocessing: " + progress["stage"],
@@ -125,6 +145,10 @@ class RecordingControl:
                 setter = getattr(self.teleop, "set_xy_plane_mode_key", None)
                 if setter:
                     setter(False)
+                setter = getattr(self.teleop, "set_joint7_keyboard_key", None)
+                if setter:
+                    setter(1, False)
+                    setter(-1, False)
                 setter = getattr(self.teleop, "set_joint7_mode_key", None)
                 if setter:
                     setter(False)
@@ -170,7 +194,7 @@ class RecordingControl:
                 if not isinstance(request_id, str) or not request_id or request_id in self._seen:
                     raise ValueError("Duplicate or missing request identifier")
                 self._seen.append(request_id)
-                release = action == "release" or (action == "gripper" and not message.get("pressed"))
+                release = action == "release" or (action in ("gripper", "joint7_plus", "joint7_minus") and message.get("pressed") is False)
                 if not release and message.get("version") != self.state["version"]:
                     raise ValueError("State changed; retry using the current state")
                 phase = self.state["phase"]
@@ -189,11 +213,35 @@ class RecordingControl:
                         raise ValueError("XY-plane mode can only be switched during supported recording")
                     self.teleop.set_xy_plane_mode_key(True)
                     self.teleop.set_xy_plane_mode_key(False)
+                elif action in ("joint7_plus", "joint7_minus"):
+                    hold = self.state.get("j7_keyboard_hold_to_rotate", False)
+                    pressed = message.get("pressed", None if hold else True)
+                    if type(pressed) is not bool:
+                        raise ValueError("Keyboard J7 requires a boolean pressed event")
+                    if pressed and (phase != "recording" or not self.state["j7_keyboard_enabled"]):
+                        raise ValueError("Keyboard J7 requires supported recording")
+                    direction = 1 if action == "joint7_plus" else -1
+                    modifier = message.get("modifier", "none")
+                    if modifier not in ("none", "ctrl", "shift"):
+                        raise ValueError("Invalid keyboard J7 modifier")
+                    if modifier != "none" and not hold:
+                        accepted = self.teleop.set_joint7_keyboard_key(direction, pressed, modifier=modifier)
+                    else:
+                        accepted = self.teleop.set_joint7_keyboard_key(direction, pressed)
+                    if not hold and pressed:
+                        self.teleop.set_joint7_keyboard_key(direction, False)
+                        if not accepted:
+                            raise ValueError("J7 is already rotating; wait before the next turn")
                 elif action == "joint_mode":
-                    if phase != "recording" or not self.state["j7_enabled"]:
+                    if phase != "recording" or not (self.state["j7_enabled"] or self.state["joint_mode"] == "j7_keyboard"):
                         raise ValueError("J7 mode can only be switched during supported recording")
                     self.teleop.set_joint7_mode_key(True)
                     self.teleop.set_joint7_mode_key(False)
+                elif action == "precision_mode":
+                    if phase != "recording" or not self.state["precision_enabled"]:
+                        raise ValueError("Joint precision mode can only be switched during supported recording")
+                    self.teleop.set_joint_precision_mode_key(True)
+                    self.teleop.set_joint_precision_mode_key(False)
                 elif action == "start":
                     if phase != "ready":
                         raise ValueError("Start requires ready state")
@@ -373,7 +421,7 @@ def controlled_recording(
                     control.transition("ready", stage="Disconnected during preparation; reconnect to start")
                     continue
                 control.transition("recording", frames=0, elapsed=0.0, joint_mode="all", error=None,
-                                   has_unsaved=False, stage="Recording")
+                                   precision_active=False, has_unsaved=False, stage="Recording")
                 try:
                     synchronization = recording.record_loop(
                         robot=robot, events=control.events, fps=cfg.dataset.fps,
@@ -403,12 +451,13 @@ def controlled_recording(
                     control.events.update(exit_early=False, rerecord_episode=False, pause_recording=False)
                     control.transition("ready", error=str(exc), has_unsaved=False,
                                        saved=saved_count, episode=saved_count, joint_mode="all",
+                                       precision_active=False,
                                        stage="Control failed; current take discarded; check robot before retry")
                     continue
                 owner.track(synchronization)
                 teleop.set_teleop_enabled(False)
                 control.release_keys()
-                control.progress(joint_mode="all")
+                control.progress(joint_mode="all", precision_active=False)
                 if control.events["stop_recording"]:
                     owner.discard(synchronization)
                     synchronization = None
@@ -419,7 +468,7 @@ def controlled_recording(
                     control.transition("paused", stage="Disconnected: save or discard this episode",
                                        has_unsaved=recording._episode_buffer_size(
                                            recording._get_episode_buffer(dataset)) > 0,
-                                       joint_mode="all")
+                                       joint_mode="all", precision_active=False)
                     decision = control.wait_action(idle_preview)
                 if decision == "exit":
                     owner.discard(synchronization)
@@ -453,7 +502,7 @@ def controlled_recording(
                     break
                 control.transition("ready", saved=saved_count, episode=saved_count,
                                    has_unsaved=False, frames=0, elapsed=0.0, joint_mode="all",
-                                   stage="Ready for next episode")
+                                   precision_active=False, stage="Ready for next episode")
         finally:
             control.release_keys()
     if raw_store is not None or control.events["stop_recording"]:

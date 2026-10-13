@@ -77,6 +77,14 @@ teleop:
   realtime_control_fps: 30
   # Press S to hold J1-J6 and control only J7; press S again for all joints.
   joint7_only_mode_enabled: true
+  # Up/Down: J7 +/-150 deg, then open to 50. Ctrl: +/-10 deg; Shift: +/-60 deg, no opening.
+  # One rotation per press, no key-repeat/queued rotations. Ramped target: 2 s.
+  joint7_keyboard_mode_enabled: true
+  joint7_keyboard_speed_deg_s: 75.0
+  joint7_keyboard_angle_deg: 150.0
+  # Press Z to scale J1-J6 motion; J7 stays unchanged.
+  joint_precision_mode_enabled: true
+  joint_precision_scale: 0.2  # 0.2 = 缩小5倍；0.1 = 缩小10倍；范围 (0, 1]
   port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]

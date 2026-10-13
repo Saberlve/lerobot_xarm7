@@ -295,6 +295,10 @@ def teleop_loop(cfg: TeleopConfig):
                             print('⌨   [ESC] Exit  [Space] Pause  [←] Pause / Reset')
                         if getattr(teleop.config, "xy_plane_only_mode_enabled", False):
                             print('⌨   [X] XY translation only / All joints')
+                        if getattr(teleop.config, "joint_precision_mode_enabled", False):
+                            print(f'⌨   [Z] J1-J6 precision (x{teleop.config.joint_precision_scale:g}) / Normal')
+                        if getattr(teleop.config, "joint7_keyboard_mode_enabled", False):
+                            print('⌨   [↑/↓] Hold to rotate J7; release to stop (no gripper opening)  [S] Resume GELLO' if getattr(teleop.config, 'joint7_keyboard_hold_to_rotate', False) else f'⌨   [↑/↓] J7 +/-{teleop.config.joint7_keyboard_angle_deg:g} deg + open; Ctrl: 10 deg / Shift: 60 deg, no opening  [S] Resume GELLO')
                         if getattr(teleop.config, "joint7_only_mode_enabled", False):
                             print('⌨   [S] J7 only / All joints')
                 except Exception as e:
@@ -310,8 +314,12 @@ def teleop_loop(cfg: TeleopConfig):
                     controls += '  [C] Close  [O] Open'
                 if getattr(teleop.config, "xy_plane_only_mode_enabled", False):
                     controls += '  [X] XY translation only / All joints'
+                if getattr(teleop.config, "joint_precision_mode_enabled", False):
+                    print(f'⌨   [Z] J1-J6 precision (x{teleop.config.joint_precision_scale:g}) / Normal')
                 if getattr(teleop.config, "joint7_only_mode_enabled", False):
                     controls += '  [S] J7 only / All joints'
+                if getattr(teleop.config, "joint7_keyboard_mode_enabled", False):
+                    controls += ('  [↑/↓] Hold to rotate J7; release to stop (no gripper opening)  [S] Resume GELLO' if getattr(teleop.config, 'joint7_keyboard_hold_to_rotate', False) else f'  [↑/↓] J7 +/-{teleop.config.joint7_keyboard_angle_deg:g} deg + open; Ctrl: 10 deg / Shift: 60 deg, no opening  [S] Resume GELLO')
                 print(f'⌨   {controls}')
             else:
                 print('⌨   [ESC] Exit  [Space] Start  [←] Reset')

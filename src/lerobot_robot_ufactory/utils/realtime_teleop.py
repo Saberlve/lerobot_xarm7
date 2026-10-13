@@ -18,6 +18,18 @@ GRIPPER_CURRENT_FEEDBACK_KEY = "gripper.current_ma"
 
 def update_gello_joint_mode_key(teleop, key, pressed: bool) -> None:
     """Route mode keys without importing the keyboard backend."""
+    if getattr(key, "name", None) in ("ctrl", "ctrl_l", "ctrl_r", "shift", "shift_l", "shift_r"):
+        handler = getattr(teleop, "set_joint7_keyboard_modifier", None)
+        if callable(handler):
+            handler(key.name, pressed)
+    if getattr(key, "name", None) in ("up", "down"):
+        handler = getattr(teleop, "set_joint7_keyboard_key", None)
+        if callable(handler):
+            handler(1 if key.name == "up" else -1, pressed)
+    if getattr(key, "char", None) in ("z", "Z"):
+        handler = getattr(teleop, "set_joint_precision_mode_key", None)
+        if callable(handler):
+            handler(pressed)
     xy_mode = getattr(teleop, "_xy_plane_mode", None)
     if xy_mode is not None and getattr(key, "char", None) in ("x", "X"):
         xy_mode.key(pressed, teleop._teleop_enabled)
@@ -33,10 +45,12 @@ def apply_pending_gello_joint_mode(robot, teleop, observation: dict) -> None:
     if xy_mode is not None and teleop._teleop_enabled:
         xy_mode.prepare(robot, observation)
     pending = getattr(teleop, "joint_control_mode_switch_pending", None)
-    if not callable(pending) or not pending():
+    feedback_pending = getattr(teleop, "keyboard_joint7_feedback_pending", None)
+    needs_feedback = callable(feedback_pending) and feedback_pending()
+    if not (callable(pending) and pending()) and not needs_feedback:
         return
     if getattr(robot, "_control_space", None) != "joint":
-        raise ValueError("GELLO J7-only mode requires joint-space robot control")
+        raise ValueError("GELLO joint modes require joint-space robot control")
     latest_state = getattr(robot, "latest_state_before", None)
     if callable(latest_state):
         sample = latest_state(time.perf_counter())
@@ -47,13 +61,21 @@ def apply_pending_gello_joint_mode(robot, teleop, observation: dict) -> None:
     else:
         prefix = getattr(robot, "prefix", "")
         joint_observation = {
-            f"J{i}.pos": observation[f"{prefix}J{i}.pos"] for i in range(1, 7)
+            f"J{i}.pos": observation[f"{prefix}J{i}.pos"] for i in range(1, 8 if getattr(getattr(teleop, "config", None), "joint7_keyboard_mode_enabled", False) else 7)
         }
     teleop.apply_pending_joint_control_mode(joint_observation)
+    update_joint7 = getattr(teleop, "update_keyboard_joint7_observation", None)
+    if callable(update_joint7):
+        update_joint7(joint_observation)
 
 
 def apply_keyboard_gripper_stop(robot, teleop, command: dict) -> dict:
     """Handle release after action processing, on the robot I/O owner thread."""
+    # Attach the constraint after action processors, on every send path.
+    # It is command metadata, not an extra dataset feature.
+    if getattr(teleop, "_keyboard_j7_active", False):
+        command = dict(command)
+        command["_hold_joints_1_to_6"] = True
     consume_stop = getattr(teleop, "consume_gripper_stop_request", None)
     if not callable(consume_stop) or not consume_stop():
         return command

@@ -183,3 +183,18 @@ def test_read_tcp_z_disconnects_when_fk_fails(tmp_path):
         read_tcp_z(config_path, arm_factory=lambda _: arm)
 
     assert arm.disconnected is True
+
+
+def test_keyboard_j7_guard_never_projects_onto_locked_joints():
+    robot = make_guard_robot()
+    # This would normally move J1 to satisfy the TCP-height constraint.
+    requested = [-0.1, 0, 0, 0, 0, 0, 0.2]
+    assert robot._guard_joint_target(requested, hold_first_six=True) is None
+    assert robot._last_guard_path == 'keyboard_j7_hold'
+    assert robot._last_safe_joint_target == pytest.approx(np.zeros(7))
+    safe = [0.1, 0, 0, 0, 0, 0, 0.2]
+    result = robot._guard_joint_target(safe, hold_first_six=True)
+    assert result[:6] == pytest.approx(safe[:6])
+    assert 0 < result[6] <= 0.2
+    robot._local_kinematics = None
+    assert robot._guard_joint_target(safe, hold_first_six=True) is None

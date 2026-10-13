@@ -356,7 +356,7 @@ def test_simulated_session_preview_lease_pause_save_and_exit(project):
             preflight = await (await client.post("/api/preflight", json={"path": item["path"],
                 "revision": item["revision"]}, headers=headers)).json()
             launch = {"ticket": preflight["ticket"], "client_id": initial["client_id"],
-                      "dataset_mode": "new", "gripper_mode": "keyboard", "j7_enabled": True,
+                      "dataset_mode": "new", "gripper_mode": "keyboard", "j7_enabled": True, "j7_keyboard_enabled": True,
                       "cameras": ["wrist_camera"]}
             response = await client.post("/api/start", json=launch, headers=headers)
             assert response.status == 200, await response.text()
@@ -381,6 +381,14 @@ def test_simulated_session_preview_lease_pause_save_and_exit(project):
             while manager.state["joint_mode"] != "j7" and time.monotonic() < deadline:
                 await asyncio.sleep(0.03)
             assert manager.state["joint_mode"] == "j7"
+            assert manager.state["j7_keyboard_enabled"]
+            assert manager.effective["config"]["teleop"]["joint7_keyboard_mode_enabled"]
+            await act("joint7_plus")
+            deadline = time.monotonic() + 3
+            while manager.state["joint_mode"] != "j7_keyboard" and time.monotonic() < deadline:
+                await asyncio.sleep(0.03)
+            assert manager.state["joint_mode"] == "j7_keyboard"
+            assert manager.state["j7_keyboard_busy"]
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await ws.close()
@@ -562,6 +570,41 @@ def test_xy_plane_web_mode_queues_toggle_and_reports_applied_state():
     assert not teleop._xy_plane_mode.pending
 
 
+def test_precision_web_mode_queues_toggle_and_reports_applied_state():
+    control, teleop, messages, now = mailbox()
+    teleop.config.joint_precision_mode_enabled = True
+    teleop.config.joint_precision_scale = 0.2
+    teleop._joint_precision_active = False
+    presses = []
+    teleop.set_joint_precision_mode_key = lambda pressed: presses.append(pressed)
+    control.bind(teleop)
+    assert control.state['precision_enabled']
+    assert control.state['precision_scale'] == 0.2
+    command(control, 'precision_mode')
+    assert not messages[-1]['ok']
+    assert not presses
+    control.transition('recording')
+    command(control, 'precision_mode', version=-1)
+    assert not presses
+    command(control, 'precision_mode')
+    assert messages[-1]['ok']
+    assert presses == [True, False]
+    # Browser command queues the toggle; status follows the control owner's result.
+    assert control.state['precision_active'] is False
+    teleop._joint_precision_active = True
+    now[0] += 1
+    control.progress()
+    assert control.state['precision_active'] is True
+    teleop._joint_precision_active = False
+    now[0] += 1
+    control.progress()
+    assert control.state['precision_active'] is False
+    control.state['precision_enabled'] = False
+    command(control, 'precision_mode')
+    assert not messages[-1]['ok']
+    assert presses == [True, False]
+
+
 @pytest.mark.parametrize('close_first', [False, True])
 def test_refresh_recovers_control_without_old_socket_releasing_new_owner(project, close_first):
     async def scenario():
@@ -650,3 +693,83 @@ def test_explicit_takeover_releases_old_owner_and_rotates_credential(project):
             assert messages == [{'action': 'disconnect'}]
             await new.close()
     asyncio.run(scenario())
+
+
+def test_keyboard_j7_mailbox_gating_status_busy_and_release():
+    control, teleop, messages, now = mailbox()
+    presses = []
+    teleop.config.joint7_keyboard_mode_enabled = True
+    teleop._keyboard_j7_active = False
+    teleop.keyboard_joint7_busy = lambda: teleop._keyboard_j7_active
+    def rotate(direction, pressed):
+        presses.append((direction, pressed))
+        if pressed:
+            if teleop._keyboard_j7_active:
+                return False
+            teleop._keyboard_j7_active = True
+            return True
+        return False
+    teleop.set_joint7_keyboard_key = rotate
+    control.bind(teleop)
+    command(control, 'joint7_plus')
+    assert messages[-1]['ok'] is False  # ready state cannot move
+    control.transition('recording')
+    command(control, 'joint7_plus', session_id='old-session')
+    command(control, 'joint7_plus', version=-1)
+    assert not presses
+    command(control, 'joint7_plus')
+    assert messages[-1]['ok']
+    assert presses == [(1, True), (1, False)]
+    control.progress()
+    assert control.state['joint_mode'] == 'j7_keyboard'
+    assert control.state['j7_keyboard_busy']
+    command(control, 'joint7_minus')
+    assert messages[-1]['ok'] is False
+    control.release_keys()
+    assert presses[-2:] == [(1, False), (-1, False)]
+    control.transition('paused')
+    command(control, 'joint7_minus')
+    assert messages[-1]['ok'] is False
+    control.state['j7_keyboard_enabled'] = False
+    control.transition('recording')
+    command(control, 'joint7_plus')
+    assert messages[-1]['ok'] is False
+
+
+def test_keyboard_j7_hold_web_edges_and_stale_release():
+    control, teleop, messages, now = mailbox()
+    presses = []
+    teleop.config.joint7_keyboard_mode_enabled = True
+    teleop.config.joint7_keyboard_hold_to_rotate = True
+    teleop.set_joint7_keyboard_key = lambda direction, pressed: presses.append((direction, pressed)) or pressed
+    control.bind(teleop)
+    control.transition('recording')
+    command(control, 'joint7_plus')
+    assert not messages[-1]['ok']
+    assert not presses
+    command(control, 'joint7_plus', pressed=True)
+    assert messages[-1]['ok']
+    assert presses == [(1, True)]
+    command(control, 'joint7_plus', pressed=False, version=-1)
+    assert messages[-1]['ok']
+    assert presses[-1] == (1, False)
+    control.release_keys()
+    assert presses[-2:] == [(1, False), (-1, False)]
+
+
+@pytest.mark.parametrize('modifier', ['ctrl', 'shift'])
+def test_keyboard_j7_web_forwards_modifier(modifier):
+    control, teleop, messages, now = mailbox()
+    presses = []
+    teleop.config.joint7_keyboard_mode_enabled = True
+    teleop.config.joint7_keyboard_angle_deg = 150
+    teleop.set_joint7_keyboard_key = lambda direction, pressed, **kwargs: presses.append((direction, pressed, kwargs)) or pressed
+    control.bind(teleop)
+    assert control.state['j7_keyboard_angle_deg'] == 150
+    control.transition('recording')
+    command(control, 'joint7_minus', modifier=modifier)
+    assert messages[-1]['ok']
+    assert presses == [(-1, True, {'modifier': modifier}), (-1, False, {})]
+    command(control, 'joint7_plus', modifier='invalid')
+    assert not messages[-1]['ok']
+    assert len(presses) == 2

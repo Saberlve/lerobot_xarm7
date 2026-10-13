@@ -1548,6 +1548,10 @@ def _print_record_controls(is_recorded, manual_mode, teleop=None):
         controls += '  [S] J7 only / All joints'
     if getattr(getattr(teleop, "config", None), "xy_plane_only_mode_enabled", False):
         controls += '  [X] XY translation only / All joints'
+    if getattr(getattr(teleop, "config", None), "joint_precision_mode_enabled", False):
+        controls += f'  [Z] J1-J6 precision (x{teleop.config.joint_precision_scale:g}) / Normal'
+    if getattr(getattr(teleop, "config", None), "joint7_keyboard_mode_enabled", False):
+        controls += ('  [↑/↓] Hold to rotate J7; release to stop (no gripper opening)  [S] Resume GELLO' if getattr(teleop.config, 'joint7_keyboard_hold_to_rotate', False) else f'  [↑/↓] J7 +/-{teleop.config.joint7_keyboard_angle_deg:g} deg + open; Ctrl: 10 deg / Shift: 60 deg, no opening  [S] Resume GELLO')
     print(f'⌨   {controls}')
 
 

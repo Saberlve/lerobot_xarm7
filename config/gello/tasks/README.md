@@ -2,7 +2,7 @@
 
 每个任务一个子文件夹。配置是当前 `../xarm7_gello_base.yaml` 的独立副本；后续修改 base 不会自动同步。
 
-共享设置与擦白板配置对齐，数据集路径、repo_id 和语言指令因任务而异；旋下螺母配置额外启用 J7 模式切换。控制 30 Hz，RGB/数据集 15 Hz，Photon 60 Hz；记录关节和 TCP（both）；关闭 GELLO 电流控制；夹爪由键盘控制，夹爪监测关闭；开启网页预览；最多录制 75 段，图像写入使用 1 个进程、每相机 1 个线程；结束录制后计算并保存 Mesh3DFlow。
+共享设置与擦白板配置对齐，数据集路径、repo_id 和语言指令因任务而异；旋下螺母和拧紧螺母配置额外启用 J7 与可调倍率微调模式切换。控制 30 Hz，RGB/数据集 15 Hz，Photon 60 Hz；记录关节和 TCP（both）；关闭 GELLO 电流控制；夹爪由键盘控制，夹爪监测关闭；开启网页预览；最多录制 75 段，图像写入使用 1 个进程、每相机 1 个线程；结束录制后计算并保存 Mesh3DFlow。
 
 | 任务 | 配置 | 数据集保存路径 | repo_id |
 |---|---|---|---|
@@ -13,6 +13,7 @@
 | 擦白板 | [xarm7_gello_whiteboard_erase.yaml](whiteboard_erase/xarm7_gello_whiteboard_erase.yaml) | `datasets/xarm7_gello_tasks/whiteboard_erase` | `ufactory/xarm7_gello_whiteboard_erase` |
 | 回力小车 | [xarm7_gello_pullback_car.yaml](pullback_car/xarm7_gello_pullback_car.yaml) | `datasets/xarm7_gello_tasks/pullback_car` | `ufactory/xarm7_gello_pullback_car` |
 | 旋下螺母 | [xarm7_gello_nut_removal.yaml](nut_removal/xarm7_gello_nut_removal.yaml) | `datasets/xarm7_gello_tasks/nut_removal` | `ufactory/xarm7_gello_nut_removal` |
+| 拧紧螺母 | [xarm7_gello_nut_tighten.yaml](nut_tighten/xarm7_gello_nut_tighten.yaml) | `datasets/xarm7_gello_tasks/nut_tighten` | `ufactory/xarm7_gello_nut_tighten` |
 | 大号 USB 插入 | [xarm7_gello_usb_insert.yaml](usb_insert/xarm7_gello_usb_insert.yaml) | `datasets/xarm7_gello_tasks/usb_insert` | `ufactory/xarm7_gello_usb_insert` |
 
 从项目根目录启动，例如：
@@ -49,3 +50,32 @@ teleop:
 所有任务沿用 base 的 `min_tcp_z_mm: 2`，实际接触高度需按各任务布置确认。鸡蛋配置同时适用于生鸡蛋和熟鸡蛋；如需分别统计，可复制配置并为两组设置不同的数据集路径和 repo_id。
 
 旋下螺母配置启用 `defer_processing: true`：每条只提交完整原始图像、动作和时间索引，随后可开始下一条；退出整场录制后统一计算 Mesh3DFlow 和编码视频，录制期间不后台推理。后处理失败时原始 checkpoint 保留，可使用原配置加 `--postprocess-only` 重试。
+
+
+旋下螺母 `nut_removal` 和拧紧螺母 `nut_tighten` 已设置
+`teleop.joint_precision_mode_enabled: true`。开始遥操作后，按 `Z` 启用关节微调：
+J1–J6 相对于切换时的角度变化乘以配置的 `joint_precision_scale`（默认 0.2，即 1/5），J7 和夹爪保持原有映射；再次按 `Z`
+恢复正常倍率。两次切换均从机器人当前 J1–J6 位置重新对齐，避免目标跳变。
+`S` 锁定优先，锁定期间可用 `Z` 选择退出 S 后的倍率，保持的 J1–J6 不变。
+长按 Z 只切换一次；暂停时不切换，暂停、重置或下一段录制恢复正常倍率。
+此功能仅支持七关节的关节空间控制，不能与 XY 平面模式同时配置。
+配置启用后，网页录制工作台同样接受 `Z` 键和“切换为关节精调”按钮，并在运动模式处显示当前倍率状态；也可在启动会话前用“允许关节精调”开关做会话级控制。
+
+在任务 YAML 的 `teleop` 下调整倍率（范围为 `0 < joint_precision_scale <= 1`）：
+
+```yaml
+teleop:
+  joint_precision_mode_enabled: true
+  joint_precision_scale: 0.2  # 0.2 缩小5倍，0.1 缩小10倍，0.5 缩小2倍
+```
+
+### 螺母任务：键盘 J7
+
+`nut_removal`、`nut_tighten` 均开启 `teleop.joint7_keyboard_mode_enabled`。
+
+- **拆卸 `nut_removal`**：普通 ↑ / ↓ 每次触发 ±150°，目标按 75°/秒推进，约 2 秒到达终点；之后继续保持终点目标，直到实时缓存中的实测 J7 与目标相差不超过 0.5°，才自动打开夹爪到 50（最大 84），夹爪速度沿用 `robot.gripper_speed`。**Ctrl + ↑ / ↓** 转 ±10°，**Shift + ↑ / ↓** 转 ±60°，同样等待实测到位，但均不自动张爪。未到位时保持忙碌、不接受下一次旋转；反馈过期按现有控制错误处理，不会因计时结束而张爪。复用已有实时状态缓存，不增加设备查询。组合键在按下方向键时确定，同时按 Ctrl 和 Shift 时 Ctrl 优先。网页提供对应按钮和快捷键。
+- **拧紧 `nut_tighten`**：速度 60°/秒，配置 `joint7_keyboard_hold_to_rotate: true`。按住 ↑ / ↓ 持续正转 / 反转，松开停止并保持当前实测 J7 角度，不自动张开夹爪。持续按住可超过 120°，目标限制在 J7 关节限位内；同时按下两个方向则停止。
+
+首次操作锁定 J1–J6；按 **S** 恢复 GELLO，并重新对齐全部七个关节。暂停、复位、断线清除控制状态。
+网页按钮和上下键遵循相同模式：拧紧任务按住旋转，松开按钮、页面失焦或释放按键时停止；输入框内的上下键不触发旋转。
+仅 XY 平面模式不能与键盘 J7 模式同时启用。旋转通过现有控制、限位/安全检查和数据记录链路执行。

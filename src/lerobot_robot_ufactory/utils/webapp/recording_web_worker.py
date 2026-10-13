@@ -65,7 +65,7 @@ def worker_main(project, folder, session_id, connection, images, options):
             control.prepare_dataset = lambda: prepare_web_dataset(project, cfg, raw, options)
             record(cfg, recording_control=control)
         stage = "Postprocessing complete" if control.state["phase"] == "postprocessing" else "Devices released"
-        control.transition("finished", has_unsaved=False, joint_mode="all", stage=stage)
+        control.transition("finished", has_unsaved=False, joint_mode="all", precision_active=False, stage=stage)
     except BaseException as exc:
         traceback.print_exc()
         control.transition("error", error=str(exc), stage="Session failed; see console log")
@@ -118,16 +118,46 @@ def _simulate(cfg, control, preview, folder):
 
     class Teleop:
         config = cfg.teleop
+        _keyboard_j7_active = False
+        _keyboard_j7_until = 0.0
         _joint7_only_active = False
+        _joint_precision_active = False
         _xy_plane_mode = SimpleNamespace(active=False)
         def set_xy_plane_mode_key(self, pressed):
             if pressed:
                 self._xy_plane_mode.active = not self._xy_plane_mode.active
         def set_gripper_keyboard_state(self, **keys):
             pass
+        def keyboard_joint7_busy(self):
+            return time.monotonic() < self._keyboard_j7_until
+        def set_joint7_keyboard_key(self, direction, pressed, *, modifier="none"):
+            if self.config.joint7_keyboard_hold_to_rotate:
+                if not pressed:
+                    self._keyboard_j7_until = 0.0
+                    return False
+                if self.config.joint7_keyboard_mode_enabled:
+                    self._keyboard_j7_active = True
+                    self._joint7_only_active = False
+                    self._keyboard_j7_until = float("inf")
+                    return True
+                return False
+            if pressed and self.config.joint7_keyboard_mode_enabled and not self.keyboard_joint7_busy():
+                self._keyboard_j7_active = True
+                self._joint7_only_active = False
+                self._keyboard_j7_until = time.monotonic() + {"ctrl": 10.0, "shift": 60.0}.get(modifier, self.config.joint7_keyboard_angle_deg) / self.config.joint7_keyboard_speed_deg_s
+                return True
+            return False
         def set_joint7_mode_key(self, pressed):
             if pressed:
-                self._joint7_only_active = not self._joint7_only_active
+                if self._keyboard_j7_active:
+                    self._keyboard_j7_active = False
+                    self._keyboard_j7_until = 0.0
+                    self._joint7_only_active = False
+                else:
+                    self._joint7_only_active = not self._joint7_only_active
+        def set_joint_precision_mode_key(self, pressed):
+            if pressed and self.config.joint_precision_mode_enabled:
+                self._joint_precision_active = not self._joint_precision_active
 
     teleop = Teleop()
     control.bind(teleop)
@@ -154,7 +184,10 @@ def _simulate(cfg, control, preview, folder):
         if action != "start":
             break
         control.events.update(exit_early=False, rerecord_episode=False, pause_recording=False)
+        teleop._keyboard_j7_active = False
+        teleop._keyboard_j7_until = 0.0
         teleop._joint7_only_active = False
+        teleop._joint_precision_active = False
         teleop._xy_plane_mode.active = False
         control.transition("recording", frames=0, elapsed=0, stage="SIMULATION recording")
         started = time.monotonic()
@@ -167,11 +200,15 @@ def _simulate(cfg, control, preview, folder):
                 break
             time.sleep(0.02)
         control.release_keys()
+        teleop._keyboard_j7_active = False
+        teleop._keyboard_j7_until = 0.0
         teleop._joint7_only_active = False
+        teleop._joint_precision_active = False
         teleop._xy_plane_mode.active = False
         decision = "discard" if control.events["rerecord_episode"] else "save"
         if control.events["pause_recording"]:
-            control.transition("paused", has_unsaved=True, joint_mode="all", stage="Disconnected; save or discard")
+            control.transition("paused", has_unsaved=True, joint_mode="all", precision_active=False,
+                               stage="Disconnected; save or discard")
             decision = control.wait_action(frames)
         if decision == "exit" or control.events["stop_recording"]:
             break
@@ -184,4 +221,5 @@ def _simulate(cfg, control, preview, folder):
             control.transition("resetting", stage="SIMULATION reset (no motion)")
         control.events.update(exit_early=False, rerecord_episode=False, pause_recording=False)
         control.transition("ready", saved=count, episode=count, frames=0, elapsed=0,
-                           has_unsaved=False, joint_mode="all", stage="SIMULATION ready")
+                           has_unsaved=False, joint_mode="all", precision_active=False,
+                           stage="SIMULATION ready")

@@ -33,12 +33,33 @@ class GelloTeleop(UFBaseTeleop):
         self._current_log = None
         self._xy_plane_mode = XYPlaneMode() if config.xy_plane_only_mode_enabled else None
         self._joint_mode_lock = threading.Lock()
+        self._precision_key_pressed = False
+        self._precision_toggle_pending = False
+        self._joint_precision_active = False
         self._joint_mode_key_pressed = False
         self._joint_mode_toggle_pending = False
         self._joint7_only_active = False
         self._joint_mode_hold = None
         self._joint_mode_offsets = np.zeros(6)
         self._joint_mode_realign = None
+        self._keyboard_j7_active = False
+        self._keyboard_j7_pending = 0
+        self._keyboard_j7_keys = {1: False, -1: False}
+        self._keyboard_j7_direction = 0
+        self._keyboard_j7_stop_pending = False
+        self._keyboard_j7_pose = None
+        self._keyboard_j7_start = 0.0
+        self._keyboard_j7_target = 0.0
+        self._keyboard_j7_started = 0.0
+        self._keyboard_j7_gripper_opened = False
+        self._keyboard_j7_modifiers = set()
+        self._keyboard_j7_angle_deg = self.config.joint7_keyboard_angle_deg
+        self._keyboard_j7_auto_open = True
+        self._keyboard_j7_until = 0.0
+        self._keyboard_j7_waiting = False
+        self._keyboard_j7_arrived = False
+        self._keyboard_j7_offset = 0.0
+        self._keyboard_j7_realign = None
         self._keyboard_gripper_state = {"close": False, "open": False}
         self._keyboard_gripper_target = None
         self._keyboard_gripper_observed_position = None
@@ -454,22 +475,112 @@ class GelloTeleop(UFBaseTeleop):
     def _reset_joint_control_mode(self) -> None:
         if getattr(self, "_xy_plane_mode", None) is not None:
             self._xy_plane_mode.reset()
-        if not self.config.joint7_only_mode_enabled:
+        if not (self.config.joint7_only_mode_enabled or self.config.joint_precision_mode_enabled or self.config.joint7_keyboard_mode_enabled):
             return
         with self._joint_mode_lock:
+            self._precision_toggle_pending = False
+            self._joint_precision_active = False
             self._joint_mode_toggle_pending = False
             self._joint7_only_active = False
             self._joint_mode_hold = None
             self._joint_mode_offsets[:] = 0.0
             self._joint_mode_realign = None
+            self._keyboard_j7_active = False
+            self._keyboard_j7_pending = 0
+            self._keyboard_j7_direction = 0
+            self._keyboard_j7_stop_pending = False
+            self._keyboard_j7_pose = None
+            self._keyboard_j7_until = 0.0
+            self._keyboard_j7_waiting = False
+            self._keyboard_j7_arrived = False
+            self._keyboard_j7_offset = 0.0
+            self._keyboard_j7_realign = None
+
+    def set_joint7_keyboard_modifier(self, name: str, pressed: bool) -> None:
+        with self._joint_mode_lock:
+            if pressed:
+                self._keyboard_j7_modifiers.add(name)
+            else:
+                self._keyboard_j7_modifiers.discard(name)
+
+    def set_joint7_keyboard_key(self, direction: int, pressed: bool, *, modifier: str | None = None) -> bool:
+        """Queue rotation or a measured-position stop, without device I/O."""
+        if type(direction) is not int or direction not in (-1, 1) or type(pressed) is not bool:
+            raise ValueError("Keyboard J7 requires direction +/-1 and boolean pressed")
+        if modifier is not None and modifier not in ("none", "ctrl", "shift"):
+            raise ValueError("Keyboard J7 modifier must be none, ctrl, or shift")
+        if not self.config.joint7_keyboard_mode_enabled:
+            return False
+        with self._joint_mode_lock:
+            rising = pressed and not self._keyboard_j7_keys[direction]
+            self._keyboard_j7_keys[direction] = pressed
+            if self.config.joint7_keyboard_hold_to_rotate:
+                if not pressed:
+                    if self._keyboard_j7_pending == direction:
+                        self._keyboard_j7_pending = 0
+                    if self._keyboard_j7_direction == direction:
+                        self._keyboard_j7_direction = 0
+                        self._keyboard_j7_stop_pending = True
+                    return False
+                if self._keyboard_j7_keys[-direction]:
+                    self._keyboard_j7_pending = 0
+                    if self._keyboard_j7_direction:
+                        self._keyboard_j7_direction = 0
+                        self._keyboard_j7_stop_pending = True
+                    return False
+                if rising and self._teleop_enabled:
+                    self._keyboard_j7_pending = direction
+                    return True
+                return False
+            if not rising or not self._teleop_enabled:
+                return False
+            if self._keyboard_j7_pending or self._keyboard_j7_waiting:
+                return False  # Never accumulate turns while a rotation is running.
+            if modifier is None:
+                modifier = "ctrl" if any(k.startswith("ctrl") for k in self._keyboard_j7_modifiers) else "shift" if self._keyboard_j7_modifiers else "none"
+            self._keyboard_j7_angle_deg = {"ctrl": 10.0, "shift": 60.0}.get(modifier, self.config.joint7_keyboard_angle_deg)
+            self._keyboard_j7_auto_open = modifier == "none"
+            self._keyboard_j7_pending = direction
+            return True
+
+    def keyboard_joint7_busy(self) -> bool:
+        with self._joint_mode_lock:
+            return bool(self._keyboard_j7_pending or self._keyboard_j7_direction or self._keyboard_j7_stop_pending or self._keyboard_j7_waiting)
+
+    def keyboard_joint7_feedback_pending(self) -> bool:
+        with self._joint_mode_lock:
+            return self._keyboard_j7_waiting
+
+    def update_keyboard_joint7_observation(self, observation: dict) -> None:
+        """Confirm arrival from the control owner's fresh cached RT sample."""
+        with self._joint_mode_lock:
+            if not self._keyboard_j7_waiting:
+                return
+            measured = float(observation["J7.pos"])
+            if not math.isfinite(measured):
+                raise ValueError("Keyboard J7 requires finite robot joint positions")
+            # Compare absolute angles: a full turn must not count as zero motion.
+            self._keyboard_j7_arrived = (
+                time.monotonic() >= self._keyboard_j7_until
+                and abs(measured - self._keyboard_j7_target) <= math.radians(0.5)
+            )
 
     def set_xy_plane_mode_key(self, pressed: bool) -> None:
         if self._xy_plane_mode is not None:
             self._xy_plane_mode.key(pressed, self._teleop_enabled)
 
+    def set_joint_precision_mode_key(self, pressed: bool) -> None:
+        """Queue Z on its rising edge; device reads stay on the control owner."""
+        if not self.config.joint_precision_mode_enabled:
+            return
+        with self._joint_mode_lock:
+            if pressed and not self._precision_key_pressed and self._teleop_enabled:
+                self._precision_toggle_pending = not self._precision_toggle_pending
+            self._precision_key_pressed = pressed
+
     def set_joint7_mode_key(self, pressed: bool) -> None:
         """Queue a toggle on a new S press; callbacks never perform device I/O."""
-        if not self.config.joint7_only_mode_enabled:
+        if not (self.config.joint7_only_mode_enabled or self.config.joint7_keyboard_mode_enabled):
             return
         with self._joint_mode_lock:
             if pressed and not self._joint_mode_key_pressed and self._teleop_enabled:
@@ -477,46 +588,128 @@ class GelloTeleop(UFBaseTeleop):
             self._joint_mode_key_pressed = pressed
 
     def joint_control_mode_switch_pending(self) -> bool:
-        if not self.config.joint7_only_mode_enabled:
-            return False
         with self._joint_mode_lock:
-            return self._joint_mode_toggle_pending
+            return bool(self._joint_mode_toggle_pending or self._precision_toggle_pending or self._keyboard_j7_pending or self._keyboard_j7_stop_pending)
 
     def apply_pending_joint_control_mode(self, observation: dict) -> None:
         """Apply queued toggles on the control owner using measured robot joints."""
-        if not self.config.joint7_only_mode_enabled:
-            return
         with self._joint_mode_lock:
-            if not self._joint_mode_toggle_pending or not self._teleop_enabled:
+            if not self._teleop_enabled or not (
+                self._joint_mode_toggle_pending or self._precision_toggle_pending or self._keyboard_j7_pending or self._keyboard_j7_stop_pending
+            ):
                 return
             positions = np.asarray([observation[f"J{i}.pos"] for i in range(1, 7)], dtype=float)
             if not np.isfinite(positions).all():
                 raise ValueError("Joint control mode requires finite robot joint positions")
-            if self._joint7_only_active:
-                # Rebase the first six follower targets on the next GELLO read.
-                # Preserve J7's continuous mapping and the gripper target.
-                self._joint_mode_realign = positions
+            keyboard_pose = None
+            if self._keyboard_j7_pending or self._keyboard_j7_stop_pending or (self._keyboard_j7_active and self._joint_mode_toggle_pending):
+                keyboard_pose = np.asarray([observation[f"J{i}.pos"] for i in range(1, 8)], dtype=float)
+                if not np.isfinite(keyboard_pose).all():
+                    raise ValueError("Keyboard J7 requires finite robot joint positions")
+            if self._keyboard_j7_stop_pending:
+                self._keyboard_j7_start = keyboard_pose[6]
+                self._keyboard_j7_target = keyboard_pose[6]
+                self._keyboard_j7_direction = 0
+                self._keyboard_j7_stop_pending = False
+            if self._keyboard_j7_active and self._joint_mode_toggle_pending:
+                # S always exits keyboard control. Rebase J7 too, so the leader's
+                # old wrist angle cannot undo the commanded turn.
+                self._keyboard_j7_active = False
+                self._keyboard_j7_direction = 0
+                self._keyboard_j7_until = 0.0
+                self._keyboard_j7_waiting = False
+                self._keyboard_j7_arrived = False
+                self._keyboard_j7_pending = 0
+                self._keyboard_j7_realign = keyboard_pose[6]
                 self._joint7_only_active = False
                 self._joint_mode_hold = None
-            else:
-                self._joint_mode_hold = positions
-                self._joint7_only_active = True
+                self._joint_mode_realign = positions
+                self._joint_mode_toggle_pending = False
+            if self._keyboard_j7_pending:
+                direction = self._keyboard_j7_pending
+                target = keyboard_pose[6] + direction * math.radians(self._keyboard_j7_angle_deg)
+                if not self.config.joint7_keyboard_hold_to_rotate and not -2 * math.pi <= target <= 2 * math.pi:
+                    self._keyboard_j7_pending = 0
+                    raise ValueError("Keyboard J7 target exceeds xArm7 joint limits")
+                if not self._keyboard_j7_active:
+                    self._keyboard_j7_pose = keyboard_pose.copy()
+                self._keyboard_j7_active = True
+                self._joint7_only_active = False
+                self._joint_mode_hold = None
+                self._keyboard_j7_start = keyboard_pose[6]
+                self._keyboard_j7_target = keyboard_pose[6] + direction * math.radians(self._keyboard_j7_angle_deg)
+                self._keyboard_j7_started = time.monotonic()
+                self._keyboard_j7_gripper_opened = False
+                self._keyboard_j7_arrived = False
+                self._keyboard_j7_waiting = not self.config.joint7_keyboard_hold_to_rotate
+                if self.config.joint7_keyboard_hold_to_rotate:
+                    self._keyboard_j7_direction = direction
+                    self._keyboard_j7_target = keyboard_pose[6]
+                    self._keyboard_j7_until = 0.0
+                else:
+                    self._keyboard_j7_until = self._keyboard_j7_started + self._keyboard_j7_angle_deg / self.config.joint7_keyboard_speed_deg_s
+                self._keyboard_j7_pending = 0
+                self._joint_mode_toggle_pending = False
+                logger.info("Keyboard J7: direction %+d, hold=%s; J1-J6 held", direction, self.config.joint7_keyboard_hold_to_rotate)
+            if self._precision_toggle_pending:
+                self._joint_precision_active = not self._joint_precision_active
+            if self._joint_mode_toggle_pending:
+                self._joint7_only_active = not self._joint7_only_active
+                self._joint_mode_hold = positions if self._joint7_only_active else None
+            if not self._joint7_only_active and not self._keyboard_j7_active:
+                # Anchor the new gain at the measured follower pose on the next
+                # leader read. J7's continuous mapping and gripper are untouched.
+                self._joint_mode_realign = positions
             self._joint_mode_toggle_pending = False
-            mode = "J7 only (J1-J6 held)" if self._joint7_only_active else "all joints"
-        logger.info("GELLO joint control mode: %s", mode)
+            self._precision_toggle_pending = False
+            mode = "keyboard J7 (J1-J6 held)" if self._keyboard_j7_active else "J7 only (J1-J6 held)" if self._joint7_only_active else "all joints"
+            scale = self.config.joint_precision_scale if self._joint_precision_active else 1.0
+        logger.info("GELLO joint control mode: %s; J1-J6 scale: %s", mode, scale)
 
     def _apply_joint_control_mode(self, action_array):
-        if not self.config.joint7_only_mode_enabled:
+        if not (self.config.joint7_only_mode_enabled or self.config.joint_precision_mode_enabled or self.config.joint7_keyboard_mode_enabled):
             return action_array
         action_array = np.asarray(action_array, dtype=float).copy()
         with self._joint_mode_lock:
+            scale = self.config.joint_precision_scale if self._joint_precision_active else 1.0
             if self._joint_mode_realign is not None:
-                self._joint_mode_offsets = self._joint_mode_realign - action_array[:6]
+                self._joint_mode_offsets = self._joint_mode_realign - scale * action_array[:6]
                 self._joint_mode_realign = None
-            if self._joint7_only_active:
+            if self._keyboard_j7_realign is not None:
+                self._keyboard_j7_offset = self._keyboard_j7_realign - action_array[6]
+                self._keyboard_j7_realign = None
+            action_array[6] += self._keyboard_j7_offset
+            if self._keyboard_j7_active:
+                action_array[:6] = self._keyboard_j7_pose[:6]
+                elapsed = max(0.0, time.monotonic() - self._keyboard_j7_started)
+                distance = min(math.radians(self._keyboard_j7_angle_deg), elapsed * math.radians(self.config.joint7_keyboard_speed_deg_s))
+                action_array[6] = self._keyboard_j7_start + math.copysign(distance, self._keyboard_j7_target - self._keyboard_j7_start)
+                if self.config.joint7_keyboard_hold_to_rotate:
+                    if self._keyboard_j7_direction:
+                        self._keyboard_j7_target = float(np.clip(
+                            self._keyboard_j7_start + self._keyboard_j7_direction * elapsed
+                            * math.radians(self.config.joint7_keyboard_speed_deg_s),
+                            -2 * math.pi, 2 * math.pi,
+                        ))
+                    action_array[6] = self._keyboard_j7_target
+                elif self._keyboard_j7_arrived:
+                    self._keyboard_j7_waiting = False
+                if self._keyboard_j7_arrived and self._keyboard_j7_auto_open:
+                    # Normalized gripper actions are 0=open, 1=closed.
+                    # Send a position goal; the robot retains its configured speed.
+                    gripper_target = 1.0 - 50.0 / 84.0
+                    if self.config.gripper_control_mode == "keyboard":
+                        if not self._keyboard_j7_gripper_opened:
+                            with self._keyboard_gripper_lock:
+                                self._keyboard_gripper_target = gripper_target
+                                self._keyboard_gripper_stop_pending = False
+                    else:
+                        action_array[self.dof] = gripper_target
+                    self._keyboard_j7_gripper_opened = True
+            elif self._joint7_only_active:
                 action_array[:6] = self._joint_mode_hold
             else:
-                action_array[:6] += self._joint_mode_offsets
+                action_array[:6] = scale * action_array[:6] + self._joint_mode_offsets
         return action_array
 
     def set_gripper_keyboard_state(self, *, close: bool, open: bool) -> None:

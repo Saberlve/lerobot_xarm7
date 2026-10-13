@@ -122,12 +122,20 @@ class SessionManager:
             j7 = payload.get("j7_enabled", raw["teleop"].get("joint7_only_mode_enabled", False))
             if type(j7) is not bool:
                 raise ConfigError("j7_enabled must be boolean")
+            j7_keyboard = payload.get("j7_keyboard_enabled", raw["teleop"].get("joint7_keyboard_mode_enabled", False))
+            if type(j7_keyboard) is not bool:
+                raise ConfigError("j7_keyboard_enabled must be boolean")
+            raw["teleop"]["joint7_keyboard_mode_enabled"] = j7_keyboard
             xy_plane = payload.get("xy_plane_enabled", raw["teleop"].get("xy_plane_only_mode_enabled", False))
             if type(xy_plane) is not bool:
                 raise ConfigError("xy_plane_enabled must be boolean")
+            precision = payload.get("precision_enabled", raw["teleop"].get("joint_precision_mode_enabled", False))
+            if type(precision) is not bool:
+                raise ConfigError("precision_enabled must be boolean")
             raw["teleop"]["xy_plane_only_mode_enabled"] = xy_plane
             raw["teleop"]["gripper_control_mode"] = gripper_mode
             raw["teleop"]["joint7_only_mode_enabled"] = j7
+            raw["teleop"]["joint_precision_mode_enabled"] = precision
             text = yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
             await asyncio.to_thread(validate_text, text)
             cameras = payload.get("cameras", [])
@@ -167,7 +175,10 @@ class SessionManager:
                           "operation": "postprocess" if mode == "postprocess" else "recording",
                           "saved": status["episodes"] if mode == "resume" else 0,
                           "frames": 0, "elapsed": 0, "stage": "Starting worker", "has_unsaved": False,
-                          "gripper_mode": gripper_mode, "j7_enabled": j7, "xy_plane_enabled": xy_plane, "joint_mode": "all"}
+                          "gripper_mode": gripper_mode, "j7_enabled": j7, "j7_keyboard_enabled": j7_keyboard, "j7_keyboard_busy": False, "xy_plane_enabled": xy_plane,
+                          "precision_enabled": precision, "precision_active": False,
+                          "precision_scale": raw["teleop"].get("joint_precision_scale", 1.0),
+                          "joint_mode": "all"}
             return self.snapshot(client_id)
 
     def snapshot(self, client_id=None):

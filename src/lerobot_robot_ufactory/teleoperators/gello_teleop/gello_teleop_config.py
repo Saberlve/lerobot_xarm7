@@ -34,6 +34,16 @@ class GelloTeleopConfig(TeleoperatorConfig):
     realtime_control_fps: int = 30
     # Explicit opt-in: S toggles holding J1-J6 while GELLO controls J7.
     joint7_only_mode_enabled: bool = False
+    # Up/Down latch J1-J6 and rotate J7 by the configured angle; S resumes GELLO.
+    joint7_keyboard_mode_enabled: bool = False
+    joint7_keyboard_speed_deg_s: float = 60.0
+    joint7_keyboard_angle_deg: float = 120.0
+    # Hold to rotate continuously; release stops, without automatic gripper opening.
+    joint7_keyboard_hold_to_rotate: bool = False
+    # Z toggles scaled joint deltas for J1-J6; J7 and gripper stay unchanged.
+    joint_precision_mode_enabled: bool = False
+    # Multiplier for J1-J6 deltas in precision mode: 0.2 means five times smaller.
+    joint_precision_scale: float = 0.2
     # X toggles base-frame XY translation while holding Z and orientation.
     xy_plane_only_mode_enabled: bool = False
     # Port to connect to the gello dummy arm
@@ -79,12 +89,47 @@ class GelloTeleopConfig(TeleoperatorConfig):
             raise ValueError("joint7_only_mode_enabled must be a boolean")
         if self.joint7_only_mode_enabled and tuple(self.joint_ids) != tuple(range(1, 8)):
             raise ValueError("joint7_only_mode_enabled requires arm joint IDs 1..7")
+        if (
+            isinstance(self.joint7_keyboard_angle_deg, bool)
+            or not isinstance(self.joint7_keyboard_angle_deg, (int, float))
+            or not math.isfinite(self.joint7_keyboard_angle_deg)
+            or not 0 < self.joint7_keyboard_angle_deg <= 360
+        ):
+            raise ValueError("joint7_keyboard_angle_deg must be finite and in (0, 360]")
+        if type(self.joint7_keyboard_hold_to_rotate) is not bool:
+            raise ValueError("joint7_keyboard_hold_to_rotate must be a boolean")
+        if type(self.joint7_keyboard_mode_enabled) is not bool:
+            raise ValueError("joint7_keyboard_mode_enabled must be a boolean")
+        if self.joint7_keyboard_mode_enabled and tuple(self.joint_ids) != tuple(range(1, 8)):
+            raise ValueError("joint7_keyboard_mode_enabled requires arm joint IDs 1..7")
+        if self.joint7_keyboard_mode_enabled and self.xy_plane_only_mode_enabled:
+            raise ValueError("XY-plane and keyboard J7 modes cannot be enabled together")
+        if (
+            isinstance(self.joint7_keyboard_speed_deg_s, bool)
+            or not isinstance(self.joint7_keyboard_speed_deg_s, (int, float))
+            or not math.isfinite(self.joint7_keyboard_speed_deg_s)
+            or not 0 < self.joint7_keyboard_speed_deg_s <= 120
+        ):
+            raise ValueError("joint7_keyboard_speed_deg_s must be finite and in (0, 120]")
         if type(self.xy_plane_only_mode_enabled) is not bool:
             raise ValueError("xy_plane_only_mode_enabled must be a boolean")
         if self.xy_plane_only_mode_enabled and tuple(self.joint_ids) != tuple(range(1, 8)):
             raise ValueError("xy_plane_only_mode_enabled requires arm joint IDs 1..7")
         if self.xy_plane_only_mode_enabled and self.joint7_only_mode_enabled:
             raise ValueError("XY-plane and J7-only modes cannot be enabled together")
+        if type(self.joint_precision_mode_enabled) is not bool:
+            raise ValueError("joint_precision_mode_enabled must be a boolean")
+        if (
+            isinstance(self.joint_precision_scale, bool)
+            or not isinstance(self.joint_precision_scale, (int, float))
+            or not math.isfinite(self.joint_precision_scale)
+            or not 0 < self.joint_precision_scale <= 1
+        ):
+            raise ValueError("joint_precision_scale must be finite and in (0, 1]")
+        if self.joint_precision_mode_enabled and tuple(self.joint_ids) != tuple(range(1, 8)):
+            raise ValueError("joint_precision_mode_enabled requires arm joint IDs 1..7")
+        if self.joint_precision_mode_enabled and self.xy_plane_only_mode_enabled:
+            raise ValueError("XY-plane and joint precision modes cannot be enabled together")
         if len(self.joint_ids) != len(self.joint_signs):
             raise ValueError("joint_ids and joint_signs must have the same length")
         if len(self.joint_ids) != len(self.start_joints):

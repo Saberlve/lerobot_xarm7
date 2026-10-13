@@ -901,7 +901,7 @@ class UFRobot(Robot, Thread):
             logger.error("TCP z safety guard rejected target: %s", message)
             self._tcp_z_last_error_log_time = now
 
-    def _guard_joint_target(self, command: list[float]) -> np.ndarray | None:
+    def _guard_joint_target(self, command: list[float], *, hold_first_six: bool = False) -> np.ndarray | None:
         """Project a joint update onto the local TCP-height constraint."""
         desired = np.asarray(command, dtype=np.float64)
         fallback = self._last_safe_joint_target
@@ -910,7 +910,7 @@ class UFRobot(Robot, Thread):
                 raise RuntimeError("local kinematics is unavailable")
             if not self._local_model_matches_rt():
                 self._last_guard_path = "model_fault"
-                return None if fallback is None else np.asarray(fallback, dtype=np.float64).copy()
+                return None if hold_first_six or fallback is None else np.asarray(fallback, dtype=np.float64).copy()
             if desired.shape != (7,) or not np.all(np.isfinite(desired)):
                 raise ValueError("joint target has invalid shape or contains NaN/Inf")
             if fallback is None:
@@ -922,6 +922,12 @@ class UFRobot(Robot, Thread):
             delta = (desired - previous + math.pi) % (2 * math.pi) - math.pi
             delta = np.clip(delta, -TCP_Z_MAX_JOINT_STEP_RAD, TCP_Z_MAX_JOINT_STEP_RAD)
             candidate = np.clip(previous + delta, XARM7_JOINT_LOWER_RAD, XARM7_JOINT_UPPER_RAD)
+            if hold_first_six:
+                # Keyboard wrist turns must never project a height violation
+                # onto J1-J6. Keep their measured anchor exactly, or reject.
+                if np.any(desired < XARM7_JOINT_LOWER_RAD) or np.any(desired > XARM7_JOINT_UPPER_RAD):
+                    raise ValueError("Keyboard J7 target exceeds joint limits")
+                candidate[:6] = desired[:6]
             soft_floor = float(self._tcp_z_soft_floor_mm)
 
             requested_z = float(self._local_kinematics.tcp_position(candidate)[2])
@@ -930,6 +936,11 @@ class UFRobot(Robot, Thread):
                 self._last_safe_joint_target = candidate.copy()
                 self._log_tcp_z_clamp(False)
                 return candidate
+
+            if hold_first_six:
+                self._last_guard_path = "keyboard_j7_hold"
+                self._log_tcp_z_clamp(True, requested_z)
+                return None
 
             projected = candidate
             for _ in range(LOCAL_GUARD_MAX_ITERATIONS):
@@ -973,7 +984,7 @@ class UFRobot(Robot, Thread):
         except Exception as exc:
             self._last_guard_path = "local_hold"
             self._log_tcp_z_guard_error(str(exc))
-            return None if fallback is None else np.asarray(fallback, dtype=np.float64).copy()
+            return None if hold_first_six or fallback is None else np.asarray(fallback, dtype=np.float64).copy()
 
     def _local_model_matches_rt(self) -> bool:
         """Compare co-timed RT joint/TCP feedback without making an SDK request."""
@@ -1850,7 +1861,10 @@ class UFRobot(Robot, Thread):
             for i in range(self._dof):
                 cmd_list[i] = action[f"{self.prefix}J{i+1}.pos"]
             guard_start_t = time.perf_counter() if logs_enabled else None
-            safe_cmd = self._guard_joint_target(cmd_list)
+            if action.get("_hold_joints_1_to_6", False):
+                safe_cmd = self._guard_joint_target(cmd_list, hold_first_six=True)
+            else:
+                safe_cmd = self._guard_joint_target(cmd_list)
             if logs_enabled:
                 self.logs["safety_guard_dt_s"] = time.perf_counter() - guard_start_t
                 self.logs["safety_guard_path"] = self._last_guard_path
