@@ -1,7 +1,8 @@
-# Task: 弹簧小车
+# Task: 回力小车 (pullback toy car)
+# Finish line: 600 mm long, 30 mm wide; the car front crosses the near edge.
 # Settings aligned with the whiteboard_erase config; this is a standalone config.
 # Run from the project root:
-# .venv/bin/uf-lerobot-record --config_path config/gello/tasks/spring_cart/xarm7_gello_spring_cart.yaml
+# .venv/bin/uf-lerobot-record --config_path config/gello/tasks/pullback_car/xarm7_gello_pullback_car.yaml
 
 defer_processing: true
 synchronize: true
@@ -99,10 +100,10 @@ dataset:
   num_image_writer_processes: 1
   num_image_writer_threads_per_camera: 1
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_tasks/spring_cart"
-  repo_id: "ufactory/xarm7_gello_spring_cart"
+  root: "datasets/xarm7_gello_tasks/pullback_car"
+  repo_id: "ufactory/xarm7_gello_pullback_car"
   # Task description stored in the dataset.
-  single_task: "Manipulate the spring-loaded cart."
+  single_task: "Pull back the toy car and release it to cross the finish line."
   fps: 15
   episode_time_s: 960  # max duration for one episode
   push_to_hub: False

@@ -11,7 +11,7 @@
 | 按压洗手液 | [xarm7_gello_handwash_press.yaml](handwash_press/xarm7_gello_handwash_press.yaml) | `datasets/xarm7_gello_tasks/handwash_press` | `ufactory/xarm7_gello_handwash_press` |
 | 齿轮装配 | [xarm7_gello_gear_assembly.yaml](gear_assembly/xarm7_gello_gear_assembly.yaml) | `datasets/xarm7_gello_tasks/gear_assembly` | `ufactory/xarm7_gello_gear_assembly` |
 | 擦白板 | [xarm7_gello_whiteboard_erase.yaml](whiteboard_erase/xarm7_gello_whiteboard_erase.yaml) | `datasets/xarm7_gello_tasks/whiteboard_erase` | `ufactory/xarm7_gello_whiteboard_erase` |
-| 弹簧小车 | [xarm7_gello_spring_cart.yaml](spring_cart/xarm7_gello_spring_cart.yaml) | `datasets/xarm7_gello_tasks/spring_cart` | `ufactory/xarm7_gello_spring_cart` |
+| 回力小车 | [xarm7_gello_pullback_car.yaml](pullback_car/xarm7_gello_pullback_car.yaml) | `datasets/xarm7_gello_tasks/pullback_car` | `ufactory/xarm7_gello_pullback_car` |
 | 旋下螺母 | [xarm7_gello_nut_removal.yaml](nut_removal/xarm7_gello_nut_removal.yaml) | `datasets/xarm7_gello_tasks/nut_removal` | `ufactory/xarm7_gello_nut_removal` |
 | 大号 USB 插入 | [xarm7_gello_usb_insert.yaml](usb_insert/xarm7_gello_usb_insert.yaml) | `datasets/xarm7_gello_tasks/usb_insert` | `ufactory/xarm7_gello_usb_insert` |
 
@@ -44,7 +44,7 @@ teleop:
 仅连接并读取 GELLO J1–J7，不读取 ID8；夹爪目标从 xArm 反馈对齐，仍由 C/O 控制。
 使用 GELLO 夹爪或启用夹爪电流、力反馈时保留 ID8 通信，所需电机通信超时仍会停止控制。
 
-弹簧小车只提供了任务名称，目前使用通用描述 `Manipulate the spring-loaded cart.`，具体运动方向和终止条件需补充。USB 插入配置以完全插入并短暂保持为结束条件。
+回力小车指令为 `Pull back the toy car and release it to cross the finish line.`（后拉回力小车，释放使其越过终点线）。终点线长 60 cm、宽 3 cm；以车头越过靠近起点的一侧边缘为成功判定基准。USB 插入配置以完全插入并短暂保持为结束条件。
 
 所有任务沿用 base 的 `min_tcp_z_mm: 2`，实际接触高度需按各任务布置确认。鸡蛋配置同时适用于生鸡蛋和熟鸡蛋；如需分别统计，可复制配置并为两组设置不同的数据集路径和 repo_id。
 
