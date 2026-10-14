@@ -1,7 +1,7 @@
-# Task: 大号 USB 插入
+# Task: 充电器插头插入插座
 # Settings aligned with the whiteboard_erase config; this is a standalone config.
 # Run from the project root:
-# .venv/bin/uf-lerobot-record --config_path config/gello/tasks/usb_insert/xarm7_gello_usb_insert.yaml
+# .venv/bin/uf-lerobot-record --config_path config/gello/tasks/charger_insert/xarm7_gello_charger_insert.yaml
 
 defer_processing: true
 synchronize: true
@@ -20,7 +20,7 @@ robot:
   # "both" records joints and TCP pose side by side. Control stays in joint space.
   record_space: "both"
   robot_ip: "192.168.1.245"
-  gripper_speed: 50
+  gripper_speed: 100
   gripper_command_interval_s: 0.03334
   enable_logs: false
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
@@ -74,6 +74,9 @@ teleop:
   id: "gello_teleop"
   # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.
   realtime_control_fps: 30
+  # Press Z to toggle J1-J6 precision / normal motion.
+  joint_precision_mode_enabled: true
+  joint_precision_scale: 0.2
   port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
   joint_signs: [1, 1, 1, 1, 1, 1, 1]
@@ -99,10 +102,10 @@ dataset:
   num_image_writer_processes: 1
   num_image_writer_threads_per_camera: 1
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_tasks/usb_insert"
-  repo_id: "ufactory/xarm7_gello_usb_insert"
+  root: "datasets/xarm7_gello_tasks/charger_insert"
+  repo_id: "ufactory/xarm7_gello_charger_insert"
   # Task description stored in the dataset.
-  single_task: "Grasp the USB-A plug, align it with the fixed socket, adjust alignment during contact, insert it fully, stop applying insertion force, and hold briefly."
+  single_task: "Insert the charger plug into the socket."
   fps: 15
   episode_time_s: 960  # max duration for one episode
   push_to_hub: False

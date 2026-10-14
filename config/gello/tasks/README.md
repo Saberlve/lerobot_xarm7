@@ -9,12 +9,11 @@
 | 鸡蛋抓取 | [xarm7_gello_egg_pick.yaml](egg_pick/xarm7_gello_egg_pick.yaml) | `datasets/xarm7_gello_tasks/egg_pick` | `ufactory/xarm7_gello_egg_pick` |
 | chip 抓取 | [xarm7_gello_chip_pick.yaml](chip_pick/xarm7_gello_chip_pick.yaml) | `datasets/xarm7_gello_tasks/chip_pick` | `ufactory/xarm7_gello_chip_pick` |
 | 按压洗手液 | [xarm7_gello_handwash_press.yaml](handwash_press/xarm7_gello_handwash_press.yaml) | `datasets/xarm7_gello_tasks/handwash_press` | `ufactory/xarm7_gello_handwash_press` |
-| 齿轮装配 | [xarm7_gello_gear_assembly.yaml](gear_assembly/xarm7_gello_gear_assembly.yaml) | `datasets/xarm7_gello_tasks/gear_assembly` | `ufactory/xarm7_gello_gear_assembly` |
 | 擦白板 | [xarm7_gello_whiteboard_erase.yaml](whiteboard_erase/xarm7_gello_whiteboard_erase.yaml) | `datasets/xarm7_gello_tasks/whiteboard_erase` | `ufactory/xarm7_gello_whiteboard_erase` |
 | 回力小车 | [xarm7_gello_pullback_car.yaml](pullback_car/xarm7_gello_pullback_car.yaml) | `datasets/xarm7_gello_tasks/pullback_car` | `ufactory/xarm7_gello_pullback_car` |
 | 旋下螺母 | [xarm7_gello_nut_removal.yaml](nut_removal/xarm7_gello_nut_removal.yaml) | `datasets/xarm7_gello_tasks/nut_removal` | `ufactory/xarm7_gello_nut_removal` |
 | 拧紧螺母 | [xarm7_gello_nut_tighten.yaml](nut_tighten/xarm7_gello_nut_tighten.yaml) | `datasets/xarm7_gello_tasks/nut_tighten` | `ufactory/xarm7_gello_nut_tighten` |
-| 大号 USB 插入 | [xarm7_gello_usb_insert.yaml](usb_insert/xarm7_gello_usb_insert.yaml) | `datasets/xarm7_gello_tasks/usb_insert` | `ufactory/xarm7_gello_usb_insert` |
+| 充电器插头插入插座 | [xarm7_gello_charger_insert.yaml](charger_insert/xarm7_gello_charger_insert.yaml) | `datasets/xarm7_gello_tasks/charger_insert` | `ufactory/xarm7_gello_charger_insert` |
 
 从项目根目录启动，例如：
 
@@ -49,15 +48,17 @@ GELLO J7 的转角变化以 2 倍映射到真机，J1–J6 保持固定；再次
 仅连接并读取 GELLO J1–J7，不读取 ID8；夹爪目标从 xArm 反馈对齐，仍由 C/O 控制。
 使用 GELLO 夹爪或启用夹爪电流、力反馈时保留 ID8 通信，所需电机通信超时仍会停止控制。
 
-回力小车指令为 `Pull back the toy car and release it to cross the finish line.`（后拉回力小车，释放使其越过终点线）。终点线长 60 cm、宽 3 cm；以车头越过靠近起点的一侧边缘为成功判定基准。USB 插入配置以完全插入并短暂保持为结束条件。
+回力小车指令为 `Pull back the toy car and release it to cross the finish line.`（后拉回力小车，释放使其越过终点线）。终点线长 60 cm、宽 3 cm；以车头越过靠近起点的一侧边缘为成功判定基准。充电器插入指令为 `Insert the charger plug into the socket.`（将充电器插头插入插座）。
 
 所有任务沿用 base 的 `min_tcp_z_mm: 2`，实际接触高度需按各任务布置确认。鸡蛋配置同时适用于生鸡蛋和熟鸡蛋；如需分别统计，可复制配置并为两组设置不同的数据集路径和 repo_id。
 
 旋下螺母配置启用 `defer_processing: true`：每条只提交完整原始图像、动作和时间索引，随后可开始下一条；退出整场录制后统一计算 Mesh3DFlow 和编码视频，录制期间不后台推理。后处理失败时原始 checkpoint 保留，可使用原配置加 `--postprocess-only` 重试。
 
 
-旋下螺母 `nut_removal` 和拧紧螺母 `nut_tighten` 已设置
-`teleop.joint_precision_mode_enabled: true`。开始遥操作后，按 `Z` 启用关节微调：
+洗手液 `handwash_press` 和充电器插入 `charger_insert` 设置
+`teleop.joint_precision_mode_enabled: true`，允许按 `Z` 切换正常倍率与 0.2 倍关节微调。
+旋下螺母 `nut_removal` 和拧紧螺母 `nut_tighten` 的关节微调开关保持关闭。
+启用关节微调时：
 J1–J6 相对于切换时的角度变化乘以配置的 `joint_precision_scale`（默认 0.2，即 1/5），J7 和夹爪保持原有映射；再次按 `Z`
 恢复正常倍率。两次切换均从机器人当前 J1–J6 位置重新对齐，避免目标跳变。
 `S` 锁定优先，锁定期间可用 `Z` 选择退出 S 后的倍率，保持的 J1–J6 不变。
