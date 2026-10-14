@@ -17,7 +17,56 @@ from lerobot_robot_ufactory.utils.webapp.recording_web_config import ConfigStore
 from lerobot_robot_ufactory.utils.realtime_teleop import RealtimeTeleopController
 from lerobot_robot_ufactory.utils.webapp.web_preview import RecordingWebPreview, WebPreviewConfig
 from lerobot_robot_ufactory.utils.webapp.recording_web_worker import prepare_web_dataset
-from lerobot_robot_ufactory.utils.webapp.recording_web_config import dataset_stamp
+from lerobot_robot_ufactory.utils.webapp.recording_web_config import dataset_stamp, dataset_status
+
+
+@pytest.mark.parametrize("deferred", [True, False])
+def test_raw_only_dataset_counts_committed_episodes_and_can_resume(project, deferred):
+    root = project / "datasets/raw-only"
+    (root / "meta").mkdir(parents=True)
+    (root / "meta/info.json").write_text(json.dumps({"total_episodes": 0, "fps": 15}))
+    for index in range(2):
+        episode = root / "raw_episodes" / f"episode_{index:06d}"
+        episode.mkdir(parents=True)
+        (episode / "manifest.json").write_text(json.dumps(
+            {"version": 1, "episode_index": index, "size": 3, "fps": 15}))
+        (episode / "frames.parquet").touch()
+    raw = {"dataset": {"root": str(root), "fps": 15}, "defer_processing": deferred}
+    status = dataset_status(project, raw)
+    assert status["episodes"] == 2
+    assert status["resumable"] is deferred
+    cfg = SimpleNamespace(dataset=SimpleNamespace(root=root))
+    options = {"dataset_mode": "resume", "dataset_stamp": dataset_stamp(root)}
+    if deferred:
+        assert status["reason"] is None
+        prepare_web_dataset(project, cfg, raw, options)
+    else:
+        assert "--postprocess-only" in status["reason"]
+        with pytest.raises(RuntimeError, match="--postprocess-only"):
+            prepare_web_dataset(project, cfg, raw, options)
+    assert len(list((root / "raw_episodes").glob("*/manifest.json"))) == 2
+
+
+@pytest.mark.parametrize("problem", ["gap", "missing_frames", "fps", "published_missing", "no_raw"])
+def test_raw_dataset_resume_rejects_incomplete_or_incompatible_data(project, problem):
+    root = project / "datasets/raw-only"
+    (root / "meta").mkdir(parents=True)
+    processed = 1 if problem == "published_missing" else 0
+    (root / "meta/info.json").write_text(json.dumps(
+        {"total_episodes": processed, "fps": 15}))
+    if problem != "no_raw":
+        index = 1 if problem in ("gap", "published_missing") else 0
+        episode = root / "raw_episodes" / f"episode_{index:06d}"
+        episode.mkdir(parents=True)
+        (episode / "manifest.json").write_text(json.dumps(
+            {"version": 1, "episode_index": index, "size": 3,
+             "fps": 60 if problem == "fps" else 15}))
+        if problem != "missing_frames":
+            (episode / "frames.parquet").touch()
+    status = dataset_status(project, {"dataset": {"root": str(root), "fps": 15},
+                                      "defer_processing": True})
+    assert status["resumable"] is False
+    assert status["reason"]
 
 
 def test_postprocessing_blocks_recording_commands_and_survives_disconnect():

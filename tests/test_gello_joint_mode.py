@@ -17,9 +17,10 @@ from lerobot_robot_ufactory.utils.realtime_teleop import (
 )
 
 
-def make_teleop(*, enabled=True, gripper_mode="gello", precision=False, precision_scale=0.2):
+def make_teleop(*, enabled=True, gripper_mode="gello", precision=False, precision_scale=0.2, j7_scale=1.0):
     config = GelloTeleopConfig(
         joint7_only_mode_enabled=enabled,
+        gello_j7_scale=j7_scale,
         joint_precision_mode_enabled=precision,
         joint_precision_scale=precision_scale,
         start_joints=(0,) * 7,
@@ -55,6 +56,44 @@ def test_mode_is_default_off_and_requires_seven_joints():
     assert GelloTeleopConfig().joint7_only_mode_enabled is False
     with pytest.raises(ValueError, match="IDs 1..7"):
         GelloTeleopConfig(joint7_only_mode_enabled=True, joint_ids=(1, 2, 3, 4, 5, 6))
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), True, "2", None])
+def test_gello_j7_scale_requires_finite_positive_number(value):
+    with pytest.raises(ValueError, match="gello_j7_scale"):
+        GelloTeleopConfig(gello_j7_scale=value)
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_gello_j7_scale_changes_deltas_and_preserves_target_on_s(direction):
+    teleop, driver = make_teleop(j7_scale=2.0)
+    driver.positions[6] = 1.2
+    before = teleop.get_action()["J7.pos"]
+    held = np.arange(6) / 10
+    press_s(teleop)
+    teleop.apply_pending_joint_control_mode(observation(held))
+    assert teleop.get_action()["J7.pos"] == pytest.approx(before)
+    driver.positions[:7] += direction * 0.1
+    previous_input = teleop._gello_j7_last_input
+    scaled = teleop.get_action()
+    assert scaled["J7.pos"] - before == pytest.approx(
+        2 * (teleop._gello_j7_last_input - previous_input)
+    )
+    assert joints(scaled)[:6] == pytest.approx(held)
+    # No leader movement at the transition: changing gain cannot jump J7.
+    driver.positions[6] = teleop.gello_agent._robot._last_pos[6]
+    press_s(teleop)
+    teleop.apply_pending_joint_control_mode(observation(held))
+    resumed = teleop.get_action()["J7.pos"]
+    assert resumed == pytest.approx(scaled["J7.pos"])
+    previous_input = teleop._gello_j7_last_input
+    driver.positions[6] += direction * 0.1
+    followed = teleop.get_action()["J7.pos"]
+    assert followed - resumed == pytest.approx(teleop._gello_j7_last_input - previous_input)
+    teleop.set_teleop_enabled(False)
+    assert teleop._gello_j7_scale == 1.0
+    assert teleop._gello_j7_scale_offset == 0.0
+    assert teleop._gello_j7_last_input is None
 
 
 @pytest.mark.parametrize("value", [1, "true", None])
@@ -469,8 +508,16 @@ def test_keyboard_j7_config_rejects_invalid_speed(value):
 
 def test_keyboard_j7_feature_defaults_off_and_conflicts_with_xy():
     assert not GelloTeleopConfig().joint7_keyboard_mode_enabled
+    assert not GelloTeleopConfig().joint7_keyboard_restore_gripper_on_up
+    assert not GelloTeleopConfig().joint7_keyboard_resume_gello_j7_after_turn
     with pytest.raises(ValueError, match='boolean'):
         GelloTeleopConfig(joint7_keyboard_mode_enabled=1)
+    with pytest.raises(ValueError, match='boolean'):
+        GelloTeleopConfig(joint7_keyboard_restore_gripper_on_up=1)
+    with pytest.raises(ValueError, match='boolean'):
+        GelloTeleopConfig(joint7_keyboard_resume_gello_j7_after_turn=1)
+    with pytest.raises(ValueError, match='requires keyboard gripper control'):
+        GelloTeleopConfig(joint7_keyboard_restore_gripper_on_up=True)
     with pytest.raises(ValueError, match='cannot be enabled together'):
         GelloTeleopConfig(joint7_keyboard_mode_enabled=True, xy_plane_only_mode_enabled=True)
     teleop, _ = make_teleop()
@@ -608,6 +655,155 @@ def test_removal_ctrl_takes_priority_and_tighten_ignores_modifiers(monkeypatch):
     assert teleop.get_action()['J7.pos'] == pytest.approx(np.deg2rad(30))
     now[0] += 2.5
     assert teleop.get_action()['J7.pos'] == pytest.approx(np.deg2rad(180))
+
+
+def test_removal_up_restores_grip_saved_before_down_after_arrival(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr('lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop.time.monotonic', lambda: now[0])
+    teleop, _ = make_teleop(gripper_mode='keyboard')
+    teleop.config.joint7_keyboard_mode_enabled = True
+    teleop.config.joint7_keyboard_restore_gripper_on_up = True
+    teleop.config.joint7_keyboard_resume_gello_j7_after_turn = True
+    teleop.config.joint7_keyboard_angle_deg = 150
+    teleop.config.joint7_keyboard_speed_deg_s = 75
+    teleop.update_gripper_observation(0.82)
+    teleop.set_joint7_keyboard_key(-1, True)
+    teleop.set_joint7_keyboard_key(-1, False)
+    teleop.apply_pending_joint_control_mode(observation(np.zeros(7)))
+    assert teleop._keyboard_j7_saved_gripper_position == pytest.approx(0.82)
+    now[0] += 3
+    teleop.update_keyboard_joint7_observation(observation([0] * 6 + [-np.deg2rad(150)]))
+    assert teleop.get_action()['gripper.pos'] == pytest.approx(1 - 50 / 84)
+    teleop.update_gripper_observation(1 - 50 / 84)
+
+    teleop.set_joint7_keyboard_key(1, True)
+    teleop.set_joint7_keyboard_key(1, False)
+    teleop.apply_pending_joint_control_mode(observation([0] * 6 + [-np.deg2rad(150)]))
+    now[0] += 3
+    assert teleop.get_action()['gripper.pos'] == pytest.approx(1 - 50 / 84)
+    teleop.update_keyboard_joint7_observation(observation(np.zeros(7)))
+    assert teleop.get_action()['gripper.pos'] == pytest.approx(0.82)
+    assert teleop._joint7_only_active
+    assert not teleop._keyboard_j7_active
+    assert teleop._keyboard_j7_saved_gripper_position is None
+
+
+@pytest.mark.parametrize('direction', [-1, 1])
+def test_keyboard_turn_hands_j7_to_gello_only_after_measured_arrival(monkeypatch, direction):
+    now = [10.0]
+    monkeypatch.setattr('lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop.time.monotonic', lambda: now[0])
+    teleop, driver = make_teleop(gripper_mode='keyboard')
+    teleop.config.joint7_keyboard_mode_enabled = True
+    teleop.config.joint7_keyboard_resume_gello_j7_after_turn = True
+    teleop.config.joint7_keyboard_angle_deg = 150
+    teleop.config.joint7_keyboard_speed_deg_s = 75
+    pose = np.arange(7) / 10
+    teleop.set_joint7_keyboard_key(direction, True)
+    teleop.set_joint7_keyboard_key(direction, False)
+    teleop.apply_pending_joint_control_mode(observation(pose))
+    teleop.get_action()
+    driver.positions[:7] += 0.4
+    now[0] += 1
+    moving = teleop.get_action()
+    assert joints(moving)[:6] == pytest.approx(pose[:6])
+    assert moving['J7.pos'] == pytest.approx(pose[6] + direction * np.deg2rad(75))
+    assert teleop._keyboard_j7_active
+    now[0] += 2
+    assert teleop.get_action()['J7.pos'] == pytest.approx(pose[6] + direction * np.deg2rad(150))
+    assert teleop._keyboard_j7_active  # Elapsed time alone cannot hand control back.
+    target = pose[6] + direction * np.deg2rad(150)
+    teleop.update_keyboard_joint7_observation(observation([*pose[:6], target]))
+    assert teleop.get_action()['J7.pos'] == pytest.approx(target)
+    assert not teleop._keyboard_j7_active
+    assert teleop._joint7_only_active
+    assert joints(teleop.get_action()) == pytest.approx([*pose[:6], target])
+    driver.positions[:7] += 0.1
+    followed = teleop.get_action()
+    assert joints(followed)[:6] == pytest.approx(pose[:6])
+    assert followed['J7.pos'] == pytest.approx(target + 0.099)
+    from lerobot_robot_ufactory.utils.realtime_teleop import apply_keyboard_gripper_stop
+    assert apply_keyboard_gripper_stop(object(), teleop, observation(np.zeros(7)))['_hold_joints_1_to_6']
+    assert teleop.set_joint7_keyboard_key(-direction, True)
+    teleop.apply_pending_joint_control_mode(observation([*pose[:6], target + 0.1]))
+    assert teleop.get_action()['J7.pos'] == pytest.approx(target + 0.1)
+    assert teleop._keyboard_j7_active
+
+
+def test_removal_down_up_cycle_keeps_first_six_anchor_despite_feedback_drift(monkeypatch):
+    """Follower tracking error must never become a new J1-J6 command on Up."""
+    from lerobot_robot_ufactory.utils.realtime_teleop import apply_keyboard_gripper_stop
+
+    now = [10.0]
+    monkeypatch.setattr('lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop.time.monotonic', lambda: now[0])
+    teleop, driver = make_teleop(gripper_mode='keyboard')
+    teleop.config.joint7_keyboard_mode_enabled = True
+    teleop.config.joint7_keyboard_restore_gripper_on_up = True
+    teleop.config.joint7_keyboard_resume_gello_j7_after_turn = True
+    teleop.config.joint7_keyboard_angle_deg = 150
+    teleop.config.joint7_keyboard_speed_deg_s = 75
+    teleop.update_gripper_observation(0.82)
+    anchor = np.arange(7) / 10
+    measured = anchor.copy()
+
+    def command():
+        action = teleop.get_action()
+        sent = apply_keyboard_gripper_stop(object(), teleop, action)
+        assert joints(sent)[:6] == pytest.approx(anchor[:6], abs=1e-12)
+        assert sent['_hold_joints_1_to_6'] is True
+        return sent
+
+    for direction in (-1, 1, -1, 1):
+        assert teleop.set_joint7_keyboard_key(direction, True)
+        teleop.set_joint7_keyboard_key(direction, False)
+        teleop.apply_pending_joint_control_mode(observation(measured))
+        command()
+        driver.positions[:7] += 0.3
+        now[0] += 1
+        command()
+        now[0] += 2
+        command()  # Still waiting for measured arrival.
+        measured[6] += direction * np.deg2rad(150)
+        measured[:6] += np.deg2rad([0.3, -0.2, 0.1, -0.3, 0.2, -0.1])
+        teleop.update_keyboard_joint7_observation(observation(measured))
+        completed = command()
+        assert completed['gripper.pos'] == pytest.approx(1 - 50 / 84 if direction < 0 else 0.82)
+        assert teleop._joint7_only_active
+        command()  # First GELLO read after handoff.
+        driver.positions[:7] += 0.1
+        command()  # Only J7 is allowed to follow GELLO.
+        teleop.update_gripper_observation(completed['gripper.pos'])
+
+
+def test_removal_up_without_saved_down_does_not_move_gripper(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr('lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop.time.monotonic', lambda: now[0])
+    teleop, _ = make_teleop(gripper_mode='keyboard')
+    teleop.config.joint7_keyboard_mode_enabled = True
+    teleop.config.joint7_keyboard_restore_gripper_on_up = True
+    teleop.update_gripper_observation(0.8)
+    teleop._keyboard_gripper_target = 0.8
+    teleop.set_joint7_keyboard_key(1, True)
+    teleop.apply_pending_joint_control_mode(observation(np.zeros(7)))
+    now[0] += 3
+    teleop.update_keyboard_joint7_observation(observation([0] * 6 + [np.deg2rad(120)]))
+    assert teleop.get_action()['gripper.pos'] == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize('modifier,angle', [('ctrl', 10), ('shift', 60)])
+def test_removal_modified_up_keeps_saved_grip_and_does_not_close(monkeypatch, modifier, angle):
+    now = [10.0]
+    monkeypatch.setattr('lerobot_robot_ufactory.teleoperators.gello_teleop.gello_teleop.time.monotonic', lambda: now[0])
+    teleop, _ = make_teleop(gripper_mode='keyboard')
+    teleop.config.joint7_keyboard_mode_enabled = True
+    teleop.config.joint7_keyboard_restore_gripper_on_up = True
+    teleop._keyboard_j7_saved_gripper_position = 0.82
+    teleop._keyboard_gripper_target = 1 - 50 / 84
+    teleop.set_joint7_keyboard_key(1, True, modifier=modifier)
+    teleop.apply_pending_joint_control_mode(observation(np.zeros(7)))
+    now[0] += 3
+    teleop.update_keyboard_joint7_observation(observation([0] * 6 + [np.deg2rad(angle)]))
+    assert teleop.get_action()['gripper.pos'] == pytest.approx(1 - 50 / 84)
+    assert teleop._keyboard_j7_saved_gripper_position == pytest.approx(0.82)
 
 
 @pytest.mark.parametrize('direction', [1, -1])

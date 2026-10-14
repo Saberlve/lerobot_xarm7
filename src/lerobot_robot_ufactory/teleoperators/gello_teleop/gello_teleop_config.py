@@ -34,12 +34,18 @@ class GelloTeleopConfig(TeleoperatorConfig):
     realtime_control_fps: int = 30
     # Explicit opt-in: S toggles holding J1-J6 while GELLO controls J7.
     joint7_only_mode_enabled: bool = False
+    # GELLO J7 angular delta multiplier while J7-only mode is active.
+    gello_j7_scale: float = 1.0
     # Up/Down latch J1-J6 and rotate J7 by the configured angle; S resumes GELLO.
     joint7_keyboard_mode_enabled: bool = False
     joint7_keyboard_speed_deg_s: float = 60.0
     joint7_keyboard_angle_deg: float = 120.0
     # Hold to rotate continuously; release stops, without automatic gripper opening.
     joint7_keyboard_hold_to_rotate: bool = False
+    # Nut removal: Down opens after turning; Up restores the grip saved before Down.
+    joint7_keyboard_restore_gripper_on_up: bool = False
+    # After a fixed turn arrives, hand J7 back to GELLO while J1-J6 stay held.
+    joint7_keyboard_resume_gello_j7_after_turn: bool = False
     # Z toggles scaled joint deltas for J1-J6; J7 and gripper stay unchanged.
     joint_precision_mode_enabled: bool = False
     # Multiplier for J1-J6 deltas in precision mode: 0.2 means five times smaller.
@@ -87,6 +93,13 @@ class GelloTeleopConfig(TeleoperatorConfig):
             raise ValueError("realtime_control_fps must be positive")
         if type(self.joint7_only_mode_enabled) is not bool:
             raise ValueError("joint7_only_mode_enabled must be a boolean")
+        if (
+            isinstance(self.gello_j7_scale, bool)
+            or not isinstance(self.gello_j7_scale, (int, float))
+            or not math.isfinite(self.gello_j7_scale)
+            or self.gello_j7_scale <= 0
+        ):
+            raise ValueError("gello_j7_scale must be finite and positive")
         if self.joint7_only_mode_enabled and tuple(self.joint_ids) != tuple(range(1, 8)):
             raise ValueError("joint7_only_mode_enabled requires arm joint IDs 1..7")
         if (
@@ -98,6 +111,12 @@ class GelloTeleopConfig(TeleoperatorConfig):
             raise ValueError("joint7_keyboard_angle_deg must be finite and in (0, 360]")
         if type(self.joint7_keyboard_hold_to_rotate) is not bool:
             raise ValueError("joint7_keyboard_hold_to_rotate must be a boolean")
+        if type(self.joint7_keyboard_restore_gripper_on_up) is not bool:
+            raise ValueError("joint7_keyboard_restore_gripper_on_up must be a boolean")
+        if type(self.joint7_keyboard_resume_gello_j7_after_turn) is not bool:
+            raise ValueError("joint7_keyboard_resume_gello_j7_after_turn must be a boolean")
+        if self.joint7_keyboard_restore_gripper_on_up and self.gripper_control_mode != "keyboard":
+            raise ValueError("joint7_keyboard_restore_gripper_on_up requires keyboard gripper control")
         if type(self.joint7_keyboard_mode_enabled) is not bool:
             raise ValueError("joint7_keyboard_mode_enabled must be a boolean")
         if self.joint7_keyboard_mode_enabled and tuple(self.joint_ids) != tuple(range(1, 8)):

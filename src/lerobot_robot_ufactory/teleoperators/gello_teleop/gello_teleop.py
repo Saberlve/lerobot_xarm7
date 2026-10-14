@@ -41,6 +41,9 @@ class GelloTeleop(UFBaseTeleop):
         self._joint7_only_active = False
         self._joint_mode_hold = None
         self._joint_mode_offsets = np.zeros(6)
+        self._gello_j7_scale = 1.0
+        self._gello_j7_scale_offset = 0.0
+        self._gello_j7_last_input = None
         self._joint_mode_realign = None
         self._keyboard_j7_active = False
         self._keyboard_j7_pending = 0
@@ -55,6 +58,8 @@ class GelloTeleop(UFBaseTeleop):
         self._keyboard_j7_modifiers = set()
         self._keyboard_j7_angle_deg = self.config.joint7_keyboard_angle_deg
         self._keyboard_j7_auto_open = True
+        self._keyboard_j7_saved_gripper_position = None
+        self._keyboard_j7_restore_gripper = None
         self._keyboard_j7_until = 0.0
         self._keyboard_j7_waiting = False
         self._keyboard_j7_arrived = False
@@ -484,6 +489,9 @@ class GelloTeleop(UFBaseTeleop):
             self._joint7_only_active = False
             self._joint_mode_hold = None
             self._joint_mode_offsets[:] = 0.0
+            self._gello_j7_scale = 1.0
+            self._gello_j7_scale_offset = 0.0
+            self._gello_j7_last_input = None
             self._joint_mode_realign = None
             self._keyboard_j7_active = False
             self._keyboard_j7_pending = 0
@@ -495,6 +503,8 @@ class GelloTeleop(UFBaseTeleop):
             self._keyboard_j7_arrived = False
             self._keyboard_j7_offset = 0.0
             self._keyboard_j7_realign = None
+            self._keyboard_j7_saved_gripper_position = None
+            self._keyboard_j7_restore_gripper = None
 
     def set_joint7_keyboard_modifier(self, name: str, pressed: bool) -> None:
         with self._joint_mode_lock:
@@ -539,7 +549,11 @@ class GelloTeleop(UFBaseTeleop):
             if modifier is None:
                 modifier = "ctrl" if any(k.startswith("ctrl") for k in self._keyboard_j7_modifiers) else "shift" if self._keyboard_j7_modifiers else "none"
             self._keyboard_j7_angle_deg = {"ctrl": 10.0, "shift": 60.0}.get(modifier, self.config.joint7_keyboard_angle_deg)
-            self._keyboard_j7_auto_open = modifier == "none"
+            self._keyboard_j7_auto_open = modifier == "none" and (
+                not self.config.joint7_keyboard_restore_gripper_on_up
+                or direction < 0
+                or self._keyboard_j7_saved_gripper_position is not None
+            )
             self._keyboard_j7_pending = direction
             return True
 
@@ -621,6 +635,8 @@ class GelloTeleop(UFBaseTeleop):
                 self._keyboard_j7_arrived = False
                 self._keyboard_j7_pending = 0
                 self._keyboard_j7_realign = keyboard_pose[6]
+                self._keyboard_j7_saved_gripper_position = None
+                self._keyboard_j7_restore_gripper = None
                 self._joint7_only_active = False
                 self._joint_mode_hold = None
                 self._joint_mode_realign = positions
@@ -631,8 +647,22 @@ class GelloTeleop(UFBaseTeleop):
                 if not self.config.joint7_keyboard_hold_to_rotate and not -2 * math.pi <= target <= 2 * math.pi:
                     self._keyboard_j7_pending = 0
                     raise ValueError("Keyboard J7 target exceeds xArm7 joint limits")
+                self._keyboard_j7_restore_gripper = None
+                if (self.config.joint7_keyboard_restore_gripper_on_up
+                        and not self.config.joint7_keyboard_hold_to_rotate
+                        and self._keyboard_j7_auto_open):
+                    if direction < 0 and self._keyboard_j7_saved_gripper_position is None:
+                        with self._keyboard_gripper_lock:
+                            self._keyboard_j7_saved_gripper_position = self._keyboard_gripper_observed_position
+                    elif direction > 0:
+                        self._keyboard_j7_restore_gripper = self._keyboard_j7_saved_gripper_position
                 if not self._keyboard_j7_active:
                     self._keyboard_j7_pose = keyboard_pose.copy()
+                    if self._joint7_only_active and self._joint_mode_hold is not None:
+                        # A completed turn hands only J7 back to GELLO. Keep
+                        # the original J1-J6 goals on the next turn: sampling
+                        # their tracking error would command those joints to move.
+                        self._keyboard_j7_pose[:6] = self._joint_mode_hold
                 self._keyboard_j7_active = True
                 self._joint7_only_active = False
                 self._joint_mode_hold = None
@@ -675,6 +705,16 @@ class GelloTeleop(UFBaseTeleop):
             if self._joint_mode_realign is not None:
                 self._joint_mode_offsets = self._joint_mode_realign - scale * action_array[:6]
                 self._joint_mode_realign = None
+            j7_scale = self.config.gello_j7_scale if self._joint7_only_active else 1.0
+            j7_input = float(action_array[6])
+            if j7_scale != self._gello_j7_scale:
+                # Change gain around the previous leader sample so switching
+                # modes preserves the target and scales only subsequent motion.
+                anchor = j7_input if self._gello_j7_last_input is None else self._gello_j7_last_input
+                self._gello_j7_scale_offset += (self._gello_j7_scale - j7_scale) * anchor
+                self._gello_j7_scale = j7_scale
+            self._gello_j7_last_input = j7_input
+            action_array[6] = j7_scale * j7_input + self._gello_j7_scale_offset
             if self._keyboard_j7_realign is not None:
                 self._keyboard_j7_offset = self._keyboard_j7_realign - action_array[6]
                 self._keyboard_j7_realign = None
@@ -697,7 +737,9 @@ class GelloTeleop(UFBaseTeleop):
                 if self._keyboard_j7_arrived and self._keyboard_j7_auto_open:
                     # Normalized gripper actions are 0=open, 1=closed.
                     # Send a position goal; the robot retains its configured speed.
-                    gripper_target = 1.0 - 50.0 / 84.0
+                    gripper_target = (self._keyboard_j7_restore_gripper
+                                      if self.config.joint7_keyboard_restore_gripper_on_up and self._keyboard_j7_restore_gripper is not None
+                                      else 1.0 - 50.0 / 84.0)
                     if self.config.gripper_control_mode == "keyboard":
                         if not self._keyboard_j7_gripper_opened:
                             with self._keyboard_gripper_lock:
@@ -706,6 +748,18 @@ class GelloTeleop(UFBaseTeleop):
                     else:
                         action_array[self.dof] = gripper_target
                     self._keyboard_j7_gripper_opened = True
+                    if self._keyboard_j7_restore_gripper is not None:
+                        self._keyboard_j7_saved_gripper_position = None
+                if (self._keyboard_j7_arrived
+                        and self.config.joint7_keyboard_resume_gello_j7_after_turn
+                        and not self.config.joint7_keyboard_hold_to_rotate):
+                    # This cycle still commands the completed keyboard target.
+                    # The next leader read is rebased to it before GELLO J7 moves.
+                    self._keyboard_j7_realign = self._keyboard_j7_target
+                    self._joint_mode_hold = self._keyboard_j7_pose[:6].copy()
+                    self._joint7_only_active = True
+                    self._keyboard_j7_active = False
+                    self._keyboard_j7_arrived = False
             elif self._joint7_only_active:
                 action_array[:6] = self._joint_mode_hold
             else:

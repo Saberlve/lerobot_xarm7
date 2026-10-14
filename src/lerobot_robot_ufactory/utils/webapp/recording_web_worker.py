@@ -129,7 +129,13 @@ def _simulate(cfg, control, preview, folder):
         def set_gripper_keyboard_state(self, **keys):
             pass
         def keyboard_joint7_busy(self):
-            return time.monotonic() < self._keyboard_j7_until
+            busy = time.monotonic() < self._keyboard_j7_until
+            if (not busy and self._keyboard_j7_active
+                    and self.config.joint7_keyboard_resume_gello_j7_after_turn
+                    and not self.config.joint7_keyboard_hold_to_rotate):
+                self._keyboard_j7_active = False
+                self._joint7_only_active = True
+            return busy
         def set_joint7_keyboard_key(self, direction, pressed, *, modifier="none"):
             if self.config.joint7_keyboard_hold_to_rotate:
                 if not pressed:

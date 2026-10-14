@@ -84,17 +84,21 @@ def dataset_status(project, raw):
         missing = _missing_dataset_files(root)
         pending = [p for p in RawEpisodeStore.checkpoints(root)
                    if json.loads(p.read_text())["episode_index"] >= result["episodes"]]
-        if missing:
+        # A deferred-only dataset has no published Parquet files yet. Its
+        # committed raw checkpoints are sufficient for the recorder to reopen it.
+        raw_only = result["episodes"] == 0 and bool(pending)
+        if missing and not raw_only:
             result["reason"] = "Incomplete dataset: " + ", ".join(missing)
-        elif pending and raw.get("defer_processing", False):
-            indices = [json.loads(p.read_text())["episode_index"] for p in pending]
-            if indices != list(range(result["episodes"], max(indices) + 1)):
-                result["reason"] = "Raw episode indexes are not contiguous"
-            else:
-                result["episodes"] = max(indices) + 1
-                result["resumable"] = True
         elif pending:
-            result["reason"] = "Raw episodes require --postprocess-only before resuming"
+            status = postprocess_status(project, raw)
+            if not status["ready"]:
+                result["reason"] = status["reason"]
+            else:
+                result["episodes"] += status["pending_episodes"]
+                if raw.get("defer_processing", False):
+                    result["resumable"] = True
+                else:
+                    result["reason"] = "Raw episodes require --postprocess-only before resuming"
         else:
             result["resumable"] = True
     except Exception as exc:

@@ -21,7 +21,7 @@ robot:
   # "both" records joints and TCP pose side by side. Control stays in joint space.
   record_space: "both"
   robot_ip: "192.168.1.245"
-  gripper_speed: 50
+  gripper_speed: 100
   gripper_command_interval_s: 0.03334
   enable_logs: false
   # Use xArm mode 6 online joint trajectory planning for GELLO tracking.
@@ -75,15 +75,12 @@ teleop:
   id: "gello_teleop"
   # Independent GELLO -> xArm command loop; dataset.fps remains the recording rate.
   realtime_control_fps: 30
-  # Press S to hold J1-J6 and control only J7; press S again for all joints.
+  # Press S to hold J1-J6 and control only J7 at 2x GELLO angular motion.
+  # Press S again for all joints at the normal J7 scale.
   joint7_only_mode_enabled: true
-  # Hold Up/Down to rotate J7; release to stop. J1-J6 held; S resumes GELLO.
-  # Continuous at configured speed while held; no automatic gripper opening.
-  joint7_keyboard_mode_enabled: true
-  joint7_keyboard_hold_to_rotate: true
-  joint7_keyboard_speed_deg_s: 60.0
+  gello_j7_scale: 2.0
   # Press Z to scale J1-J6 motion; J7 stays unchanged.
-  joint_precision_mode_enabled: true
+  joint_precision_mode_enabled: false
   joint_precision_scale: 0.2  # 0.2 = 缩小5倍；0.1 = 缩小10倍；范围 (0, 1]
   port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9HYVD-if00-port0"
   joint_ids: [1, 2, 3, 4, 5, 6, 7]
@@ -113,7 +110,7 @@ dataset:
   root: "datasets/xarm7_gello_tasks/nut_tighten"
   repo_id: "ufactory/xarm7_gello_nut_tighten"
   # Task description stored in the dataset.
-  single_task: "Find the stud with a nut and tighten the nut."
+  single_task: "Find the bolt with a nut and tighten the nut."
   fps: 15
   episode_time_s: 960  # max duration for one episode
   push_to_hub: False

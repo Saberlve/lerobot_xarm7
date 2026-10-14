@@ -298,7 +298,12 @@ def teleop_loop(cfg: TeleopConfig):
                         if getattr(teleop.config, "joint_precision_mode_enabled", False):
                             print(f'⌨   [Z] J1-J6 precision (x{teleop.config.joint_precision_scale:g}) / Normal')
                         if getattr(teleop.config, "joint7_keyboard_mode_enabled", False):
-                            print('⌨   [↑/↓] Hold to rotate J7; release to stop (no gripper opening)  [S] Resume GELLO' if getattr(teleop.config, 'joint7_keyboard_hold_to_rotate', False) else f'⌨   [↑/↓] J7 +/-{teleop.config.joint7_keyboard_angle_deg:g} deg + open; Ctrl: 10 deg / Shift: 60 deg, no opening  [S] Resume GELLO')
+                            if getattr(teleop.config, 'joint7_keyboard_hold_to_rotate', False):
+                                print('⌨   [↑/↓] Hold to rotate J7; release to stop (no gripper opening)  [S] Resume GELLO')
+                            elif getattr(teleop.config, 'joint7_keyboard_restore_gripper_on_up', False):
+                                print(f'⌨   [↓] -{teleop.config.joint7_keyboard_angle_deg:g} deg + open  [↑] +{teleop.config.joint7_keyboard_angle_deg:g} deg + restore grip; J7 GELLO after turn; Ctrl/Shift: 10/60 deg, no grip move  [S] Resume all joints')
+                            else:
+                                print(f'⌨   [↑/↓] J7 +/-{teleop.config.joint7_keyboard_angle_deg:g} deg + open; Ctrl: 10 deg / Shift: 60 deg, no opening  [S] Resume GELLO')
                         if getattr(teleop.config, "joint7_only_mode_enabled", False):
                             print('⌨   [S] J7 only / All joints')
                 except Exception as e:
@@ -319,7 +324,12 @@ def teleop_loop(cfg: TeleopConfig):
                 if getattr(teleop.config, "joint7_only_mode_enabled", False):
                     controls += '  [S] J7 only / All joints'
                 if getattr(teleop.config, "joint7_keyboard_mode_enabled", False):
-                    controls += ('  [↑/↓] Hold to rotate J7; release to stop (no gripper opening)  [S] Resume GELLO' if getattr(teleop.config, 'joint7_keyboard_hold_to_rotate', False) else f'  [↑/↓] J7 +/-{teleop.config.joint7_keyboard_angle_deg:g} deg + open; Ctrl: 10 deg / Shift: 60 deg, no opening  [S] Resume GELLO')
+                    if getattr(teleop.config, 'joint7_keyboard_hold_to_rotate', False):
+                        controls += '  [↑/↓] Hold to rotate J7; release to stop (no gripper opening)  [S] Resume GELLO'
+                    elif getattr(teleop.config, 'joint7_keyboard_restore_gripper_on_up', False):
+                        controls += f'  [↓] -{teleop.config.joint7_keyboard_angle_deg:g} deg + open  [↑] +{teleop.config.joint7_keyboard_angle_deg:g} deg + restore grip; J7 GELLO after turn; Ctrl/Shift: 10/60 deg, no grip move  [S] Resume all joints'
+                    else:
+                        controls += f'  [↑/↓] J7 +/-{teleop.config.joint7_keyboard_angle_deg:g} deg + open; Ctrl: 10 deg / Shift: 60 deg, no opening  [S] Resume GELLO'
                 print(f'⌨   {controls}')
             else:
                 print('⌨   [ESC] Exit  [Space] Start  [←] Reset')

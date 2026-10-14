@@ -73,7 +73,9 @@ def apply_keyboard_gripper_stop(robot, teleop, command: dict) -> dict:
     """Handle release after action processing, on the robot I/O owner thread."""
     # Attach the constraint after action processors, on every send path.
     # It is command metadata, not an extra dataset feature.
-    if getattr(teleop, "_keyboard_j7_active", False):
+    if (getattr(teleop, "_keyboard_j7_active", False)
+            or (getattr(getattr(teleop, "config", None), "joint7_keyboard_resume_gello_j7_after_turn", False)
+                and getattr(teleop, "_joint7_only_active", False))):
         command = dict(command)
         command["_hold_joints_1_to_6"] = True
     consume_stop = getattr(teleop, "consume_gripper_stop_request", None)
