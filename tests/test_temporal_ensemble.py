@@ -5,7 +5,7 @@ import time
 import numpy as np
 import pytest
 
-from lerobot_robot_ufactory.utils.starvla_ws_client.temporal_ensemble import (
+from deployment.model_server.tools.temporal_ensemble import (
     TemporalEnsembleClientWrapper,
     TemporalEnsembler,
 )
