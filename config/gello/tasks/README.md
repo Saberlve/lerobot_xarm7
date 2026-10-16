@@ -14,6 +14,9 @@
 | 旋下螺母 | [xarm7_gello_nut_removal.yaml](nut_removal/xarm7_gello_nut_removal.yaml) | `datasets/xarm7_gello_tasks/nut_removal` | `ufactory/xarm7_gello_nut_removal` |
 | 拧紧螺母 | [xarm7_gello_nut_tighten.yaml](nut_tighten/xarm7_gello_nut_tighten.yaml) | `datasets/xarm7_gello_tasks/nut_tighten` | `ufactory/xarm7_gello_nut_tighten` |
 | 充电器插头插入插座 | [xarm7_gello_charger_insert.yaml](charger_insert/xarm7_gello_charger_insert.yaml) | `datasets/xarm7_gello_tasks/charger_insert` | `ufactory/xarm7_gello_charger_insert` |
+| 充电器插头向下按入（已对准） | [xarm7_gello_charger_press.yaml](charger_press/xarm7_gello_charger_press.yaml) | `datasets/xarm7_gello_tasks/charger_press` | `ufactory/xarm7_gello_charger_press` |
+
+`charger_press` 在开始前由人工将插头对准插座，只录制向下按入的过程。语言指令为 `Press the pre-aligned charger plug down into the socket.`；控制设置沿用 `charger_insert`，仍使用 GELLO 关节遥操作。
 
 从项目根目录启动，例如：
 
@@ -55,7 +58,7 @@ GELLO J7 的转角变化以 2 倍映射到真机，J1–J6 保持固定；再次
 旋下螺母配置启用 `defer_processing: true`：每条只提交完整原始图像、动作和时间索引，随后可开始下一条；退出整场录制后统一计算 Mesh3DFlow 和编码视频，录制期间不后台推理。后处理失败时原始 checkpoint 保留，可使用原配置加 `--postprocess-only` 重试。
 
 
-洗手液 `handwash_press` 和充电器插入 `charger_insert` 设置
+洗手液 `handwash_press` 、充电器插入 `charger_insert` 和插头按压 `charger_press` 设置
 `teleop.joint_precision_mode_enabled: true`，允许按 `Z` 切换正常倍率与 0.2 倍关节微调。
 旋下螺母 `nut_removal` 和拧紧螺母 `nut_tighten` 的关节微调开关保持关闭。
 启用关节微调时：
