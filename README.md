@@ -449,3 +449,21 @@ This project is released under the Apache License 2.0. See [LICENSE](LICENSE).
 Run `.venv/bin/uf-lerobot-record-web --port 8769` for configuration management, recording control, and preview on one page. Browser shortcuts and J7-only mode are supported; Photon previews are opt-in. See the [web recording guide](docs/recording_web_en.md).
 
 After selecting and saving a configuration, the data postprocessing panel detects pending raw episodes every 5 seconds, with a manual refresh option. Clicking “Exit recording and start postprocessing” (or pressing Esc) discards the unsaved episode, releases devices, and processes saved raw episodes. The top session panel shows a progress bar, converted episode counts, processing stages, and per-camera frame progress. Standalone postprocessing also runs without connecting the robot, GELLO, or cameras. Recording and postprocessing cannot run together. Processing continues if the browser disconnects; failures preserve raw inputs for retry.
+
+## 外部模型服务评测
+
+评测入口统一放在 `scripts/`，通信和 TE 辅助代码放在 `scripts/starvla_client/`。
+N0 客户端不需要安装 VLArmory，也不需要本地 checkpoint 或统计文件。
+
+```bash
+# Python 3.10 的 N0 / Photon 环境
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    -u http_proxy -u https_proxy -u all_proxy NO_PROXY='*' no_proxy='*' \
+    UV_PROJECT_ENVIRONMENT=.venv-n0 uv sync --python 3.10 --extra xense \
+    --default-index https://mirrors.aliyun.com/pypi/simple/
+.venv-n0/bin/python scripts/uf_n0_eval.py --check-config
+# 现有 StarVLA 关节策略入口
+.venv-n0/bin/python scripts/uf_starvla_eval.py --config_path config/eval/xarm7_starvla_eval_config.yaml
+```
+
+服务端启动、N0 dry run 与执行说明见 [评测指南](scripts/README_eval.md)。

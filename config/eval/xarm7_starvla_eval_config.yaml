@@ -1,4 +1,4 @@
-# Real-robot eval config for uf-starvla-eval (external starVLA policy server).
+# Real-robot eval config for scripts/uf_starvla_eval.py (external starVLA policy server).
 # Robot section is derived from config/gello/xarm7_gello_record_config.yaml
 # (teleop / dataset / web_preview sections removed).
 robot:

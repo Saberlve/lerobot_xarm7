@@ -63,11 +63,11 @@ def compute_relative_axis_angle(rot_prev, rot_curr):
     # 1. 转为矩阵
     R_prev = Transformations.rxryrz_to_rotation_matrix(*rot_prev)
     R_curr = Transformations.rxryrz_to_rotation_matrix(*rot_curr)
-    
+
     # 2. 计算相对旋转矩阵
     # R_delta 表示从 prev 坐标系到 curr 坐标系的旋转
     R_delta = R_prev.T @ R_curr
-    
+
     # 3. 转回轴角
     return Transformations.rotation_matrix_to_rxryrz(R_delta)
 
@@ -103,7 +103,7 @@ class EvalConfig:
 
         if self.policy is None:
             raise ValueError("Choose a policy to control the robot")
-    
+
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
         """This enables the parser to load config from the policy using `--policy.path=local/dir`"""
@@ -151,10 +151,10 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
         )
         dataset_metadata = dataset.meta
         print("Created new dataset metadata successfully.")
-    
+
     if cfg.dataset.fps != dataset_metadata.fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset_metadata.fps} != {cfg.dataset.fps}).")
-        
+
 
     policy = make_policy(cfg=cfg.policy, ds_meta=dataset_metadata)
     # policy.eval()
@@ -172,158 +172,168 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
         dataset_stats=dataset_metadata.stats
     )
 
-    robot.connect()
-
-    events = {"reset": False, "exit": False}
     listener = None
+    try:
+        robot.connect()
 
-    if not is_headless():
-        from pynput import keyboard
+        events = {"reset": False, "exit": False}
 
-        def on_press(key):
-            try:
-                if key == keyboard.Key.right:
-                    print("Right arrow key pressed. Resetting...")
-                    events["reset"] = True
-                elif key == keyboard.Key.left:
-                    print("Left arrow key pressed. Resetting....")
-                    events["reset"] = True
-                elif key == keyboard.Key.esc:
-                    print("Escape key pressed. Stopping ...")
-                    events["exit"] = True
-            except Exception as e:
-                print(f"Error handling key press: {e}")
+        if not is_headless():
+            from pynput import keyboard
 
-        listener, events = init_keyboard_listener(events=events, on_press=on_press)
+            def on_press(key):
+                try:
+                    if key == keyboard.Key.right:
+                        print("Right arrow key pressed. Resetting...")
+                        events["reset"] = True
+                    elif key == keyboard.Key.left:
+                        print("Left arrow key pressed. Resetting....")
+                        events["reset"] = True
+                    elif key == keyboard.Key.esc:
+                        print("Escape key pressed. Stopping ...")
+                        events["exit"] = True
+                except Exception as e:
+                    print(f"Error handling key press: {e}")
 
-    device = get_safe_torch_device(policy.config.device, log=True)
-    sleep_time_s = 1 / dataset_metadata.fps
+            listener, events = init_keyboard_listener(events=events, on_press=on_press)
 
-    print("\n********** Policy Eval Episode Loop Start **********")
-    print(f'relative: {relative}')
+        device = get_safe_torch_device(policy.config.device, log=True)
+        sleep_time_s = 1 / dataset_metadata.fps
 
-    # with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
-    while True:
-        reset = getattr(robot, "reset_to_initial", None)
-        if reset is None:
-            reset = robot.configure
-        reset()
-        policy.reset()
-        preprocessor.reset()
-        postprocessor.reset()
+        print("\n********** Policy Eval Episode Loop Start **********")
+        print(f'relative: {relative}')
 
-        obs = robot.get_observation()
-
-        prev_robot_dict = {}
-        prev_action_dict = {}
-
-        if hasattr(cfg.robot, 'robots'):
-            keys = cfg.robot.robots.keys()
-        else:
-            keys = ['']
-        for key in keys:
-            prefix = f'.{key}' if key else ''
-            is_tcp = f'{prefix}pose.x' in obs and f'{prefix}pose.y' in obs and f'{prefix}pose.z' in obs and f'{prefix}pose.rx' in obs and f'{prefix}pose.ry' in obs and f'{prefix}pose.rz' in obs
-            if is_tcp:
-                pose = [obs[f'{prefix}pose.x'], obs[f'{prefix}pose.y'], obs[f'{prefix}pose.z'], obs[f'{prefix}pose.rx'], obs[f'{prefix}pose.ry'], obs[f'{prefix}pose.rz']]
-            else:
-                pose = []
-            prev_robot_dict[key] = {'type': 1 if is_tcp else 0, 'pose': np.array(pose)}
-            prev_action_dict[key] = {'type': 1 if is_tcp else 0, 'pose': np.array(pose)}
-
+        # with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
         while True:
-            start_loop_t = time.perf_counter()
+            reset = getattr(robot, "reset_to_initial", None)
+            if reset is None:
+                reset = robot.configure
+            reset()
+            policy.reset()
+            preprocessor.reset()
+            postprocessor.reset()
 
-            if events["reset"] or events["exit"]:
-                events["reset"] = False
-                print("\n********** Policy Eval Episode (Reset) **********")
-                break
-
-            # Get robot observation
             obs = robot.get_observation()
 
-            curr_robot_dict = {}
+            prev_robot_dict = {}
+            prev_action_dict = {}
+
+            if hasattr(cfg.robot, 'robots'):
+                keys = cfg.robot.robots.keys()
+            else:
+                keys = ['']
             for key in keys:
                 prefix = f'.{key}' if key else ''
                 is_tcp = f'{prefix}pose.x' in obs and f'{prefix}pose.y' in obs and f'{prefix}pose.z' in obs and f'{prefix}pose.rx' in obs and f'{prefix}pose.ry' in obs and f'{prefix}pose.rz' in obs
-                if not is_tcp or prev_robot_dict[key]['type'] != 1:
-                    curr_robot_dict[key] = {'type': 0, 'pose': []}
-                    continue
-                if rx_continuous and not relative and f'{prefix}pose.rx' in obs and obs[f'{prefix}pose.rx'] < 0:
-                    obs[f'{prefix}pose.rx'] += 2 * np.pi
-                prev_robot_pose = prev_robot_dict[key]['pose']
-                curr_robot_pose = np.array([obs[f'{prefix}pose.x'], obs[f'{prefix}pose.y'], obs[f'{prefix}pose.z'], obs[f'{prefix}pose.rx'], obs[f'{prefix}pose.ry'], obs[f'{prefix}pose.rz']])
-                curr_rot_normalized = continuous_rotvec(curr_robot_pose[3:6], prev_robot_pose[3:6])
-                curr_robot_pose[3] = float(curr_rot_normalized[0])
-                curr_robot_pose[4] = float(curr_rot_normalized[1])
-                curr_robot_pose[5] = float(curr_rot_normalized[2])
-                curr_robot_dict[key] = {'type': 1, 'pose': curr_robot_pose}
+                if is_tcp:
+                    pose = [obs[f'{prefix}pose.x'], obs[f'{prefix}pose.y'], obs[f'{prefix}pose.z'], obs[f'{prefix}pose.rx'], obs[f'{prefix}pose.ry'], obs[f'{prefix}pose.rz']]
+                else:
+                    pose = []
+                prev_robot_dict[key] = {'type': 1 if is_tcp else 0, 'pose': np.array(pose)}
+                prev_action_dict[key] = {'type': 1 if is_tcp else 0, 'pose': np.array(pose)}
 
-                if relative:
-                    delta = compute_relative_axis_angle(prev_robot_pose[3:6], curr_robot_pose[3:6])
-                    obs[f'{prefix}pose.x'] = curr_robot_pose[0] - prev_robot_pose[0]
-                    obs[f'{prefix}pose.y'] = curr_robot_pose[1] - prev_robot_pose[1]
-                    obs[f'{prefix}pose.z'] = curr_robot_pose[2] - prev_robot_pose[2]
-                    obs[f'{prefix}pose.rx'] = delta[0]
-                    obs[f'{prefix}pose.ry'] = delta[1]
-                    obs[f'{prefix}pose.rz'] = delta[2]
-                    prev_robot_dict[key]['pose'] = curr_robot_pose                 
+            while True:
+                start_loop_t = time.perf_counter()
 
-            # Applies a pipeline to the raw robot observation, default is IdentityProcessor
-            obs_processed = robot_observation_processor(obs)
+                if events["reset"] or events["exit"]:
+                    events["reset"] = False
+                    print("\n********** Policy Eval Episode (Reset) **********")
+                    break
 
-            observation_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
+                # Get robot observation
+                obs = robot.get_observation()
 
-            action_values = predict_action(
-                observation=observation_frame,
-                policy=policy,
-                device=device,
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                use_amp=policy.config.use_amp,
-                task=cfg.single_task,
-                robot_type=robot.robot_type,
-            )
-            act_processed_policy = make_robot_action(action_values, dataset_features)
-            robot_action_to_send = robot_action_processor((act_processed_policy, obs))
+                curr_robot_dict = {}
+                for key in keys:
+                    prefix = f'.{key}' if key else ''
+                    is_tcp = f'{prefix}pose.x' in obs and f'{prefix}pose.y' in obs and f'{prefix}pose.z' in obs and f'{prefix}pose.rx' in obs and f'{prefix}pose.ry' in obs and f'{prefix}pose.rz' in obs
+                    if not is_tcp or prev_robot_dict[key]['type'] != 1:
+                        curr_robot_dict[key] = {'type': 0, 'pose': []}
+                        continue
+                    if rx_continuous and not relative and f'{prefix}pose.rx' in obs and obs[f'{prefix}pose.rx'] < 0:
+                        obs[f'{prefix}pose.rx'] += 2 * np.pi
+                    prev_robot_pose = prev_robot_dict[key]['pose']
+                    curr_robot_pose = np.array([obs[f'{prefix}pose.x'], obs[f'{prefix}pose.y'], obs[f'{prefix}pose.z'], obs[f'{prefix}pose.rx'], obs[f'{prefix}pose.ry'], obs[f'{prefix}pose.rz']])
+                    curr_rot_normalized = continuous_rotvec(curr_robot_pose[3:6], prev_robot_pose[3:6])
+                    curr_robot_pose[3] = float(curr_rot_normalized[0])
+                    curr_robot_pose[4] = float(curr_rot_normalized[1])
+                    curr_robot_pose[5] = float(curr_rot_normalized[2])
+                    curr_robot_dict[key] = {'type': 1, 'pose': curr_robot_pose}
 
-            for key in keys:
-                prefix = f'.{key}' if key else ''
-                if not curr_robot_dict[key]['type'] != 1 or prev_action_dict[key]['type'] != 1:
-                    continue
-                if relative:
-                    rot_delta = np.array([robot_action_to_send[f'{prefix}pose.rx'], robot_action_to_send[f'{prefix}pose.ry'], robot_action_to_send[f'{prefix}pose.rz']])
-                    prev_action_pose = prev_action_dict[key]['pose']
-                    rot_curr = compute_target_axis_angle(prev_action_pose[3:6], rot_delta)
-                    robot_action_to_send[f'{prefix}pose.x'] = prev_action_pose[0] + robot_action_to_send[f'{prefix}pose.x']
-                    robot_action_to_send[f'{prefix}pose.y'] = prev_action_pose[1] + robot_action_to_send[f'{prefix}pose.y']
-                    robot_action_to_send[f'{prefix}pose.z'] = prev_action_pose[2] + robot_action_to_send[f'{prefix}pose.z']
-                    robot_action_to_send[f'{prefix}pose.rx'] = rot_curr[0]
-                    robot_action_to_send[f'{prefix}pose.ry'] = rot_curr[1]
-                    robot_action_to_send[f'{prefix}pose.rz'] = rot_curr[2]
-                elif rx_continuous and f'{prefix}pose.rx' in robot_action_to_send and robot_action_to_send[f'{prefix}pose.rx'] > math.pi:
-                    robot_action_to_send[f'{prefix}pose.rx'] -= 2 * np.pi
+                    if relative:
+                        delta = compute_relative_axis_angle(prev_robot_pose[3:6], curr_robot_pose[3:6])
+                        obs[f'{prefix}pose.x'] = curr_robot_pose[0] - prev_robot_pose[0]
+                        obs[f'{prefix}pose.y'] = curr_robot_pose[1] - prev_robot_pose[1]
+                        obs[f'{prefix}pose.z'] = curr_robot_pose[2] - prev_robot_pose[2]
+                        obs[f'{prefix}pose.rx'] = delta[0]
+                        obs[f'{prefix}pose.ry'] = delta[1]
+                        obs[f'{prefix}pose.rz'] = delta[2]
+                        prev_robot_dict[key]['pose'] = curr_robot_pose
 
-                # robot_action_to_send[f'{prefix}pose.z'] = max(robot_action_to_send[f'{prefix}pose.z'], 199)
+                # Applies a pipeline to the raw robot observation, default is IdentityProcessor
+                obs_processed = robot_observation_processor(obs)
 
-                if relative:
-                    curr_action_pose = np.array([
-                        robot_action_to_send[f'{prefix}pose.x'], robot_action_to_send[f'{prefix}pose.y'], robot_action_to_send[f'{prefix}pose.z'],
-                        robot_action_to_send[f'{prefix}pose.rx'], robot_action_to_send[f'{prefix}pose.ry'], robot_action_to_send[f'{prefix}pose.rz']
-                    ])
-                    prev_action_dict[key]['pose'] = curr_action_pose
+                observation_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
 
-            robot.send_action(robot_action_to_send)
-        
-            dt_s = time.perf_counter() - start_loop_t
-            precise_sleep(sleep_time_s - dt_s)
+                action_values = predict_action(
+                    observation=observation_frame,
+                    policy=policy,
+                    device=device,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    use_amp=policy.config.use_amp,
+                    task=cfg.single_task,
+                    robot_type=robot.robot_type,
+                )
+                act_processed_policy = make_robot_action(action_values, dataset_features)
+                robot_action_to_send = robot_action_processor((act_processed_policy, obs))
 
-        if events["exit"]:
-            break
+                for key in keys:
+                    prefix = f'.{key}' if key else ''
+                    if curr_robot_dict[key]['type'] != 1 or prev_action_dict[key]['type'] != 1:
+                        continue
+                    if relative:
+                        rot_delta = np.array([robot_action_to_send[f'{prefix}pose.rx'], robot_action_to_send[f'{prefix}pose.ry'], robot_action_to_send[f'{prefix}pose.rz']])
+                        prev_action_pose = prev_action_dict[key]['pose']
+                        rot_curr = compute_target_axis_angle(prev_action_pose[3:6], rot_delta)
+                        robot_action_to_send[f'{prefix}pose.x'] = prev_action_pose[0] + robot_action_to_send[f'{prefix}pose.x']
+                        robot_action_to_send[f'{prefix}pose.y'] = prev_action_pose[1] + robot_action_to_send[f'{prefix}pose.y']
+                        robot_action_to_send[f'{prefix}pose.z'] = prev_action_pose[2] + robot_action_to_send[f'{prefix}pose.z']
+                        robot_action_to_send[f'{prefix}pose.rx'] = rot_curr[0]
+                        robot_action_to_send[f'{prefix}pose.ry'] = rot_curr[1]
+                        robot_action_to_send[f'{prefix}pose.rz'] = rot_curr[2]
+                    elif rx_continuous and f'{prefix}pose.rx' in robot_action_to_send and robot_action_to_send[f'{prefix}pose.rx'] > math.pi:
+                        robot_action_to_send[f'{prefix}pose.rx'] -= 2 * np.pi
 
-    print("\n********** Policy Eval Loop Exit **********")
-    if not is_headless() and listener is not None:
-        listener.stop()
+                    # robot_action_to_send[f'{prefix}pose.z'] = max(robot_action_to_send[f'{prefix}pose.z'], 199)
+
+                    if relative:
+                        curr_action_pose = np.array([
+                            robot_action_to_send[f'{prefix}pose.x'], robot_action_to_send[f'{prefix}pose.y'], robot_action_to_send[f'{prefix}pose.z'],
+                            robot_action_to_send[f'{prefix}pose.rx'], robot_action_to_send[f'{prefix}pose.ry'], robot_action_to_send[f'{prefix}pose.rz']
+                        ])
+                        prev_action_dict[key]['pose'] = curr_action_pose
+
+                robot.send_action(robot_action_to_send)
+
+                dt_s = time.perf_counter() - start_loop_t
+                precise_sleep(sleep_time_s - dt_s)
+
+            if events["exit"]:
+                break
+
+    finally:
+        print("\n********** Policy Eval Loop Exit **********")
+        # Also clean up partial connections and exceptional exits.
+        try:
+            robot.disconnect()
+        except Exception:
+            logging.exception("Failed to disconnect robot after evaluation")
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                logging.exception("Failed to stop evaluation keyboard listener")
 
 @parser.wrap()
 def get_cfg(cfg: EvalConfig) -> EvalConfig:

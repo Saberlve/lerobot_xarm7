@@ -164,7 +164,12 @@ def replay_episode(robot: Any, episode: ReplayEpisode, show_progress: bool = Tru
             print(f"\rReplaying frame {frame_number}/{total_frames}", end="", flush=True)
 
         next_deadline += period_s
-        precise_sleep(max(next_deadline - time.perf_counter(), 0.0))
+        now = time.perf_counter()
+        # The first target can block while the arm moves into position.
+        # Rebase after any overrun instead of bursting through overdue targets.
+        if frame_number == 1 or now >= next_deadline:
+            next_deadline = now + period_s
+        precise_sleep(max(next_deadline - now, 0.0))
 
     if show_progress:
         print()

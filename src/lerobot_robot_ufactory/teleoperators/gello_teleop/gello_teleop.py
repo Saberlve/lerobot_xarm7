@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 import logging
 import math
 import threading
@@ -6,7 +9,8 @@ import time
 import numpy as np
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from ..base_teleop import UFBaseTeleop
-from .gello_adapter import GripperDynamixelInfo, PatchedDynamixelRobotConfig
+if TYPE_CHECKING:
+    from .gello_adapter import GripperDynamixelInfo
 from .gello_teleop_config import GelloTeleopConfig
 from .xy_plane_mode import XYPlaneMode
 
@@ -118,6 +122,8 @@ class GelloTeleop(UFBaseTeleop):
                 "use_fake_fallback": self.config.dynamixel_use_fake_fallback,
                 "gripper_config": gripper_config
         }
+        from .gello_adapter import PatchedDynamixelRobotConfig
+
         self._dynamixel_robo_config = PatchedDynamixelRobotConfig(**param_dict)
         self.dof = len(self.config.joint_ids)
 

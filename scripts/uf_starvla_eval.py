@@ -6,7 +6,7 @@ Usage:
         --ckpt_path <your_checkpoint_dir> --port 10093 --use_bf16
 
     # 2. Run this eval script on the robot machine:
-    uf-starvla-eval --config_path config/eval/xarm7_starvla_eval_config.yaml
+    python scripts/uf_starvla_eval.py --config_path config/eval/xarm7_starvla_eval_config.yaml
 
 The policy runs on the server; this script only streams observations
 (joint state + camera image(s) + task text) over WebSocket and executes the
@@ -55,7 +55,7 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging
 
-from lerobot_robot_ufactory.utils.starvla_ws_client import (
+from starvla_client import (
     RTCPolicyClientWrapper,
     TemporalEnsembleClientWrapper,
     WebsocketClientPolicy,
@@ -374,6 +374,7 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     print("\n********** starVLA Policy Eval Episode (Reset) **********")
                     break
 
+                start_loop_t = time.perf_counter()
                 if rtc is not None:
                     # RTC: build a fresh observation every tick; the wrapper
                     # fires the (background) inference at the right offset and
@@ -395,7 +396,6 @@ def eval_loop(cfg: StarVLAEvalConfig):
                                 + [f"{v:.6f}" for v in action]
                             )
                     last_action = action
-                    start_loop_t = time.perf_counter()
                 elif te is not None:
                     # TE: fresh observation every tick; the wrapper re-infers
                     # in the background every steps_per_inference_te steps and returns
@@ -419,7 +419,6 @@ def eval_loop(cfg: StarVLAEvalConfig):
                                 + [f"{v:.6f}" for v in action]
                             )
                     last_action = action
-                    start_loop_t = time.perf_counter()
                 elif current_actions is None or current_step >= min(
                     cfg.steps_per_inference, len(current_actions)
                 ):
@@ -484,7 +483,7 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     )
 
                 dt_s = time.perf_counter() - start_loop_t
-                precise_sleep(sleep_time_s - dt_s)
+                precise_sleep(max(sleep_time_s - dt_s, 0.0))
 
             episode += 1
 

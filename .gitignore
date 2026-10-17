@@ -106,3 +106,6 @@ third_party/gello_software/
 # Web recording runtime and recoverable configuration deletions
 .web-record/
 config/gello/.web-trash/
+
+# N0 / Photon runtime (Python 3.10)
+.venv-n0/

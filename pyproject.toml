@@ -42,7 +42,6 @@ uf-robot-teleop = "lerobot_robot_ufactory.scripts.uf_robot_teleop:main"
 uf-lerobot-record = "lerobot_robot_ufactory.scripts.uf_lerobot_record:main"
 record = "lerobot_robot_ufactory.scripts.uf_lerobot_record:main"
 uf-lerobot-eval = "lerobot_robot_ufactory.scripts.uf_lerobot_eval:main"
-uf-starvla-eval = "lerobot_robot_ufactory.scripts.uf_starvla_eval:main"
 uf-lerobot-replay = "lerobot_robot_ufactory.scripts.uf_lerobot_replay:main"
 replay = "lerobot_robot_ufactory.scripts.uf_lerobot_replay:main"
 uf-vive-calibrate = "lerobot_robot_ufactory.scripts.vive_calibrate:main"
@@ -82,7 +81,7 @@ dev = [
 # APIs such as imshow/namedWindow. Installing both wheels corrupts the shared
 # cv2 package, so keep only the GUI-enabled wheel declared above.
 exclude-dependencies = [
-    { package = { name = "lerobot", version = "0.4.3" }, dependencies = ["opencv-python-headless"] },
+    "opencv-python-headless",
 ]
 
 [tool.setuptools]
@@ -123,3 +122,23 @@ addopts = "-v --tb=short"
 python_version = "3.10"
 strict = true
 ignore_missing_imports = true
+
+# Explicit runtime requirements from the 2.0.1 wheel, absent in the old lock.
+# Keep uv resolution consistent with the installed wheel metadata.
+[[tool.uv.dependency-metadata]]
+name = "xensesdk"
+version = "2.0.1"
+requires-dist = [
+    "cypack>=0.1.2",
+    "numpy<=2.2.4",
+    "opencv-python<=4.12.0.88",
+    "pillow>=10.2.0",
+    "cryptography==43.0.3",
+    "PyYAML==6.0.2",
+    "ormsgpack>=1.11.0",
+    "lz4",
+    "psutil>=5.9.0",
+    "wmi; platform_system == \"Windows\"",
+    "pyudev; platform_system == \"Linux\"",
+    "cyclonedds-nightly==2025.7.29",
+]
