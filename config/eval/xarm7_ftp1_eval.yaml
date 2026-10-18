@@ -1,0 +1,67 @@
+# Default: connected dry run, no reset or arm/gripper targets. --execute enables motion.
+server_host: 127.0.0.1
+server_port: 10093
+unnorm_key: null
+dry_run: true
+
+# egg_pick_cleaned was recorded at 15 Hz (the tactile streams are 60 Hz).
+fps: 15
+steps_per_inference: 32
+# FTP1: current RGB/tactile, native 120D output recovered to absolute EEF; no RTC/TE.
+temporal_ensemble: false
+steps_per_inference_te: 2
+temporal_ensemble_coeff: 0.01
+ensemble_gripper: false
+n_episodes: 1
+max_episode_steps: 900
+single_task: Pick up the egg and place it in the green egg tray.
+rgb_keys: [third_camera, wrist_camera]
+tactile_keys: [photon_left, photon_right]
+
+# IK is seeded from the last sent joints and checked against the recording FK.
+max_joint_step_deg: 15
+ik_position_tolerance_mm: 2
+ik_rotation_tolerance_deg: 2
+
+robot:
+  type: uf::robot
+  id: uf_robot
+  robot_dof: 7
+  control_space: joint
+  record_space: both
+  robot_ip: 192.168.1.245
+  gripper_type: 2
+  gripper_speed: 50
+  gripper_force: 50
+  gripper_command_interval_s: 0.03334
+  joint_command_mode: 6
+  max_joint_velocity: 120
+  min_tcp_z_mm: 2
+  tcp_z_guard_backend: local_projection
+  controller_safety_boundary: true
+  enable_logs: false
+  cameras:
+    wrist_camera:
+      type: intelrealsense
+      serial_number_or_name: '242622070583'
+      width: 640
+      height: 480
+      fps: 15
+    third_camera:
+      type: intelrealsense
+      serial_number_or_name: '148522072685'
+      width: 640
+      height: 480
+      fps: 15
+    photon_left:
+      type: photon
+      serial_number: OG001932
+      width: 400
+      height: 700
+      fps: 60
+    photon_right:
+      type: photon
+      serial_number: OG001931
+      width: 400
+      height: 700
+      fps: 60

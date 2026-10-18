@@ -210,11 +210,23 @@ def read_command() -> str | None:
     return None
 
 
+def validate_policy(policy):
+    if (
+        policy.profile["action_layout"] != "canonical_eef_32"
+        or policy.state_dim != 32
+        or policy.action_dim != 32
+        or policy.chunk_size < 1
+    ):
+        raise ValueError("This runner requires an N0 single-arm canonical 32D EEF checkpoint")
+
+
 def run(
     cfg: N0EvalConfig,
     *,
     robot_factory=make_robot,
     policy_factory=make_policy,
+    observation_builder=build_observation,
+    policy_validator=validate_policy,
     command_reader=read_command,
     sleep=time.sleep,
 ):
@@ -229,13 +241,7 @@ def run(
     try:
         # Fail on incompatible policy metadata before touching the robot.
         policy = policy_factory(cfg)
-        if (
-            policy.profile["action_layout"] != "canonical_eef_32"
-            or policy.state_dim != 32
-            or policy.action_dim != 32
-            or policy.chunk_size < 1
-        ):
-            raise ValueError("This runner requires an N0 single-arm canonical 32D EEF checkpoint")
+        policy_validator(policy)
         if not cfg.temporal_ensemble and cfg.steps_per_inference > policy.chunk_size:
             raise ValueError("steps_per_inference exceeds the policy's chunk size")
         if cfg.temporal_ensemble:
@@ -279,7 +285,7 @@ def run(
                     if reference is None:
                         reference = np.asarray([obs[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)])
                     tick_start = time.monotonic()
-                    action = te.get_action(build_observation(robot, obs, cfg))
+                    action = te.get_action(observation_builder(robot, obs, cfg))
                     command = command_reader()
                     if command in {"r", "q"}:
                         exit_requested = command == "q"
@@ -288,7 +294,7 @@ def run(
                     obs = robot.get_realtime_observation()
                     reference = np.asarray([obs[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)])
                     start = time.monotonic()
-                    actions = np.asarray(policy.predict_action(build_observation(robot, obs, cfg))["actions"])
+                    actions = np.asarray(policy.predict_action(observation_builder(robot, obs, cfg))["actions"])
                     if actions.shape != (policy.chunk_size, 32) or not np.isfinite(actions).all():
                         raise ValueError("Policy returned invalid canonical EEF actions")
                     logging.info(
