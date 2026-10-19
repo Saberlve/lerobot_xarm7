@@ -1,3 +1,12 @@
+# Original StarVLA entry: choose joint or EEF10 state/action representation.
+# These egg PI05/ACT checkpoints use EEF10, 15 Hz and H25/E12.
+policy_representation: eef10
+dry_run: true
+max_episode_steps: 900
+max_joint_step_deg: 15
+ik_position_tolerance_mm: 2
+ik_rotation_tolerance_deg: 2
+
 # Real-robot eval config for scripts/uf_starvla_eval.py (external starVLA policy server).
 # Robot section is derived from config/gello/xarm7_gello_record_config.yaml
 # (teleop / dataset / web_preview sections removed).
@@ -6,6 +15,7 @@ robot:
   id: "uf_robot"
   robot_dof: 7
   control_space: "joint"
+  record_space: "both"
   # TODO: confirm this is your xArm controller IP.
   robot_ip: "192.168.1.245"
   # 2: xArm Gripper G2 (0-84 mm opening range).
@@ -37,13 +47,13 @@ robot:
       serial_number_or_name: "242622070583"
       width: 640
       height: 480
-      fps: 30
+      fps: 15
     camera2:
       type: intelrealsense
       serial_number_or_name: "148522072685"
       width: 640
       height: 480
-      fps: 30
+      fps: 15
 
 # starVLA policy server address (server binds 0.0.0.0; set the server IP here
 # if the server runs on a different machine).
@@ -51,17 +61,17 @@ server_host: "127.0.0.1"
 server_port: 10093
 
 # Control frequency for streaming actions to the robot.
-fps: 30
+fps: 15
 # Execute the first N steps of each predicted action chunk (chunk length comes
 # from the checkpoint's action_horizon), then re-infer.
 # N=1 means fully closed-loop (re-infer every step).
-steps_per_inference: 20
+steps_per_inference: 12
 #  null/none or prefix_pin
 rtc_mode: none
 inference_delay: 4
 
 # Temporal ensembling (TE): mutually exclusive with rtc_mode. 
-temporal_ensemble: true
+temporal_ensemble: false
 # Re-infer every N executed steps; with a 40-step chunk, N=10 keeps ~4 chunks
 # overlapping in the ensemble. Must be < the checkpoint's action chunk size.
 steps_per_inference_te: 1
@@ -72,8 +82,8 @@ temporal_ensemble_coeff: 0.01
 # always take the newest chunk's gripper value (avoids intermediate openings
 # from averaging a 0/1-style command).
 te_ensemble_gripper: true
-single_task: "Pick up the white bar and drop it in the bag."
-n_episodes: 50
+single_task: "Pick up the egg and place it in the green egg tray."
+n_episodes: 1
 # Camera observation keys sent to the policy, IN ORDER. Must match the training
 # video_keys order ["video.external_upper_camera", "video.wrist_camera"], i.e.
 # external (base_0_rgb) first, wrist (left_wrist_0_rgb) second.
@@ -86,9 +96,8 @@ enable_logs: false
 # Directory for the diagnostic logs (only used when enable_logs is true).
 log_dir: "logs"
 
-# REQUIRED: training-time dataset_statistics.json (state q01/q99). The policy
-# expects q99-normalized state; the server does NOT normalize it. Point this at
-# the stats file belonging to the checkpoint the server is running.
-dataset_statistics_path: "/usr/share/EmbodiedAI/VLArmory/results/Checkpoints/xarm7_pi05_lora_merged/dataset_statistics.json"
+# Joint mode: set the checkpoint statistics path for client-side state normalization.
+# EEF10 mode: leave empty; the server uses its checkpoint statistics and normalizes state.
+dataset_statistics_path: ""
 # Top-level key in dataset_statistics.json ("" = auto-pick when single key).
 state_stats_key: ""

@@ -11,6 +11,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import websockets.sync.client
 from typing_extensions import override
 
@@ -258,3 +259,56 @@ class WebsocketClientPolicy:
             return
         self._did_warn_eval_observation_mismatch = True
         logging.warning(message)
+
+
+EEF10_CONTRACT = "xarm7_raw_eef10_mm_relative_pose_v1"
+
+
+class EEF10PolicyClient:
+    def __init__(self, *, host="127.0.0.1", port=10093, unnorm_key=None, transport=None):
+        if transport is None:
+            transport = WebsocketClientPolicy(host=host, port=port)
+        self.transport = transport
+        try:
+            metadata = transport.get_server_metadata()
+            if metadata.get("eef10_observation_contract") != EEF10_CONTRACT:
+                raise ValueError("An EEF10 PI05/ACT server is required")
+            profiles = metadata.get("eef10_profiles", {})
+            self.unnorm_key = unnorm_key or metadata.get("default_unnorm_key")
+            if self.unnorm_key is None and len(profiles) == 1:
+                self.unnorm_key = next(iter(profiles))
+            self.profile = profiles[self.unnorm_key]
+            profile = self.profile
+            if (profile.get("state_dim") != 10 or profile.get("action_dim") != 10
+                or profile.get("action_layout") != "absolute_eef10_mm_columns"
+                or profile.get("image_keys") != ["base_0_rgb", "left_wrist_0_rgb"]):
+                raise ValueError("Incompatible EEF10 dimensions, units or camera order")
+            self.chunk_size = int(metadata["action_chunk_size"])
+            if self.chunk_size < 1 or self.chunk_size != profile["action_horizon"]:
+                raise ValueError("Invalid EEF10 action horizon")
+            self.action_dim = 32  # Shared IK executor envelope, in metres.
+        except Exception:
+            transport.close()
+            raise
+
+    def predict_action(self, observation):
+        raw = np.asarray(observation["state"], dtype=np.float32)
+        if raw.shape != (10,) or not np.isfinite(raw).all():
+            raise ValueError("Expected raw EEF10 state")
+        reply = self.transport.predict_action(dict(examples=[observation],
+            unnorm_key=self.unnorm_key, observation_contract=EEF10_CONTRACT))
+        if not reply.get("ok"):
+            raise RuntimeError(f"EEF10 inference failed: {reply.get('error')}")
+        actions = np.asarray(reply["data"]["actions"], dtype=np.float64)
+        if actions.shape != (1, self.chunk_size, 10) or not np.isfinite(actions).all():
+            raise ValueError("Invalid absolute EEF10 actions")
+        result = np.zeros((self.chunk_size, 32), dtype=np.float64)
+        result[:, :10] = actions[0]
+        result[:, :3] *= .001  # Units only: no second relative-pose recovery.
+        return {"actions": result}
+
+    def reset(self):
+        self.transport.reset()
+
+    def close(self):
+        self.transport.close()

@@ -8,8 +8,12 @@ Usage:
     # 2. Run this eval script on the robot machine:
     python scripts/uf_starvla_eval.py --config_path config/eval/xarm7_starvla_eval_config.yaml
 
+Set policy_representation=eef10 for the imported relative EEF10 checkpoints;
+policy_representation=joint retains the 8D joint path. --check_config=true validates
+local YAML only. EEF execution reuses the existing EEF/IK executor.
+
 The policy runs on the server; this script only streams observations
-(joint state + camera image(s) + task text) over WebSocket and executes the
+(configured robot state + camera image(s) + task text) over WebSocket and executes the
 returned action chunk on the xArm.
 
 Keyboard controls (same as uf_lerobot_eval):
@@ -33,7 +37,7 @@ Mutually exclusive with `rtc_mode`; `steps_per_inference` is ignored.
 import json
 import logging
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pprint import pformat
 
 import numpy as np
@@ -66,6 +70,14 @@ from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 @dataclass
 class StarVLAEvalConfig:
     robot: RobotConfig
+    # Robot state/action representation is independent of the model framework.
+    policy_representation: str = "joint"
+    dry_run: bool = True
+    check_config: bool = False
+    max_episode_steps: int = 900
+    max_joint_step_deg: float = 15
+    ik_position_tolerance_mm: float = 2
+    ik_rotation_tolerance_deg: float = 2
     # starVLA policy server address (server binds 0.0.0.0; use the server IP here)
     server_host: str = "127.0.0.1"
     server_port: int = 10093
@@ -117,6 +129,72 @@ class StarVLAEvalConfig:
     dataset_statistics_path: str = ""
     # Top-level key in dataset_statistics.json ("" = auto-pick when single).
     state_stats_key: str = ""
+
+
+
+from uf_n0_eval import POSE_KEYS, run as run_eef_executor
+from starvla_client.websocket_policy_client import EEF10PolicyClient
+
+
+def _eef_config(cfg):
+    robot = cfg.robot
+    if not isinstance(robot, dict):
+        import draccus
+        robot = draccus.encode(robot)
+        robot["type"] = cfg.robot.type
+        for key, camera in cfg.robot.cameras.items():
+            robot["cameras"][key]["type"] = camera.type
+    if cfg.temporal_ensemble or (cfg.rtc_mode or "none").lower() != "none":
+        raise ValueError("These imported EEF10 checkpoints use ordinary chunk inference")
+    if (robot.get("type"), robot.get("robot_dof"), robot.get("control_space"), robot.get("record_space")) != ("uf::robot", 7, "joint", "both"):
+        raise ValueError("EEF10 uses the existing 7-joint EEF/IK executor and record_space=both")
+    if robot.get("manual_mode", False) or robot.get("min_tcp_z_mm") is None:
+        raise ValueError("EEF10 execution requires the existing height guard and policy control mode")
+    if len(cfg.camera_keys) != 2 or len(set(cfg.camera_keys)) != 2 or not set(cfg.camera_keys) <= robot.get("cameras", {}).keys():
+        raise ValueError("Provide external then wrist RGB camera keys")
+    for name in ("fps", "max_joint_step_deg", "ik_position_tolerance_mm", "ik_rotation_tolerance_deg"):
+        if not np.isfinite(getattr(cfg, name)) or getattr(cfg, name) <= 0:
+            raise ValueError(f"{name} must be finite and positive")
+    for name in ("steps_per_inference", "n_episodes", "max_episode_steps"):
+        value = getattr(cfg, name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    if not isinstance(cfg.dry_run, bool) or not cfg.single_task.strip():
+        raise ValueError("Set a boolean dry_run mode and the training task instruction")
+    return replace(cfg, robot=robot)
+
+
+def build_eef_observation(robot, obs, cfg):
+    recorded = robot.convert_observation_for_recording(obs)
+    raw = np.asarray([recorded[robot.prefix + key] for key in (*POSE_KEYS, "gripper.pos")], dtype=np.float32)
+    return dict(state=raw, lang=cfg.single_task,
+                image=[np.asarray(obs[robot.prefix + key]).copy() for key in cfg.camera_keys])
+
+
+def make_eef_policy(cfg):
+    policy = EEF10PolicyClient(host=cfg.server_host, port=cfg.server_port, unnorm_key=cfg.state_stats_key or None)
+    try:
+        if policy.profile.get("fps") != cfg.fps:
+            raise ValueError("Evaluation fps differs from checkpoint training fps")
+        prompt = policy.profile.get("prompt")
+        if prompt and prompt.strip() != cfg.single_task.strip():
+            raise ValueError("Task instruction differs from checkpoint")
+    except Exception:
+        policy.close()
+        raise
+    return policy
+
+
+def validate_eef_policy(policy):
+    if policy.action_dim != 32 or policy.profile["action_layout"] != "absolute_eef10_mm_columns":
+        raise ValueError("EEF10 client recovery is required before IK")
+
+
+def run_eef(cfg, **kwargs):
+    return run_eef_executor(cfg, policy_factory=kwargs.pop("policy_factory", make_eef_policy),
+                            observation_builder=build_eef_observation,
+                            policy_validator=validate_eef_policy, **kwargs)
+
 
 
 def _build_state(
@@ -241,6 +319,11 @@ def _open_diagnostic_logs(log_dir: str):
 
 
 def eval_loop(cfg: StarVLAEvalConfig):
+    representation = getattr(cfg, "policy_representation", "joint")
+    if representation == "eef10":
+        return run_eef(_eef_config(cfg))
+    if representation != "joint":
+        raise ValueError(f"Unknown policy_representation: {representation}")
     init_logging()
     logging.info(pformat(asdict(cfg)))
 
@@ -505,6 +588,11 @@ def get_cfg(cfg: StarVLAEvalConfig) -> StarVLAEvalConfig:
 def main():
     register_third_party_plugins()
     cfg = get_cfg()
+    if cfg.check_config:
+        if cfg.policy_representation == "eef10":
+            _eef_config(cfg)
+        print("StarVLA local config valid; no model, camera or robot constructed")
+        return
     eval_loop(cfg)
 
 
