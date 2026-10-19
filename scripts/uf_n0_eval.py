@@ -182,11 +182,10 @@ def joint_action(robot, action: np.ndarray, reference: np.ndarray, cfg: N0EvalCo
     }
 
 
-def make_robot(cfg: N0EvalConfig):
+def decode_robot_config(cfg: N0EvalConfig):
     import draccus
     import lerobot_robot_ufactory  # noqa: F401
     from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
-    from lerobot_robot_ufactory.robots.uf_robot.uf_robot import UFRobot
     from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 
     values = {key: value for key, value in cfg.robot.items() if key != "type"}
@@ -194,7 +193,13 @@ def make_robot(cfg: N0EvalConfig):
         values["no_action"] = True
     elif values.get("no_action", False):
         raise ValueError("Disable robot.no_action to execute")
-    return UFRobot(draccus.decode(UFRobotConfig, values))
+    return draccus.decode(UFRobotConfig, values)
+
+
+def make_robot(cfg: N0EvalConfig):
+    from lerobot_robot_ufactory.robots.uf_robot.uf_robot import UFRobot
+
+    return UFRobot(decode_robot_config(cfg))
 
 
 def make_policy(cfg: N0EvalConfig):
@@ -240,10 +245,13 @@ def run(
 
     try:
         # Fail on incompatible policy metadata before touching the robot.
+        stage_start = time.monotonic()
+        logging.info("阶段：连接模型服务并检查策略配置")
         policy = policy_factory(cfg)
         policy_validator(policy)
         if not cfg.temporal_ensemble and cfg.steps_per_inference > policy.chunk_size:
             raise ValueError("steps_per_inference exceeds the policy's chunk size")
+        logging.info("阶段：策略检查完成，耗时 %.2f 秒", time.monotonic() - stage_start)
         if cfg.temporal_ensemble:
             from starvla_client.n0_policy_client import N0TemporalEnsembleClientWrapper
 
@@ -254,10 +262,13 @@ def run(
             logging.info("N0 TE enabled: period=%d, horizon=%d, coeff=%g, ensemble_gripper=%s",
                          cfg.steps_per_inference_te, policy.chunk_size,
                          cfg.temporal_ensemble_coeff, cfg.ensemble_gripper)
+        stage_start = time.monotonic()
+        logging.info("阶段：连接机械臂和相机")
         robot = robot_factory(cfg)
         robot.connect(defer_motion=True)
         if robot._local_kinematics is None:
             raise RuntimeError("Recording FK was not initialized")
+        logging.info("阶段：机械臂和相机连接完成，耗时 %.2f 秒", time.monotonic() - stage_start)
         logging.info(
             "Mode=%s, fps=%s, execution horizon=%s. r + Enter: next episode; q + Enter or Ctrl-C: stop.",
             "DRY RUN" if cfg.dry_run else "EXECUTE",
@@ -268,7 +279,10 @@ def run(
             if poll_exit():
                 break
             if not cfg.dry_run:
+                stage_start = time.monotonic()
+                logging.info("阶段：复位机械臂（第 %d/%d 条）", episode + 1, cfg.n_episodes)
                 robot.reset_to_initial(cancel_check=poll_exit)
+                logging.info("阶段：复位完成，耗时 %.2f 秒", time.monotonic() - stage_start)
             (te if te is not None else policy).reset()
             logging.info("Episode %d/%d", episode + 1, cfg.n_episodes)
             actions = None

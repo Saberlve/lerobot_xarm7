@@ -85,8 +85,10 @@ class StarVLAEvalConfig:
     fps: int = 30
     # Execute the first N steps of each predicted action chunk, then re-infer.
     # N=1 means fully closed-loop (re-infer every step). Chunk length comes
-    # from the checkpoint (action_horizon=40 for the xarm7 pi05 runs).
+    # from the checkpoint's action_horizon.
     steps_per_inference: int = 25
+    # Expected checkpoint chunk length; None accepts the server's chunk length.
+    action_chunk_size: int | None = None
     # --- RTC (real-time chunking) ---
     # RTC mode: None / "none" disables (default blocking chunk loop). Any other
     # value enables RTC and is forwarded to the framework as `mode`:
@@ -174,6 +176,11 @@ def build_eef_observation(robot, obs, cfg):
 def make_eef_policy(cfg):
     policy = EEF10PolicyClient(host=cfg.server_host, port=cfg.server_port, unnorm_key=cfg.state_stats_key or None)
     try:
+        if cfg.action_chunk_size is not None and (
+            type(cfg.action_chunk_size) is not int or cfg.action_chunk_size < 1
+            or policy.chunk_size != cfg.action_chunk_size
+        ):
+            raise ValueError(f"Configured action_chunk_size={cfg.action_chunk_size!r} differs from checkpoint chunk size {policy.chunk_size}")
         if policy.profile.get("fps") != cfg.fps:
             raise ValueError("Evaluation fps differs from checkpoint training fps")
         prompt = policy.profile.get("prompt")
@@ -338,6 +345,11 @@ def eval_loop(cfg: StarVLAEvalConfig):
     # size/count etc. against the training setup before running episodes.
     server_meta = client.get_server_metadata()
     logging.info(f"starVLA server metadata: {pformat(server_meta)}")
+    if cfg.action_chunk_size is not None and (
+        type(cfg.action_chunk_size) is not int or cfg.action_chunk_size < 1
+        or server_meta.get("action_chunk_size") != cfg.action_chunk_size
+    ):
+        raise ValueError(f"Configured action_chunk_size={cfg.action_chunk_size!r} differs from server metadata {server_meta.get('action_chunk_size')!r}")
 
     rtc = None
     rtc_mode = (cfg.rtc_mode or "").strip().lower()
@@ -590,7 +602,8 @@ def main():
     cfg = get_cfg()
     if cfg.check_config:
         if cfg.policy_representation == "eef10":
-            _eef_config(cfg)
+            from uf_n0_eval import decode_robot_config
+            decode_robot_config(_eef_config(cfg))
         print("StarVLA local config valid; no model, camera or robot constructed")
         return
     eval_loop(cfg)

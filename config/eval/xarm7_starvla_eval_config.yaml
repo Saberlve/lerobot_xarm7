@@ -1,54 +1,43 @@
-# Original StarVLA entry: choose joint or EEF10 state/action representation.
-# These egg PI05/ACT checkpoints use EEF10, 15 Hz and H25/E12.
+# Execute this many actions before requesting the next prediction.
+steps_per_inference: 12
+# Expected predicted chunk length (checkpoint action_horizon); checked at connection.
+# Changing this value requires a checkpoint with the matching chunk length.
+action_chunk_size: 25
+single_task: "Pick up the egg and place it in the green egg tray."
+
+# PI05/ACT egg checkpoints: EEF10, 15 Hz, H25/E12.
 policy_representation: eef10
-dry_run: true
+dry_run: false
 max_episode_steps: 900
-max_joint_step_deg: 15
+max_joint_step_deg: 75
 ik_position_tolerance_mm: 2
 ik_rotation_tolerance_deg: 2
 
-# Real-robot eval config for scripts/uf_starvla_eval.py (external starVLA policy server).
-# Robot section is derived from config/gello/xarm7_gello_record_config.yaml
-# (teleop / dataset / web_preview sections removed).
+# Real-robot EEF10 evaluation via scripts/uf_starvla_eval.py.
 robot:
   type: uf::robot
-  id: "uf_robot"
   robot_dof: 7
   control_space: "joint"
   record_space: "both"
-  # TODO: confirm this is your xArm controller IP.
   robot_ip: "192.168.1.245"
-  # 2: xArm Gripper G2 (0-84 mm opening range).
-  gripper_type: 2
-  enable_logs: false
   # xArm Gripper G2 speed, 15-225 mm/s. Match the data-collection config
   # (xarm7_gello_pick_toothpaste.yaml uses 50) so grasp timing matches training.
   gripper_speed: 50
-  # xArm Gripper G2 gripping force, 1-100 percent; 50 is the SDK default.
-  gripper_force: 50
-  # Use the high-frequency servo interface for lower-latency action streaming.
-  joint_command_mode: 6
   max_joint_velocity: 120
   # TCP z floor in the xArm base coordinate system (mm).
   min_tcp_z_mm: -2.0
-  # CPU-local FK/Jacobian projection keeps mode-6 commands free of synchronous SDK queries.
-  tcp_z_guard_backend: "local_projection"
-  tcp_z_soft_margin_mm: 0.5
-  local_kinematics_max_error_mm: 2.0
-  controller_safety_boundary: true
   # Append gripper initialization/read/write failures here.
   gripper_error_log_path: "logs/xarm7_gripper_errors.log"
   cameras:
-    # Same cameras as config/gello/xarm7_gello_pick_toothpaste.yaml.
-    # observation.images.camera  = wrist_camera           (trained as left_wrist_0_rgb)
-    # observation.images.camera2 = external_upper_camera  (trained as base_0_rgb)
-    camera:
+    # Wrist view, trained as left_wrist_0_rgb.
+    wrist_camera:
       type: intelrealsense
       serial_number_or_name: "242622070583"
       width: 640
       height: 480
       fps: 15
-    camera2:
+    # External upper view, trained as base_0_rgb.
+    third_camera:
       type: intelrealsense
       serial_number_or_name: "148522072685"
       width: 640
@@ -62,42 +51,8 @@ server_port: 10093
 
 # Control frequency for streaming actions to the robot.
 fps: 15
-# Execute the first N steps of each predicted action chunk (chunk length comes
-# from the checkpoint's action_horizon), then re-infer.
-# N=1 means fully closed-loop (re-infer every step).
-steps_per_inference: 12
-#  null/none or prefix_pin
-rtc_mode: none
-inference_delay: 4
-
-# Temporal ensembling (TE): mutually exclusive with rtc_mode. 
-temporal_ensemble: false
-# Re-infer every N executed steps; with a 40-step chunk, N=10 keeps ~4 chunks
-# overlapping in the ensemble. Must be < the checkpoint's action chunk size.
-steps_per_inference_te: 1
-# Exponential weighting coefficient (lerobot/ACT default 0.01): positive
-# favors older chunks, 0 = uniform average, negative favors newer chunks.
-temporal_ensemble_coeff: 0.01
-# true: average the gripper dim like the joints (lerobot behavior). false:
-# always take the newest chunk's gripper value (avoids intermediate openings
-# from averaging a 0/1-style command).
-te_ensemble_gripper: true
-single_task: "Pick up the egg and place it in the green egg tray."
 n_episodes: 1
 # Camera observation keys sent to the policy, IN ORDER. Must match the training
 # video_keys order ["video.external_upper_camera", "video.wrist_camera"], i.e.
 # external (base_0_rgb) first, wrist (left_wrist_0_rgb) second.
-camera_keys: ["camera2", "camera"]
-
-# Diagnostic CSV logs (30 Hz state/action steps + per-chunk seam diffs),
-# written to logs/starvla_eval_<timestamp>_{steps,seams}.csv. Set to false to
-# skip creating them entirely.
-enable_logs: false
-# Directory for the diagnostic logs (only used when enable_logs is true).
-log_dir: "logs"
-
-# Joint mode: set the checkpoint statistics path for client-side state normalization.
-# EEF10 mode: leave empty; the server uses its checkpoint statistics and normalizes state.
-dataset_statistics_path: ""
-# Top-level key in dataset_statistics.json ("" = auto-pick when single key).
-state_stats_key: ""
+camera_keys: ["third_camera", "wrist_camera"]
