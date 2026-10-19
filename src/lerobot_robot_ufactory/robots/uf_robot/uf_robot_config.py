@@ -118,8 +118,12 @@ class UFRobotConfig(RobotConfig):
             raise ValueError("min_tcp_z_mm must be finite when provided")
         if self.tcp_z_guard_backend != "local_projection":
             raise ValueError("tcp_z_guard_backend must be 'local_projection'")
-        if self.control_space != "joint" or self.robot_dof != 7:
-            raise ValueError("local_projection requires joint control on an xArm7")
+        if self.control_space not in ("joint", "cartesian") or self.robot_dof != 7:
+            raise ValueError("TCP height guarding requires joint or cartesian control on an xArm7")
+        if self.control_space == "cartesian" and (
+            not math.isfinite(self.max_linear_velocity) or self.max_linear_velocity <= 0
+        ):
+            raise ValueError("max_linear_velocity must be finite and positive")
         if self.min_tcp_z_mm is None:
             raise ValueError("local_projection requires min_tcp_z_mm")
         if not math.isfinite(self.tcp_z_soft_margin_mm) or self.tcp_z_soft_margin_mm < 0:

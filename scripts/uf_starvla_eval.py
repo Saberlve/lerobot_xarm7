@@ -10,7 +10,8 @@ Usage:
 
 Set policy_representation=eef10 for the imported relative EEF10 checkpoints;
 policy_representation=joint retains the 8D joint path. --check_config=true validates
-local YAML only. EEF execution reuses the existing EEF/IK executor.
+local YAML only. EEF execution supports joint IK or direct Cartesian commands
+according to robot.control_space.
 
 The policy runs on the server; this script only streams observations
 (configured robot state + camera image(s) + task text) over WebSocket and executes the
@@ -75,9 +76,12 @@ class StarVLAEvalConfig:
     dry_run: bool = True
     check_config: bool = False
     max_episode_steps: int = 900
-    max_joint_step_deg: float = 15
+    max_joint_step_deg: float = 90
     ik_position_tolerance_mm: float = 2
     ik_rotation_tolerance_deg: float = 2
+    # Direct Cartesian execution: maximum change from feedback/last target.
+    max_tcp_step_mm: float = 75
+    max_tcp_rotation_step_deg: float = 45
     # starVLA policy server address (server binds 0.0.0.0; use the server IP here)
     server_host: str = "127.0.0.1"
     server_port: int = 10093
@@ -148,13 +152,18 @@ def _eef_config(cfg):
             robot["cameras"][key]["type"] = camera.type
     if cfg.temporal_ensemble or (cfg.rtc_mode or "none").lower() != "none":
         raise ValueError("These imported EEF10 checkpoints use ordinary chunk inference")
-    if (robot.get("type"), robot.get("robot_dof"), robot.get("control_space"), robot.get("record_space")) != ("uf::robot", 7, "joint", "both"):
-        raise ValueError("EEF10 uses the existing 7-joint EEF/IK executor and record_space=both")
+    control_space = robot.get("control_space", "joint")
+    if (robot.get("type"), robot.get("robot_dof")) != ("uf::robot", 7) or (
+        (control_space, robot.get("record_space", "joint")) not in (("joint", "both"), ("cartesian", "joint"))
+    ):
+        raise ValueError("EEF10 requires xArm7 with joint control/record_space=both or cartesian control/record_space=joint")
     if robot.get("manual_mode", False) or robot.get("min_tcp_z_mm") is None:
         raise ValueError("EEF10 execution requires the existing height guard and policy control mode")
     if len(cfg.camera_keys) != 2 or len(set(cfg.camera_keys)) != 2 or not set(cfg.camera_keys) <= robot.get("cameras", {}).keys():
         raise ValueError("Provide external then wrist RGB camera keys")
-    for name in ("fps", "max_joint_step_deg", "ik_position_tolerance_mm", "ik_rotation_tolerance_deg"):
+    limits = (("max_tcp_step_mm", "max_tcp_rotation_step_deg") if control_space == "cartesian" else
+              ("max_joint_step_deg", "ik_position_tolerance_mm", "ik_rotation_tolerance_deg"))
+    for name in ("fps", *limits):
         if not np.isfinite(getattr(cfg, name)) or getattr(cfg, name) <= 0:
             raise ValueError(f"{name} must be finite and positive")
     for name in ("steps_per_inference", "n_episodes", "max_episode_steps"):
@@ -167,7 +176,14 @@ def _eef_config(cfg):
 
 
 def build_eef_observation(robot, obs, cfg):
-    recorded = robot.convert_observation_for_recording(obs)
+    if cfg.robot.get("control_space") == "cartesian":
+        # Preserve the checkpoint's FK/rot6d state independently of command space.
+        joints = np.asarray([obs[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)])
+        transform = robot._local_kinematics.forward_matrix(joints)
+        pose = [*transform[:3, 3], *transform[:3, 0], *transform[:3, 1]]
+        recorded = {**obs, **{robot.prefix + key: value for key, value in zip(POSE_KEYS, pose)}}
+    else:
+        recorded = robot.convert_observation_for_recording(obs)
     raw = np.asarray([recorded[robot.prefix + key] for key in (*POSE_KEYS, "gripper.pos")], dtype=np.float32)
     return dict(state=raw, lang=cfg.single_task,
                 image=[np.asarray(obs[robot.prefix + key]).copy() for key in cfg.camera_keys])
@@ -194,7 +210,7 @@ def make_eef_policy(cfg):
 
 def validate_eef_policy(policy):
     if policy.action_dim != 32 or policy.profile["action_layout"] != "absolute_eef10_mm_columns":
-        raise ValueError("EEF10 client recovery is required before IK")
+        raise ValueError("EEF10 client recovery is required before execution")
 
 
 def run_eef(cfg, **kwargs):

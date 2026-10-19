@@ -772,7 +772,7 @@ class UFRobot(Robot, Thread):
 
     def _initialize_tcp_z_guard(self) -> None:
         """Initialize guard state from the robot's current physical target."""
-        if self._control_space != "joint" or self._min_tcp_z_mm is None or self.real_arm is None:
+        if self._min_tcp_z_mm is None or self.real_arm is None:
             return
 
         code, states = self.real_arm.get_joint_states(is_radian=True, num=1)
@@ -1056,11 +1056,11 @@ class UFRobot(Robot, Thread):
             if code != 0:
                 raise RuntimeError(f"set_mode({self.config.joint_command_mode}) failed, code={code}")
         elif self._control_space == "cartesian":
-            self.real_arm.set_mode(7)
+            self._check_motion_code("set_mode(7)", self.real_arm.set_mode(7))
         else:
             raise ValueError(f"Please check the given control space of uf_robot! got {self._control_space}")
 
-        self.real_arm.set_state(0)
+        self._check_motion_code("set_state(0)", self.real_arm.set_state(0))
 
         _, err_warn = self.real_arm.get_err_warn_code()
         if err_warn[0] != 0:
@@ -1345,6 +1345,8 @@ class UFRobot(Robot, Thread):
         self,
         target_monotonic_s: float | None = None,
         target_monotonic_ns: int | None = None,
+        *,
+        joint_feedback: bool = False,
     ) -> dict[str, np.ndarray]:
         """Build a recording observation without controller command-channel reads.
 
@@ -1352,9 +1354,10 @@ class UFRobot(Robot, Thread):
         feedback is snapshotted with that report. When ``target_monotonic_s``
         is supplied it is the action send-start anchor, and both state and
         cameras are selected strictly at or before it. Camera reads remain
-        outside the realtime joint control thread.
+        outside the realtime joint control thread. ``joint_feedback=True`` also
+        supplies joints during Cartesian EEF evaluation, for training-compatible FK.
         """
-        if self._control_space != "joint":
+        if self._control_space != "joint" and not joint_feedback:
             return self.get_observation()
         if not self._rt_report_normal:
             raise ConnectionError("RT Report for target robot NOT READY!")
@@ -1899,14 +1902,33 @@ class UFRobot(Robot, Thread):
                     wait=wait_,
                 )
                 self._check_motion_code("set_servo_angle", code)
-        elif self._control_space == "cartesian": # unit: mm?
+        elif self._control_space == "cartesian":
             lin_spd = self._max_linear_velocity
 
             if not self._rt_report_normal:
                 raise ConnectionError("RT Report for target robot NOT READY! ")
             cmd_list = [action[f"{self.prefix}pose.x"], action[f"{self.prefix}pose.y"], action[f"{self.prefix}pose.z"], action[f"{self.prefix}pose.rx"], action[f"{self.prefix}pose.ry"], action[f"{self.prefix}pose.rz"]]
-            self.real_arm.set_position_aa(axis_angle_pose=cmd_list, speed=lin_spd, is_radian=True, wait=False)
-            # self.real_arm.set_position(*cmd_list, radius=0, speed=lin_spd, is_radian=True, wait=False)
+            if not np.isfinite(cmd_list).all():
+                raise ValueError("Cartesian target must contain six finite values")
+            if self._min_tcp_z_mm is not None and cmd_list[2] < self._min_tcp_z_mm:
+                raise ValueError("Cartesian target is below min_tcp_z_mm; no target was sent")
+            if self.real_arm.mode != 7:
+                raise RuntimeError("Cartesian execution requires mode 7; reset before sending targets")
+            if action.get("_pose_is_rpy", False):
+                # EEF10: absolute position in mm, RPY angles in radians, base frame.
+                code = self.real_arm.set_position(
+                    x=cmd_list[0], y=cmd_list[1], z=cmd_list[2],
+                    roll=cmd_list[3], pitch=cmd_list[4], yaw=cmd_list[5],
+                    speed=lin_spd, is_radian=True, relative=False, wait=False,
+                )
+                self._check_motion_code("set_position", code)
+            else:
+                # Preserve the legacy Cartesian action format (axis-angle).
+                code = self.real_arm.set_position_aa(
+                    axis_angle_pose=cmd_list, speed=lin_spd, is_radian=True,
+                    is_tool_coord=False, relative=False, wait=False,
+                )
+                self._check_motion_code("set_position_aa", code)
 
         if self._cmd_cnt < 99999:
             self._cmd_cnt += 1 # CHECK!! possibility of overflow?

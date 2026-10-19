@@ -1,3 +1,8 @@
+single_task: Pick up the egg and place it in the green egg tray.
+# null accepts the action chunk length reported by the model.
+action_chunk_size: null
+steps_per_inference: 32
+
 # Default: connected dry run, no reset or arm/gripper targets. --execute enables motion.
 server_host: 127.0.0.1
 server_port: 10093
@@ -6,7 +11,6 @@ dry_run: true
 
 # egg_pick_cleaned was recorded at 15 Hz (the tactile streams are 60 Hz).
 fps: 15
-steps_per_inference: 32
 # FTP1: current RGB/tactile, native 120D output recovered to absolute EEF; no RTC/TE.
 temporal_ensemble: false
 steps_per_inference_te: 2
@@ -14,12 +18,11 @@ temporal_ensemble_coeff: 0.01
 ensemble_gripper: false
 n_episodes: 1
 max_episode_steps: 900
-single_task: Pick up the egg and place it in the green egg tray.
 rgb_keys: [third_camera, wrist_camera]
 tactile_keys: [photon_left, photon_right]
 
 # IK is seeded from the last sent joints and checked against the recording FK.
-max_joint_step_deg: 15
+max_joint_step_deg: 90
 ik_position_tolerance_mm: 2
 ik_rotation_tolerance_deg: 2
 

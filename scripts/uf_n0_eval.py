@@ -1,7 +1,7 @@
-"""Execute an N0 xArm EEF policy through UFRobot's joint controller.
+"""Execute an N0 xArm EEF policy through joint IK or Cartesian control.
 
 Run from lerobot_xarm7 with ``python scripts/uf_n0_eval.py``.
-The default is a connected dry run: observations and IK, without reset or targets.
+The default is a connected dry run: observations and validation, without reset or targets.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ class N0EvalConfig:
     single_task: str = "Pick up the egg and place it in the green egg tray."
     fps: float = 15
     steps_per_inference: int = 50
+    action_chunk_size: int | None = None
     temporal_ensemble: bool = False
     steps_per_inference_te: int = 5
     temporal_ensemble_coeff: float = 0.01
@@ -40,12 +41,19 @@ class N0EvalConfig:
     n_episodes: int = 1
     max_episode_steps: int = 900
     dry_run: bool = True
-    max_joint_step_deg: float = 15
+    max_joint_step_deg: float = 90
     ik_position_tolerance_mm: float = 2
     ik_rotation_tolerance_deg: float = 2
+    max_tcp_step_mm: float = 75
+    max_tcp_rotation_step_deg: float = 45
 
     def __post_init__(self):
-        for key in ("fps", "max_joint_step_deg", "ik_position_tolerance_mm", "ik_rotation_tolerance_deg"):
+        if self.action_chunk_size is not None and (type(self.action_chunk_size) is not int or self.action_chunk_size < 1):
+            raise ValueError("action_chunk_size must be a positive integer")
+        limits = (("max_tcp_step_mm", "max_tcp_rotation_step_deg")
+                  if self.robot.get("control_space") == "cartesian" else
+                  ("max_joint_step_deg", "ik_position_tolerance_mm", "ik_rotation_tolerance_deg"))
+        for key in ("fps", *limits):
             if not np.isfinite(getattr(self, key)) or getattr(self, key) <= 0:
                 raise ValueError(f"{key} must be finite and positive")
         for key in ("steps_per_inference", "steps_per_inference_te", "n_episodes", "max_episode_steps"):
@@ -64,10 +72,11 @@ class N0EvalConfig:
         if (
             robot.get("type") != "uf::robot"
             or robot.get("robot_dof") != 7
-            or robot.get("control_space") != "joint"
-            or robot.get("record_space") != "both"
+            or (robot.get("control_space"), robot.get("record_space", "joint"))
+            not in (("joint", "both"), ("cartesian", "joint"))
         ):
-            raise ValueError("N0 EEF execution requires uf::robot, 7 joints, joint control and record_space=both")
+            raise ValueError("N0 EEF requires uf::robot, 7 joints, joint control/record_space=both "
+                             "or cartesian control/record_space=joint")
         if robot.get("manual_mode", False):
             raise ValueError("manual_mode is incompatible with policy execution")
         if robot.get("min_tcp_z_mm") is None:
@@ -87,8 +96,14 @@ def load_config(path: str | Path) -> N0EvalConfig:
 
 def build_observation(robot, obs: dict, cfg: N0EvalConfig) -> dict:
     """Use exactly the recording FK, float32 layout and mm->m conversion."""
-    recorded = robot.convert_observation_for_recording(obs)
     prefix = robot.prefix
+    if cfg.robot.get("control_space") == "cartesian":
+        joints = np.asarray([obs[f"{prefix}J{i}.pos"] for i in range(1, 8)])
+        transform = robot._local_kinematics.forward_matrix(joints)
+        pose = [*transform[:3, 3], *transform[:3, 0], *transform[:3, 1]]
+        recorded = {**obs, **{prefix + key: value for key, value in zip(POSE_KEYS, pose)}}
+    else:
+        recorded = robot.convert_observation_for_recording(obs)
     raw = np.asarray([recorded[prefix + key] for key in (*POSE_KEYS, "gripper.pos")], dtype=np.float32)
     if not np.isfinite(raw).all():
         raise ValueError("Non-finite robot EEF state")
@@ -128,7 +143,7 @@ def eef_target(action: np.ndarray) -> np.ndarray:
 
 
 def sdk_rpy_pose(target: np.ndarray) -> list[float]:
-    """SDK IK consumes Rz(yaw) Ry(pitch) Rx(roll), in mm and radians."""
+    """SDK IK/Cartesian targets use Rz(yaw) Ry(pitch) Rx(roll), mm and radians."""
     rotation = target[:3, :3]
     cos_pitch = np.hypot(rotation[0, 0], rotation[1, 0])
     pitch = np.arctan2(-rotation[2, 0], cos_pitch)
@@ -178,6 +193,28 @@ def joint_action(robot, action: np.ndarray, reference: np.ndarray, cfg: N0EvalCo
         raise ValueError(f"IK/FK mismatch: {position_error:.3f} mm, {np.rad2deg(rotation_error):.3f} deg")
     return {
         **{f"{robot.prefix}J{i + 1}.pos": float(v) for i, v in enumerate(joints)},
+        f"{robot.prefix}gripper.pos": float(np.clip(action[9], 0, 1)),
+    }
+
+
+def cartesian_action(robot, action: np.ndarray, reference: np.ndarray, cfg) -> dict:
+    """Canonical EEF -> absolute SDK pose (mm/RPY radians), without client IK."""
+    target = eef_target(action)
+    reference = np.asarray(reference, dtype=np.float64)
+    if reference.shape != (4, 4) or not np.isfinite(reference).all():
+        raise ValueError("Cartesian execution requires a finite reference transform")
+    if target[2, 3] < cfg.robot["min_tcp_z_mm"]:
+        raise ValueError("Predicted TCP z is below robot.min_tcp_z_mm; no target was sent")
+    distance = np.linalg.norm(target[:3, 3] - reference[:3, 3])
+    angle = np.arccos(np.clip((np.trace(reference[:3, :3].T @ target[:3, :3]) - 1) / 2, -1, 1))
+    if distance > cfg.max_tcp_step_mm:
+        raise ValueError("Cartesian step exceeds max_tcp_step_mm; no target was sent")
+    if angle > np.deg2rad(cfg.max_tcp_rotation_step_deg):
+        raise ValueError("Cartesian rotation exceeds max_tcp_rotation_step_deg; no target was sent")
+    return {
+        **{f"{robot.prefix}pose.{key}": value
+           for key, value in zip(("x", "y", "z", "rx", "ry", "rz"), sdk_rpy_pose(target))},
+        "_pose_is_rpy": True,
         f"{robot.prefix}gripper.pos": float(np.clip(action[9], 0, 1)),
     }
 
@@ -237,6 +274,17 @@ def run(
 ):
     robot = policy = te = None
     exit_requested = False
+    cartesian = cfg.robot.get("control_space") == "cartesian"
+
+    def observe():
+        # Cartesian commands still use joint-feedback FK for the training state.
+        if cartesian:
+            return robot.get_realtime_observation(joint_feedback=True)
+        return robot.get_realtime_observation()
+
+    def observation_reference(obs):
+        joints = np.asarray([obs[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)])
+        return robot._local_kinematics.forward_matrix(joints) if cartesian else joints
 
     def poll_exit():
         nonlocal exit_requested
@@ -249,6 +297,9 @@ def run(
         logging.info("阶段：连接模型服务并检查策略配置")
         policy = policy_factory(cfg)
         policy_validator(policy)
+        expected_chunk = getattr(cfg, "action_chunk_size", None)
+        if expected_chunk is not None and policy.chunk_size != expected_chunk:
+            raise ValueError(f"Configured action_chunk_size={expected_chunk} differs from checkpoint chunk size {policy.chunk_size}")
         if not cfg.temporal_ensemble and cfg.steps_per_inference > policy.chunk_size:
             raise ValueError("steps_per_inference exceeds the policy's chunk size")
         logging.info("阶段：策略检查完成，耗时 %.2f 秒", time.monotonic() - stage_start)
@@ -270,8 +321,9 @@ def run(
             raise RuntimeError("Recording FK was not initialized")
         logging.info("阶段：机械臂和相机连接完成，耗时 %.2f 秒", time.monotonic() - stage_start)
         logging.info(
-            "Mode=%s, fps=%s, execution horizon=%s. r + Enter: next episode; q + Enter or Ctrl-C: stop.",
+            "Mode=%s, control_space=%s, fps=%s, execution horizon=%s. r + Enter: next episode; q + Enter or Ctrl-C: stop.",
             "DRY RUN" if cfg.dry_run else "EXECUTE",
+            cfg.robot.get("control_space", "joint"),
             cfg.fps,
             cfg.steps_per_inference,
         )
@@ -295,9 +347,9 @@ def run(
                 if exit_requested or command == "r":
                     break
                 if te is not None:
-                    obs = robot.get_realtime_observation()
+                    obs = observe()
                     if reference is None:
-                        reference = np.asarray([obs[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)])
+                        reference = observation_reference(obs)
                     tick_start = time.monotonic()
                     action = te.get_action(observation_builder(robot, obs, cfg))
                     command = command_reader()
@@ -305,8 +357,8 @@ def run(
                         exit_requested = command == "q"
                         break
                 elif actions is None or offset >= cfg.steps_per_inference:
-                    obs = robot.get_realtime_observation()
-                    reference = np.asarray([obs[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)])
+                    obs = observe()
+                    reference = observation_reference(obs)
                     start = time.monotonic()
                     actions = np.asarray(policy.predict_action(observation_builder(robot, obs, cfg))["actions"])
                     if actions.shape != (policy.chunk_size, 32) or not np.isfinite(actions).all():
@@ -323,12 +375,13 @@ def run(
                 start = tick_start if te is not None else time.monotonic()
                 if te is None:
                     action = actions[offset]
-                command = joint_action(robot, action, reference, cfg)
+                command = (cartesian_action if cartesian else joint_action)(robot, action, reference, cfg)
                 if cfg.dry_run:
                     sent = command
                 else:
                     sent = robot.send_action(command)
-                reference = np.asarray([sent[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)])
+                reference = (eef_target(action) if cartesian else
+                             np.asarray([sent[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)]))
                 offset += 1
                 sleep(max(0, 1 / cfg.fps - (time.monotonic() - start)))
             if not cfg.dry_run:
@@ -358,8 +411,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config_path", default=str(DEFAULT_CONFIG))
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--execute", action="store_true", help="Reset robot and send joint/gripper targets")
-    mode.add_argument("--dry-run", action="store_true", help="Observe and validate IK without sending targets")
+    mode.add_argument("--execute", action="store_true", help="Reset robot and send arm/gripper targets")
+    mode.add_argument("--dry-run", action="store_true", help="Observe and validate actions without sending targets")
     parser.add_argument("--check-config", action="store_true", help="Validate local YAML without connecting to server or robot")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

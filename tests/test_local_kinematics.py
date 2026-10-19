@@ -133,10 +133,10 @@ def test_local_guard_holds_after_persistent_rt_model_mismatch():
     assert robot.logs["local_kinematics_error_mm"] == pytest.approx(10.0)
 
 
-def test_local_projection_config_requires_joint_xarm7_and_floor():
+def test_tcp_guard_config_requires_xarm7_and_floor():
     from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 
-    with pytest.raises(ValueError, match="joint control on an xArm7"):
+    with pytest.raises(ValueError, match="joint or cartesian control on an xArm7"):
         UFRobotConfig(
             robot_dof=6,
             control_space="joint",
