@@ -1,0 +1,59 @@
+# Validated 2026-10-20 via the public policy server and PolicyClient.
+deployment_profile: xarm7_eef_n0vtla
+action_space: eef10
+single_task: Pick up the egg and place it in the green egg tray.
+action_chunk_size: 15
+steps_per_inference: 10
+dry_run: true
+n_episodes: 1
+max_episode_steps: 900
+camera_keys:
+- third_camera
+- wrist_camera
+tactile_keys:
+- photon_left
+- photon_right
+# Maximum change from measured pose or the previous Cartesian target.
+max_tcp_step_mm: 75
+max_tcp_rotation_step_deg: 45
+robot:
+  type: uf::robot
+  robot_dof: 7
+  # Absolute XYZ (mm) + RPY (rad), sent with set_position in mode 7.
+  control_space: cartesian
+  # Joint-feedback FK supplies the original EEF10 policy state.
+  record_space: joint
+  robot_ip: 192.168.1.245
+  gripper_speed: 50
+  gripper_command_interval_s: 0.03334
+  max_linear_velocity: 100  # mm/s
+  min_tcp_z_mm: 2
+  cameras:
+    wrist_camera:
+      type: intelrealsense
+      serial_number_or_name: '242622070583'
+      width: 640
+      height: 480
+      fps: 15
+    third_camera:
+      type: intelrealsense
+      serial_number_or_name: '148522072685'
+      width: 640
+      height: 480
+      fps: 15
+    photon_left:
+      type: photon
+      serial_number: OG001932
+      width: 400
+      height: 700
+      fps: 60
+    photon_right:
+      type: photon
+      serial_number: OG001931
+      width: 400
+      height: 700
+      fps: 60
+server_host: 127.0.0.1
+server_port: 10093
+fps: 15
+temporal_ensemble: false
