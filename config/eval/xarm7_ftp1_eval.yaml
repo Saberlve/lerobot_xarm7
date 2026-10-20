@@ -1,3 +1,7 @@
+# Copied into each console evaluation run and shared by server/client.
+deployment_profile: xarm7_eef_ftp1
+action_space: eef10
+
 single_task: Pick up the egg and place it in the green egg tray.
 # null accepts the action chunk length reported by the model.
 action_chunk_size: null
@@ -6,7 +10,7 @@ steps_per_inference: 32
 # Default: connected dry run, no reset or arm/gripper targets. --execute enables motion.
 server_host: 127.0.0.1
 server_port: 10093
-unnorm_key: null
+state_stats_key: ""
 dry_run: true
 
 # egg_pick_cleaned was recorded at 15 Hz (the tactile streams are 60 Hz).
@@ -15,10 +19,10 @@ fps: 15
 temporal_ensemble: false
 steps_per_inference_te: 2
 temporal_ensemble_coeff: 0.01
-ensemble_gripper: false
+te_ensemble_gripper: false
 n_episodes: 1
 max_episode_steps: 900
-rgb_keys: [third_camera, wrist_camera]
+camera_keys: [third_camera, wrist_camera]
 tactile_keys: [photon_left, photon_right]
 
 # IK is seeded from the last sent joints and checked against the recording FK.

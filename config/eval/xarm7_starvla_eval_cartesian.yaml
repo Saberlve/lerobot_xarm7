@@ -1,3 +1,6 @@
+# Copied into each console evaluation run and shared by server/client.
+deployment_profile: xarm7_eef10
+
 single_task: "Pick up the egg and place it in the green egg tray."
 # Expected predicted chunk length (checkpoint action_horizon); checked at connection.
 # Changing this value requires a checkpoint with the matching chunk length.
@@ -7,7 +10,7 @@ steps_per_inference: 12
 
 # PI05/ACT EEF10 evaluation with direct Cartesian commands (xArm mode 7).
 # Model actions remain EEF10; the controller solves IK, not this client.
-policy_representation: eef10
+action_space: eef10
 dry_run: false
 max_episode_steps: 900
 # Maximum position/rotation change from measured pose or the previous target.

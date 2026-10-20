@@ -1,34 +1,27 @@
-"""Execute an N0 xArm EEF policy through joint IK or Cartesian control.
+"""Model-independent xArm7 canonical EEF decoding and execution.
 
-Run from lerobot_xarm7 with ``python scripts/uf_n0_eval.py``.
-The default is a connected dry run: observations and validation, without reset or targets.
+Consumes absolute 10D actions: metres, rotation columns and gripper.
+Policies and observation builders are injected by each model entry.
 """
-
 from __future__ import annotations
-
-import argparse
 import logging
 import select
 import sys
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
-
+from dataclasses import dataclass,field
 import numpy as np
-import yaml
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config/eval/xarm7_n0_eval.yaml"
 POSE_KEYS = ("pose.x", "pose.y", "pose.z", "pose.r11", "pose.r21", "pose.r31", "pose.r12", "pose.r22", "pose.r32")
-TACTILE_SLOTS = ("left_wrist_left_tactile", "left_wrist_right_tactile")
-
 
 @dataclass
-class N0EvalConfig:
+class EEFExecutionConfig:
     robot: dict
+    deployment_profile: str | None = None
+    action_space: str = "eef10"
     server_host: str = "127.0.0.1"
     server_port: int = 10093
-    unnorm_key: str | None = None
-    rgb_keys: list[str] = field(default_factory=lambda: ["third_camera", "wrist_camera"])
+    state_stats_key: str | None = None
+    camera_keys: list[str] = field(default_factory=lambda: ["third_camera", "wrist_camera"])
     tactile_keys: list[str] = field(default_factory=lambda: ["photon_left", "photon_right"])
     single_task: str = "Pick up the egg and place it in the green egg tray."
     fps: float = 15
@@ -37,7 +30,7 @@ class N0EvalConfig:
     temporal_ensemble: bool = False
     steps_per_inference_te: int = 5
     temporal_ensemble_coeff: float = 0.01
-    ensemble_gripper: bool = False
+    te_ensemble_gripper: bool = False
     n_episodes: int = 1
     max_episode_steps: int = 900
     dry_run: bool = True
@@ -48,6 +41,8 @@ class N0EvalConfig:
     max_tcp_rotation_step_deg: float = 45
 
     def __post_init__(self):
+        if self.action_space not in ("eef10", "joint"):
+            raise ValueError("action_space must be eef10 or joint")
         if self.action_chunk_size is not None and (type(self.action_chunk_size) is not int or self.action_chunk_size < 1):
             raise ValueError("action_chunk_size must be a positive integer")
         limits = (("max_tcp_step_mm", "max_tcp_rotation_step_deg")
@@ -60,13 +55,13 @@ class N0EvalConfig:
             value = getattr(self, key)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{key} must be a positive integer")
-        if not isinstance(self.temporal_ensemble, bool) or not isinstance(self.ensemble_gripper, bool):
-            raise ValueError("temporal_ensemble and ensemble_gripper must be boolean")
+        if not isinstance(self.temporal_ensemble, bool) or not isinstance(self.te_ensemble_gripper, bool):
+            raise ValueError("temporal_ensemble and te_ensemble_gripper must be boolean")
         if not np.isfinite(self.temporal_ensemble_coeff):
             raise ValueError("temporal_ensemble_coeff must be finite")
-        if len(self.rgb_keys) != 2 or len(self.tactile_keys) != 2:
+        if len(self.camera_keys) != 2 or len(self.tactile_keys) != 2:
             raise ValueError("Supply two RGB keys (external, wrist) and two tactile keys (left, right)")
-        if len(set(self.rgb_keys + self.tactile_keys)) != 4:
+        if len(set(self.camera_keys + self.tactile_keys)) != 4:
             raise ValueError("RGB and tactile camera keys must be distinct")
         robot = self.robot
         if (
@@ -75,13 +70,13 @@ class N0EvalConfig:
             or (robot.get("control_space"), robot.get("record_space", "joint"))
             not in (("joint", "both"), ("cartesian", "joint"))
         ):
-            raise ValueError("N0 EEF requires uf::robot, 7 joints, joint control/record_space=both "
+            raise ValueError("xArm7 EEF requires uf::robot, 7 joints, joint control/record_space=both "
                              "or cartesian control/record_space=joint")
         if robot.get("manual_mode", False):
             raise ValueError("manual_mode is incompatible with policy execution")
         if robot.get("min_tcp_z_mm") is None:
             raise ValueError("Set robot.min_tcp_z_mm for the existing TCP height guard")
-        if not set(self.rgb_keys + self.tactile_keys) <= robot.get("cameras", {}).keys():
+        if not set(self.camera_keys + self.tactile_keys) <= robot.get("cameras", {}).keys():
             raise ValueError("All configured RGB/tactile keys must exist under robot.cameras")
         if not isinstance(self.dry_run, bool):
             raise ValueError("dry_run must be true or false")
@@ -89,43 +84,59 @@ class N0EvalConfig:
             raise ValueError("single_task must match the training instruction")
 
 
-def load_config(path: str | Path) -> N0EvalConfig:
-    with Path(path).open() as stream:
-        return N0EvalConfig(**yaml.safe_load(stream))
-
-
-def build_observation(robot, obs: dict, cfg: N0EvalConfig) -> dict:
-    """Use exactly the recording FK, float32 layout and mm->m conversion."""
-    prefix = robot.prefix
+def build_observation(robot, obs, cfg):
     if cfg.robot.get("control_space") == "cartesian":
-        joints = np.asarray([obs[f"{prefix}J{i}.pos"] for i in range(1, 8)])
+        joints = np.asarray([obs[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)])
         transform = robot._local_kinematics.forward_matrix(joints)
         pose = [*transform[:3, 3], *transform[:3, 0], *transform[:3, 1]]
-        recorded = {**obs, **{prefix + key: value for key, value in zip(POSE_KEYS, pose)}}
+        recorded = {**obs, **{robot.prefix + key: value for key, value in zip(POSE_KEYS, pose)}}
     else:
         recorded = robot.convert_observation_for_recording(obs)
-    raw = np.asarray([recorded[prefix + key] for key in (*POSE_KEYS, "gripper.pos")], dtype=np.float32)
+    raw = np.asarray([recorded[robot.prefix + key] for key in (*POSE_KEYS, "gripper.pos")], dtype=np.float32)
     if not np.isfinite(raw).all():
         raise ValueError("Non-finite robot EEF state")
-    state = np.zeros(32, dtype=np.float32)
-    state[:10] = raw
-    state[:3] *= 0.001
-    images = [np.asarray(obs[prefix + key]).copy() for key in cfg.rgb_keys]
-    return {
-        "state": state,
-        "image": [*images, np.zeros_like(images[1])],
-        "image_mask": [True, True, False],
-        "lang": cfg.single_task,
-        # N0PolicyClient copies the first frame as the episode baseline.
-        "tactile": {slot: np.asarray(obs[prefix + key]).copy() for slot, key in zip(TACTILE_SLOTS, cfg.tactile_keys)},
-    }
+    camera_keys = cfg.camera_keys
+    result = dict(state=raw, lang=cfg.single_task,
+                  image=[np.asarray(obs[robot.prefix + key]).copy() for key in camera_keys])
+    tactile_keys = getattr(cfg, "tactile_keys", [])
+    if tactile_keys:
+        result["tactile"] = [np.asarray(obs[robot.prefix + key]).copy() for key in tactile_keys]
+    return result
+
+
+def make_policy(cfg):
+    from starvla_client.policy_client import PolicyClient
+    policy = PolicyClient(host=cfg.server_host, port=cfg.server_port,
+                             unnorm_key=cfg.state_stats_key or None)
+    try:
+        if policy.action_space != cfg.action_space:
+            raise ValueError("Evaluation action_space differs from server action_space")
+        if cfg.action_chunk_size is not None and policy.chunk_size != cfg.action_chunk_size:
+            raise ValueError("Configured action_chunk_size differs from checkpoint chunk size")
+        fps = policy.profile.get("fps")
+        if fps is not None and fps != cfg.fps:
+            raise ValueError("Evaluation fps differs from checkpoint training fps")
+        prompt = policy.profile.get("prompt")
+        if prompt and prompt.strip() != cfg.single_task.strip():
+            raise ValueError("Task instruction differs from checkpoint")
+    except Exception:
+        policy.close()
+        raise
+    return policy
+
+
+def validate_policy(policy):
+    if (policy.action_space != "eef10" or policy.action_dim != 10
+            or policy.profile.get("position_unit") != "m"
+            or policy.profile.get("rotation_representation") != "columns_6d"):
+        raise ValueError("Executor requires EEF10 actions in metres and rotation columns")
 
 
 def eef_target(action: np.ndarray) -> np.ndarray:
     """Absolute canonical EEF -> 4x4 TCP target (mm), with valid SO(3) rotation."""
     action = np.asarray(action, dtype=np.float64)
-    if action.shape != (32,) or not np.isfinite(action).all():
-        raise ValueError("Expected one finite absolute canonical 32D action")
+    if action.shape != (10,) or not np.isfinite(action).all():
+        raise ValueError("Expected one finite absolute EEF10 action")
     first, second = action[3:6], action[6:9]
     norm = np.linalg.norm(first)
     if norm < 1e-8:
@@ -156,7 +167,7 @@ def sdk_rpy_pose(target: np.ndarray) -> list[float]:
     return [*target[:3, 3].tolist(), float(roll), float(pitch), float(yaw)]
 
 
-def joint_action(robot, action: np.ndarray, reference: np.ndarray, cfg: N0EvalConfig) -> dict:
+def joint_action(robot, action: np.ndarray, reference: np.ndarray, cfg: EEFExecutionConfig) -> dict:
     """Solve near the last sent joints; verify IK against the recording FK."""
     reference = np.asarray(reference, dtype=np.float64)
     if reference.shape != (7,) or not np.isfinite(reference).all():
@@ -219,7 +230,7 @@ def cartesian_action(robot, action: np.ndarray, reference: np.ndarray, cfg) -> d
     }
 
 
-def decode_robot_config(cfg: N0EvalConfig):
+def decode_robot_config(cfg: EEFExecutionConfig):
     import draccus
     import lerobot_robot_ufactory  # noqa: F401
     from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
@@ -233,16 +244,10 @@ def decode_robot_config(cfg: N0EvalConfig):
     return draccus.decode(UFRobotConfig, values)
 
 
-def make_robot(cfg: N0EvalConfig):
+def make_robot(cfg: EEFExecutionConfig):
     from lerobot_robot_ufactory.robots.uf_robot.uf_robot import UFRobot
 
     return UFRobot(decode_robot_config(cfg))
-
-
-def make_policy(cfg: N0EvalConfig):
-    from starvla_client.n0_policy_client import N0PolicyClient
-
-    return N0PolicyClient(host=cfg.server_host, port=cfg.server_port, unnorm_key=cfg.unnorm_key)
 
 
 def read_command() -> str | None:
@@ -252,18 +257,8 @@ def read_command() -> str | None:
     return None
 
 
-def validate_policy(policy):
-    if (
-        policy.profile["action_layout"] != "canonical_eef_32"
-        or policy.state_dim != 32
-        or policy.action_dim != 32
-        or policy.chunk_size < 1
-    ):
-        raise ValueError("This runner requires an N0 single-arm canonical 32D EEF checkpoint")
-
-
 def run(
-    cfg: N0EvalConfig,
+    cfg: EEFExecutionConfig,
     *,
     robot_factory=make_robot,
     policy_factory=make_policy,
@@ -304,15 +299,15 @@ def run(
             raise ValueError("steps_per_inference exceeds the policy's chunk size")
         logging.info("阶段：策略检查完成，耗时 %.2f 秒", time.monotonic() - stage_start)
         if cfg.temporal_ensemble:
-            from starvla_client.n0_policy_client import N0TemporalEnsembleClientWrapper
+            from starvla_client.policy_client import PolicyTemporalEnsembleClientWrapper
 
-            te = N0TemporalEnsembleClientWrapper(
+            te = PolicyTemporalEnsembleClientWrapper(
                 policy, query_period=cfg.steps_per_inference_te, action_horizon=policy.chunk_size,
-                coeff=cfg.temporal_ensemble_coeff, ensemble_gripper=cfg.ensemble_gripper,
+                coeff=cfg.temporal_ensemble_coeff, ensemble_gripper=cfg.te_ensemble_gripper,
             )
-            logging.info("N0 TE enabled: period=%d, horizon=%d, coeff=%g, ensemble_gripper=%s",
+            logging.info("Canonical EEF TE enabled: period=%d, horizon=%d, coeff=%g, ensemble_gripper=%s",
                          cfg.steps_per_inference_te, policy.chunk_size,
-                         cfg.temporal_ensemble_coeff, cfg.ensemble_gripper)
+                         cfg.temporal_ensemble_coeff, cfg.te_ensemble_gripper)
         stage_start = time.monotonic()
         logging.info("阶段：连接机械臂和相机")
         robot = robot_factory(cfg)
@@ -361,7 +356,7 @@ def run(
                     reference = observation_reference(obs)
                     start = time.monotonic()
                     actions = np.asarray(policy.predict_action(observation_builder(robot, obs, cfg))["actions"])
-                    if actions.shape != (policy.chunk_size, 32) or not np.isfinite(actions).all():
+                    if actions.shape != (policy.chunk_size, 10) or not np.isfinite(actions).all():
                         raise ValueError("Policy returned invalid canonical EEF actions")
                     logging.info(
                         "Episode=%d step=%d inference=%.1f ms", episode + 1, step, (time.monotonic() - start) * 1000
@@ -405,28 +400,3 @@ def run(
                         (te if te is not None else policy).close()
         elif policy is not None:
             (te if te is not None else policy).close()
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config_path", default=str(DEFAULT_CONFIG))
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--execute", action="store_true", help="Reset robot and send arm/gripper targets")
-    mode.add_argument("--dry-run", action="store_true", help="Observe and validate actions without sending targets")
-    parser.add_argument("--check-config", action="store_true", help="Validate local YAML without connecting to server or robot")
-    args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    cfg = load_config(args.config_path)
-    if args.execute or args.dry_run:
-        cfg.dry_run = not args.execute
-    if args.check_config:
-        logging.info("Local config valid. Policy metadata is checked on server connection.")
-        return
-    try:
-        run(cfg)
-    except KeyboardInterrupt:
-        logging.info("Stopped")
-
-
-if __name__ == "__main__":
-    main()

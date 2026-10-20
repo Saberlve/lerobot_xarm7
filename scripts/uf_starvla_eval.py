@@ -8,8 +8,8 @@ Usage:
     # 2. Run this eval script on the robot machine:
     python scripts/uf_starvla_eval.py --config_path config/eval/xarm7_starvla_eval_config.yaml
 
-Set policy_representation=eef10 for the imported relative EEF10 checkpoints;
-policy_representation=joint retains the 8D joint path. --check_config=true validates
+One entry for ACT, PI05, N0 and FTP1. Set action_space=eef10 for EEF policies;
+action_space=joint retains the 8D joint path. --check_config=true validates
 local YAML only. EEF execution supports joint IK or direct Cartesian commands
 according to robot.control_space.
 
@@ -17,9 +17,11 @@ The policy runs on the server; this script only streams observations
 (configured robot state + camera image(s) + task text) over WebSocket and executes the
 returned action chunk on the xArm.
 
-Keyboard controls (same as uf_lerobot_eval):
+Joint keyboard controls (same as uf_lerobot_eval):
     Right/Left arrow : reset current episode (robot returns to initial pose)
     Esc              : exit eval loop and disconnect
+
+EEF controls: r + Enter starts the next episode; q + Enter exits.
 
 RTC (real-time chunking): set `rtc_mode: prefix_pin` (PI0/PI05) or another
 framework-supported mode in the config to overlap inference with execution —
@@ -35,44 +37,24 @@ step (ACT Algorithm 2, same weighting as lerobot's ACTTemporalEnsembler).
 Mutually exclusive with `rtc_mode`; `steps_per_inference` is ignored.
 """
 
-import json
 import logging
 import time
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, fields, replace
+from pathlib import Path
 from pprint import pformat
 
 import numpy as np
+import yaml
 
-import lerobot_robot_ufactory  # patch: registers uf:: robot/camera types
-# Register camera config subclasses ("opencv", "intelrealsense") so draccus
-# can decode the robot.cameras section; uf_lerobot_eval gets these transitively
-# via lerobot.scripts.lerobot_record, which this script does not import.
-from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
-from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
-from lerobot.configs import parser
-from lerobot.robots import (  # noqa: F401
-    Robot,
-    RobotConfig,
-    make_robot_from_config,
-)
-from lerobot.utils.control_utils import is_headless
-from lerobot.utils.import_utils import register_third_party_plugins
-from lerobot.utils.robot_utils import precise_sleep
-from lerobot.utils.utils import init_logging
-
-from starvla_client import (
-    RTCPolicyClientWrapper,
-    TemporalEnsembleClientWrapper,
-    WebsocketClientPolicy,
-)
-from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
-
+from eef_executor import EEFExecutionConfig, make_policy, run as run_eef_executor
+from starvla_client import RTCPolicyClientWrapper, TemporalEnsembleClientWrapper
 
 @dataclass
 class StarVLAEvalConfig:
-    robot: RobotConfig
+    robot: dict
+    deployment_profile: str | None = None
     # Robot state/action representation is independent of the model framework.
-    policy_representation: str = "joint"
+    action_space: str = "joint"
     dry_run: bool = True
     check_config: bool = False
     max_episode_steps: int = 900
@@ -86,11 +68,11 @@ class StarVLAEvalConfig:
     server_host: str = "127.0.0.1"
     server_port: int = 10093
     # Control frequency for streaming actions to the robot.
-    fps: int = 30
+    fps: float | None = None
     # Execute the first N steps of each predicted action chunk, then re-infer.
     # N=1 means fully closed-loop (re-infer every step). Chunk length comes
     # from the checkpoint's action_horizon.
-    steps_per_inference: int = 25
+    steps_per_inference: int | None = None
     # Expected checkpoint chunk length; None accepts the server's chunk length.
     action_chunk_size: int | None = None
     # --- RTC (real-time chunking) ---
@@ -110,7 +92,7 @@ class StarVLAEvalConfig:
     temporal_ensemble: bool = False
     # Issue a new inference every N executed steps; with a 40-step chunk,
     # N=10 keeps ~4 chunks overlapping in the ensemble.
-    steps_per_inference_te: int = 10
+    steps_per_inference_te: int | None = None
     # Exponential weighting coefficient (lerobot/ACT naming + default):
     # positive favors older chunks, 0 = uniform average, negative favors
     # newer chunks.
@@ -118,40 +100,62 @@ class StarVLAEvalConfig:
     # True: average the gripper dim like every other dim (lerobot behavior).
     # False: always take the newest chunk's gripper value (avoids
     # intermediate openings from averaging a 0/1-style command).
-    te_ensemble_gripper: bool = True
-    single_task: str = "Pick up the white bar and drop it in the bag."
-    n_episodes: int = 50
+    te_ensemble_gripper: bool | None = None
+    single_task: str | None = None
+    n_episodes: int | None = None
     # Keys of the cameras in the robot observation dict.
-    camera_keys: list[str] = field(default_factory=lambda: ["camera"])
+    camera_keys: list[str] | None = None
+    tactile_keys: list[str] | None = None
     # Master switch for the diagnostic CSV logs (steps + seams). When false,
     # no log files are created regardless of log_dir.
     enable_logs: bool = True
     # Directory for 30 Hz state/action diagnostic logs and per-seam diffs
     # (only used when enable_logs is true).
     log_dir: str = "logs"
-    # Path to the training-time dataset_statistics.json. REQUIRED: the policy
-    # was trained on q99-normalized state (see the checkpoint's DataConfig),
-    # and the server does NOT normalize state -- the client must.
-    dataset_statistics_path: str = ""
     # Top-level key in dataset_statistics.json ("" = auto-pick when single).
     state_stats_key: str = ""
 
+    def __post_init__(self):
+        # Preserve each former entry's defaults when a config omits a field.
+        defaults = dict(fps=30, steps_per_inference=25, steps_per_inference_te=10,
+                        te_ensemble_gripper=True, n_episodes=50, camera_keys=["camera"],
+                        tactile_keys=[], single_task="Pick up the white bar and drop it in the bag.")
+        if self.action_space == "eef10" and self.deployment_profile in (
+            "xarm7_eef_n0vtla", "xarm7_eef_ftp1",
+        ):
+            defaults.update(fps=15, steps_per_inference=(32 if self.deployment_profile == "xarm7_eef_ftp1" else 50),
+                            steps_per_inference_te=5, te_ensemble_gripper=False, n_episodes=1,
+                            camera_keys=["third_camera", "wrist_camera"],
+                            tactile_keys=["photon_left", "photon_right"],
+                            single_task="Pick up the egg and place it in the green egg tray.")
+        for key, value in defaults.items():
+            if getattr(self, key) is None:
+                setattr(self, key, value)
+        if self.action_space not in ("eef10", "joint"):
+            raise ValueError("action_space must be eef10 or joint")
+        if self.action_space == "eef10" and isinstance(self.robot, dict):
+            _validate_eef_config(self)
 
 
-from uf_n0_eval import POSE_KEYS, run as run_eef_executor
-from starvla_client.websocket_policy_client import EEF10PolicyClient
+def load_config(path: str | Path) -> StarVLAEvalConfig:
+    with Path(path).open() as stream:
+        return StarVLAEvalConfig(**yaml.safe_load(stream))
 
 
-def _eef_config(cfg):
-    robot = cfg.robot
-    if not isinstance(robot, dict):
-        import draccus
-        robot = draccus.encode(robot)
-        robot["type"] = cfg.robot.type
-        for key, camera in cfg.robot.cameras.items():
-            robot["cameras"][key]["type"] = camera.type
-    if cfg.temporal_ensemble or (cfg.rtc_mode or "none").lower() != "none":
+def _validate_eef_config(cfg):
+    profile = cfg.deployment_profile
+    if profile not in (None, "xarm7_eef10", "xarm7_eef_n0vtla", "xarm7_eef_ftp1"):
+        raise ValueError("Unsupported EEF deployment_profile")
+    if (cfg.rtc_mode or "none").lower() != "none":
+        raise ValueError("EEF execution does not support RTC")
+    if profile in ("xarm7_eef_n0vtla", "xarm7_eef_ftp1"):
+        EEFExecutionConfig(**{item.name: getattr(cfg, item.name) for item in fields(EEFExecutionConfig)})
+        if profile == "xarm7_eef_ftp1" and cfg.temporal_ensemble:
+            raise ValueError("FTP1 runner currently uses blocking chunks; disable temporal_ensemble")
+        return
+    if cfg.temporal_ensemble:
         raise ValueError("These imported EEF10 checkpoints use ordinary chunk inference")
+    robot = cfg.robot
     control_space = robot.get("control_space", "joint")
     if (robot.get("type"), robot.get("robot_dof")) != ("uf::robot", 7) or (
         (control_space, robot.get("record_space", "joint")) not in (("joint", "both"), ("cartesian", "joint"))
@@ -172,106 +176,51 @@ def _eef_config(cfg):
             raise ValueError(f"{name} must be a positive integer")
     if not isinstance(cfg.dry_run, bool) or not cfg.single_task.strip():
         raise ValueError("Set a boolean dry_run mode and the training task instruction")
+
+
+def _eef_config(cfg):
+    if not isinstance(cfg.robot, dict):
+        import draccus
+        robot = draccus.encode(cfg.robot)
+        robot["type"] = cfg.robot.type
+        for key, camera in cfg.robot.cameras.items():
+            robot["cameras"][key]["type"] = camera.type
+        cfg = replace(cfg, robot=robot)
+    _validate_eef_config(cfg)
+    return cfg
+
+
+def _joint_config(cfg):
+    # Defer robot SDKs and LeRobot until the joint path actually needs them.
+    global init_logging, make_robot_from_config, is_headless, precise_sleep, init_keyboard_listener
+    import draccus
+    import lerobot_robot_ufactory  # noqa: F401
+    from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
+    from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+    from lerobot.robots import RobotConfig, make_robot_from_config
+    from lerobot.utils.control_utils import is_headless
+    from lerobot.utils.import_utils import register_third_party_plugins
+    from lerobot.utils.robot_utils import precise_sleep
+    from lerobot.utils.utils import init_logging
+    from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
+    register_third_party_plugins()
+    robot = draccus.decode(RobotConfig, cfg.robot) if isinstance(cfg.robot, dict) else cfg.robot
     return replace(cfg, robot=robot)
 
 
-def build_eef_observation(robot, obs, cfg):
-    if cfg.robot.get("control_space") == "cartesian":
-        # Preserve the checkpoint's FK/rot6d state independently of command space.
-        joints = np.asarray([obs[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)])
-        transform = robot._local_kinematics.forward_matrix(joints)
-        pose = [*transform[:3, 3], *transform[:3, 0], *transform[:3, 1]]
-        recorded = {**obs, **{robot.prefix + key: value for key, value in zip(POSE_KEYS, pose)}}
-    else:
-        recorded = robot.convert_observation_for_recording(obs)
-    raw = np.asarray([recorded[robot.prefix + key] for key in (*POSE_KEYS, "gripper.pos")], dtype=np.float32)
-    return dict(state=raw, lang=cfg.single_task,
-                image=[np.asarray(obs[robot.prefix + key]).copy() for key in cfg.camera_keys])
 
-
-def make_eef_policy(cfg):
-    policy = EEF10PolicyClient(host=cfg.server_host, port=cfg.server_port, unnorm_key=cfg.state_stats_key or None)
-    try:
-        if cfg.action_chunk_size is not None and (
-            type(cfg.action_chunk_size) is not int or cfg.action_chunk_size < 1
-            or policy.chunk_size != cfg.action_chunk_size
-        ):
-            raise ValueError(f"Configured action_chunk_size={cfg.action_chunk_size!r} differs from checkpoint chunk size {policy.chunk_size}")
-        if policy.profile.get("fps") != cfg.fps:
-            raise ValueError("Evaluation fps differs from checkpoint training fps")
-        prompt = policy.profile.get("prompt")
-        if prompt and prompt.strip() != cfg.single_task.strip():
-            raise ValueError("Task instruction differs from checkpoint")
-    except Exception:
-        policy.close()
-        raise
-    return policy
-
-
-def validate_eef_policy(policy):
-    if policy.action_dim != 32 or policy.profile["action_layout"] != "absolute_eef10_mm_columns":
-        raise ValueError("EEF10 client recovery is required before execution")
-
-
-def run_eef(cfg, **kwargs):
-    return run_eef_executor(cfg, policy_factory=kwargs.pop("policy_factory", make_eef_policy),
-                            observation_builder=build_eef_observation,
-                            policy_validator=validate_eef_policy, **kwargs)
-
-
-
-def _build_state(
-    obs: dict,
-    gripper_cmd: float | None,
-    state_q01: np.ndarray | None = None,
-    state_q99: np.ndarray | None = None,
-) -> np.ndarray:
-    """8-dim proprio state: 7 joint positions (rad) + gripper (0=open, 1=close).
-
-    GELLO recordings store the last *commanded* gripper value in the state
-    (see get_realtime_observation), not the measured position. Feeding the
-    measured position here would expose the policy to slow gripper ramps it
-    never saw in training, so the commanded value is preferred.
-
-    The policy was trained on q99-normalized state (training DataConfig:
-    ``state.joint_positions: "q99"``) and the server does NOT normalize state,
-    so the raw values are normalized here exactly like the training transform:
-    ``2 * (x - q01) / (q99 - q01) - 1``, clamped to [-2.2, 2.2].
-    """
+def _build_state(obs: dict, gripper_cmd: float | None) -> np.ndarray:
+    """Raw joint radians and commanded gripper; normalization belongs to server."""
     gripper = obs["gripper.pos"] if gripper_cmd is None else gripper_cmd
-    raw = np.array([obs[f"J{i}.pos"] for i in range(1, 8)] + [gripper], dtype=np.float32)
-    if state_q01 is None:
-        return raw
-    mask = state_q01 != state_q99
-    normalized = raw.copy()
-    normalized[mask] = 2 * (raw[mask] - state_q01[mask]) / (state_q99[mask] - state_q01[mask]) - 1
-    return np.clip(normalized, -2.2, 2.2)
+    return np.asarray([obs[f"J{i}.pos"] for i in range(1, 8)] + [gripper], dtype=np.float32)
 
 
-def _load_state_norm_stats(path: str, key: str) -> tuple[np.ndarray, np.ndarray] | None:
-    """Load state q01/q99 arrays from the training-time dataset_statistics.json."""
-    if not path:
-        logging.warning(
-            "dataset_statistics_path not set -- sending RAW state to the policy. "
-            "The model was trained on q99-normalized state; this is almost "
-            "certainly wrong."
-        )
-        return None
-    with open(path) as f:
-        stats = json.load(f)
-    if not key:
-        if len(stats) != 1:
-            raise ValueError(
-                f"Multiple keys in {path}: {list(stats.keys())}. Set state_stats_key."
-            )
-        key = next(iter(stats))
-    state_stats = stats[key]["state"]
-    q01 = np.asarray(state_stats["q01"], dtype=np.float32)
-    q99 = np.asarray(state_stats["q99"], dtype=np.float32)
-    if q01.shape != (8,) or q99.shape != (8,):
-        raise ValueError(f"Expected 8-dim state stats, got {q01.shape} / {q99.shape}")
-    logging.info(f"State q99 normalization loaded from {path} (key={key})")
-    return q01, q99
+def _joint_observation(obs, gripper_cmd, cfg):
+    result = dict(state=_build_state(obs, gripper_cmd), lang=cfg.single_task,
+                  image=[np.asarray(obs[key]).copy() for key in cfg.camera_keys])
+    if cfg.tactile_keys:
+        result["tactile"] = [np.asarray(obs[key]).copy() for key in cfg.tactile_keys]
+    return result
 
 
 def _build_action_dict(action: np.ndarray) -> dict:
@@ -342,24 +291,22 @@ def _open_diagnostic_logs(log_dir: str):
 
 
 def eval_loop(cfg: StarVLAEvalConfig):
-    representation = getattr(cfg, "policy_representation", "joint")
+    representation = getattr(cfg, "action_space", "joint")
     if representation == "eef10":
-        return run_eef(_eef_config(cfg))
+        return run_eef_executor(_eef_config(cfg))
     if representation != "joint":
-        raise ValueError(f"Unknown policy_representation: {representation}")
+        raise ValueError(f"Unknown action_space: {representation}")
+    cfg = _joint_config(cfg)
     init_logging()
     logging.info(pformat(asdict(cfg)))
-
-    norm_stats = _load_state_norm_stats(cfg.dataset_statistics_path, cfg.state_stats_key)
-    state_q01, state_q99 = norm_stats if norm_stats is not None else (None, None)
 
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
 
-    client = WebsocketClientPolicy(cfg.server_host, cfg.server_port)
+    client = make_policy(cfg)
     # Echoed so the operator can manually verify action_chunk_size, image
     # size/count etc. against the training setup before running episodes.
-    server_meta = client.get_server_metadata()
+    server_meta = client.transport.get_server_metadata()
     logging.info(f"starVLA server metadata: {pformat(server_meta)}")
     if cfg.action_chunk_size is not None and (
         type(cfg.action_chunk_size) is not int or cfg.action_chunk_size < 1
@@ -383,7 +330,7 @@ def eval_loop(cfg: StarVLAEvalConfig):
                 cfg.rtc_mode,
             )
         rtc = RTCPolicyClientWrapper(
-            client,
+            client.transport,
             inference_delay=cfg.inference_delay,
             execution_horizon=cfg.steps_per_inference,
             mode=cfg.rtc_mode,
@@ -413,7 +360,7 @@ def eval_loop(cfg: StarVLAEvalConfig):
                 f"the action chunk size ({action_horizon}) so chunks overlap."
             )
         te = TemporalEnsembleClientWrapper(
-            client,
+            client.transport,
             query_period=cfg.steps_per_inference_te,
             action_horizon=action_horizon,
             coeff=cfg.temporal_ensemble_coeff,
@@ -491,9 +438,9 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     # fires the (background) inference at the right offset and
                     # returns the aligned action for this tick.
                     obs = robot.get_observation()
-                    state = _build_state(obs, gripper_cmd, state_q01, state_q99)
-                    images = [obs[key] for key in cfg.camera_keys]
-                    query = {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
+                    policy_observation = _joint_observation(obs, gripper_cmd, cfg)
+                    query = {"examples": [policy_observation],
+                             "unnorm_key": client.unnorm_key}
                     prev_chunk_index = rtc.chunk_index
                     action = rtc.get_action(query)
                     current_step = rtc.current_step_in_chunk + 1
@@ -512,9 +459,9 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     # in the background every steps_per_inference_te steps and returns
                     # the temporally-ensembled action for this tick.
                     obs = robot.get_observation()
-                    state = _build_state(obs, gripper_cmd, state_q01, state_q99)
-                    images = [obs[key] for key in cfg.camera_keys]
-                    query = {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
+                    policy_observation = _joint_observation(obs, gripper_cmd, cfg)
+                    query = {"examples": [policy_observation],
+                             "unnorm_key": client.unnorm_key}
                     prev_chunk_index = te.chunk_index
                     action = te.get_action(query)
                     current_step += 1
@@ -535,8 +482,7 @@ def eval_loop(cfg: StarVLAEvalConfig):
                 ):
                     # Get robot observation
                     obs = robot.get_observation()
-                    state = _build_state(obs, gripper_cmd, state_q01, state_q99)
-                    images = [obs[key] for key in cfg.camera_keys]  # uint8 HWC RGB, in training order
+                    policy_observation = _joint_observation(obs, gripper_cmd, cfg)
 
                     # NOTE: inference is blocking (one flow-matching pass can take
                     # several hundred ms) and no actions are sent while waiting.
@@ -544,10 +490,10 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     # the arm simply pauses between action chunks.
                     infer_start_t = time.perf_counter()
                     resp = client.predict_action(
-                        {"examples": [{"image": images, "lang": cfg.single_task, "state": state}]}
+                        policy_observation
                     )
                     inference_ms = (time.perf_counter() - infer_start_t) * 1000
-                    new_actions = np.asarray(resp["data"]["actions"][0])  # (T, 8), denormalized
+                    new_actions = np.asarray(resp["actions"])  # (T, 8), denormalized
 
                     # Seam diagnostic: how far the new chunk's first action
                     # jumps from the last action actually executed.
@@ -608,21 +554,35 @@ def eval_loop(cfg: StarVLAEvalConfig):
             listener.stop()
 
 
-@parser.wrap()
-def get_cfg(cfg: StarVLAEvalConfig) -> StarVLAEvalConfig:
-    return cfg
+def get_cfg() -> StarVLAEvalConfig:
+    from lerobot.configs import parser
+
+    @parser.wrap()
+    def parse(cfg: StarVLAEvalConfig) -> StarVLAEvalConfig:
+        return cfg
+
+    return parse()
 
 
 def main():
-    register_third_party_plugins()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = get_cfg()
     if cfg.check_config:
-        if cfg.policy_representation == "eef10":
-            from uf_n0_eval import decode_robot_config
+        if cfg.action_space == "eef10":
+            from eef_executor import decode_robot_config
             decode_robot_config(_eef_config(cfg))
+        else:
+            _joint_config(cfg)
         print("StarVLA local config valid; no model, camera or robot constructed")
         return
-    eval_loop(cfg)
+    try:
+        eval_loop(cfg)
+    except KeyboardInterrupt:
+        if cfg.action_space != "eef10" or cfg.deployment_profile not in (
+            "xarm7_eef_n0vtla", "xarm7_eef_ftp1",
+        ):
+            raise
+        logging.info("Stopped")
 
 
 if __name__ == "__main__":

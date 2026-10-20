@@ -1,3 +1,7 @@
+# Copied into each console evaluation run and shared by server/client.
+deployment_profile: xarm7_eef_n0vtla
+action_space: eef10
+
 single_task: Pick up the egg and place it in the green egg tray.
 # Expected checkpoint horizon; checked before connecting the robot.
 action_chunk_size: 25
@@ -9,7 +13,7 @@ dry_run: true
 
 n_episodes: 1
 max_episode_steps: 900
-rgb_keys: [third_camera, wrist_camera]
+camera_keys: [third_camera, wrist_camera]
 tactile_keys: [photon_left, photon_right]
 
 # Maximum change from measured pose or the previous Cartesian target.

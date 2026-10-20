@@ -656,7 +656,9 @@ class RealtimeTeleopController:
                         gello_read_end_ns=sample.gello_read_end_ns,
                     )
                 if self._exception is not None:
-                    raise RuntimeError("Realtime joint control thread failed") from self._exception
+                    raise RuntimeError(
+                        f"Realtime joint control thread failed: {self._exception}"
+                    ) from self._exception
                 remaining = deadline - time.perf_counter()
                 if remaining <= 0:
                     raise TimeoutError("Timed out waiting for an unconsumed realtime action")
@@ -669,7 +671,9 @@ class RealtimeTeleopController:
 
     def raise_if_failed(self) -> None:
         if self._exception is not None:
-            raise RuntimeError("Realtime joint control thread failed") from self._exception
+            raise RuntimeError(
+                f"Realtime joint control thread failed: {self._exception}"
+            ) from self._exception
 
     def get_gripper_feedback_diagnostic(self) -> GripperFeedbackDiagnostic:
         """Return the latest conditioned-feedback state without hardware I/O."""
@@ -822,7 +826,7 @@ class RealtimeTeleopController:
             self._stop.set()
         finally:
             try:
-                if self._pause_requested.is_set():
+                if self._pause_requested.is_set() or self._exception is not None:
                     self.robot.pause_motion()
             except BaseException as exc:
                 if self._exception is None:

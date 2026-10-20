@@ -10,7 +10,7 @@ from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraCon
 from lerobot_robot_ufactory.robots.uf_robot.uf_robot_config import UFRobotConfig
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from uf_n0_eval import decode_robot_config, make_robot
+from eef_executor import decode_robot_config, make_robot
 
 
 class EEFRobotConfigTests(unittest.TestCase):
@@ -42,6 +42,19 @@ class EEFRobotConfigTests(unittest.TestCase):
                 decoded = decode_robot_config(SimpleNamespace(robot=raw, dry_run=False))
                 self.assertEqual(decoded.cameras_args, value)
                 self.assertFalse(decoded.no_action)
+
+    def test_unified_joint_entry_preserves_typed_robot_decoding(self):
+        from copy import deepcopy
+        from lerobot.robots import RobotConfig
+        from uf_starvla_eval import StarVLAEvalConfig, _joint_config
+        raw = self.encoded()
+        before = deepcopy(raw)
+        expected = draccus.decode(RobotConfig, raw)
+        cfg = StarVLAEvalConfig(robot=raw, action_space="joint", dry_run=True)
+        result = _joint_config(cfg)
+        self.assertEqual(draccus.encode(result.robot), draccus.encode(expected))
+        self.assertEqual(raw, before)
+        self.assertFalse(result.robot.no_action)
 
     def test_robot_factory_receives_decoded_config_without_connecting(self):
         cfg = SimpleNamespace(robot=self.encoded(), dry_run=True)

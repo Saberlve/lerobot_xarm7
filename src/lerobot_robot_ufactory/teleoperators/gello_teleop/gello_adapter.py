@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import threading
+import time
 from functools import partial
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
@@ -25,6 +27,7 @@ ADDR_GOAL_CURRENT = 102
 CURRENT_CONTROL_MODE = 0
 POSITION_CONTROL_MODE = 3
 HARD_MAX_GRIPPER_CURRENT_MA = 100.0
+GELLO_STATE_TIMEOUT_S = 0.25
 
 
 @dataclass(frozen=True)
@@ -70,7 +73,96 @@ class SafeDynamixelDriver(DynamixelDriver):
         self._gripper_current_limit_raw: int | None = None
         self._gripper_current_spec: DynamixelModelSpec | None = None
         self._gripper_restore_operating_mode: int | None = None
+        self._sample_condition = threading.Condition()
+        self._sample_sequence = 0
+        self._sample_stamp = None
+        self._read_error = None
         super().__init__(*args, **kwargs)
+
+    def _read_joint_states(self):
+        """Publish only complete samples and retain background serial faults."""
+        try:
+            while not self._stop_thread.wait(0.001):
+                with self._lock:
+                    result = self._groupSyncRead.txRxPacket()
+                    if result != COMM_SUCCESS:
+                        # A transient dropped packet may recover. Its cached
+                        # predecessor still expires, independently of this loop.
+                        continue
+                    positions = np.zeros(len(self._ids), dtype=int)
+                    velocities = np.zeros(len(self._ids), dtype=int)
+                    for index, dxl_id in enumerate(self._ids):
+                        for address, values in (
+                            (driver_module.ADDR_PRESENT_POSITION, positions),
+                            (driver_module.ADDR_PRESENT_VELOCITY, velocities),
+                        ):
+                            if not self._groupSyncRead.isAvailable(dxl_id, address, 4):
+                                raise RuntimeError(f"Incomplete GELLO state from ID{dxl_id}")
+                            value = self._groupSyncRead.getData(dxl_id, address, 4)
+                            values[index] = value - 0x100000000 if value > 0x7FFFFFFF else value
+                    with self._sample_condition:
+                        self._joint_angles = positions
+                        self._velocities = velocities
+                        self._sample_stamp = time.monotonic()
+                        self._sample_sequence += 1
+                        self._sample_condition.notify_all()
+        except Exception as exc:
+            with self._sample_condition:
+                self._read_error = exc
+                self._sample_condition.notify_all()
+
+    def _checked_joint_sample(self, *, require_fresh=False):
+        deadline = time.monotonic() + GELLO_STATE_TIMEOUT_S
+        with self._sample_condition:
+            sequence = self._sample_sequence
+            while True:
+                reason = None
+                if self._read_error is not None:
+                    reason = f"serial read failed: {self._read_error}"
+                elif self._stop_thread.is_set() or not self._reading_thread.is_alive():
+                    reason = "encoder reader stopped"
+                elif (
+                    self._sample_stamp is not None
+                    and time.monotonic() - self._sample_stamp > GELLO_STATE_TIMEOUT_S
+                ):
+                    reason = "encoder data is stale"
+                if reason is not None:
+                    raise RuntimeError(
+                        f"GELLO unavailable: {reason}. "
+                        "Check the USB connection and restart the session."
+                    ) from self._read_error
+                if self._sample_stamp is not None and (
+                    not require_fresh or self._sample_sequence > sequence
+                ):
+                    return self._joint_angles.copy(), self._velocities.copy()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        "GELLO unavailable: no fresh encoder sample. "
+                        "Check the USB connection and restart the session."
+                    )
+                # Also detect a worker that exits without publishing an error.
+                self._sample_condition.wait(min(remaining, 0.01))
+
+    def check_health(self, *, require_fresh=False):
+        if self._is_fake:
+            raise RuntimeError(
+                "GELLO unavailable: simulated encoder driver. "
+                "Connect the physical GELLO and restart the session."
+            )
+        self._checked_joint_sample(require_fresh=require_fresh)
+
+    def get_joints(self):
+        if self._is_fake:
+            return super().get_joints()
+        positions, _ = self._checked_joint_sample()
+        return positions / 2048.0 * np.pi
+
+    def get_positions_and_velocities(self):
+        if self._is_fake:
+            return super().get_positions_and_velocities()
+        positions, velocities = self._checked_joint_sample()
+        return positions / 2048.0 * np.pi, velocities * 0.229 * 2 * np.pi / 60
 
     def _require_real_id8(self, dxl_id: int) -> None:
         if dxl_id != GRIPPER_DYNAMIXEL_ID:

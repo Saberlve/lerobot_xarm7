@@ -44,6 +44,7 @@ def test_capture_fault_discards_only_current_episode(session, monkeypatch, defer
     robot.get_gripper_motion_parameters = lambda: (50.0, 84.0)
     teleop = GelloTeleop(GelloTeleopConfig(gripper_control_mode="keyboard"))
     teleop.connect = lambda: None
+    teleop.check_health = lambda **kwargs: None
     teleop.disconnect = lambda: None
     teleop.set_teleop_enabled = lambda *args, **kwargs: None
     teleop.get_action = lambda: {"J1.pos": float(robot.attempt)}
@@ -160,6 +161,7 @@ def test_capture_saves_or_discards_without_second_confirmation(session, monkeypa
     cfg.dataset.video = True
     teleop = GelloTeleop(GelloTeleopConfig(gripper_control_mode="keyboard"))
     teleop.connect = lambda: None
+    teleop.check_health = lambda **kwargs: None
     teleop.disconnect = lambda: None
     teleop.set_teleop_enabled = lambda *args, **kwargs: None
     teleop.get_action = lambda: {"J1.pos": float(robot.attempt)}
@@ -251,6 +253,7 @@ def test_exit_discards_current_episode_and_postprocesses_saved_raw(session, monk
     robot.get_gripper_motion_parameters = lambda: (50.0, 84.0)
     teleop = GelloTeleop(GelloTeleopConfig(gripper_control_mode="keyboard"))
     teleop.connect = lambda: None
+    teleop.check_health = lambda **kwargs: None
     teleop.disconnect = lambda: None
     teleop.set_teleop_enabled = lambda *args, **kwargs: None
     teleop.get_action = lambda: {"J1.pos": float(robot.attempt)}
@@ -378,6 +381,7 @@ def test_idle_preview_timeout_retries_without_ending_session(session, monkeypatc
     robot.connect = lambda *, defer_motion=False: original_connect()
     teleop = GelloTeleop(GelloTeleopConfig(gripper_control_mode="keyboard"))
     teleop.connect = lambda: None
+    teleop.check_health = lambda **kwargs: None
     teleop.disconnect = lambda: None
     teleop.set_teleop_enabled = lambda *args, **kwargs: None
     session.cfg.teleop = teleop.config
@@ -420,5 +424,57 @@ def test_idle_preview_timeout_retries_without_ending_session(session, monkeypatc
         warnings = [record for record in caplog.records if "Skipping idle preview frame" in record.message]
         assert len(warnings) == 1
         assert "wrist_camera" in warnings[0].message
+    finally:
+        control.close()
+
+
+def test_unplugged_gello_returns_ready_with_error_without_capture(session, monkeypatch):
+    from serial import SerialException
+    from test_gello_connection_health import make_driver
+
+    driver = make_driver()
+    driver._read_error = SerialException("USB disconnected")
+    robot = session.robot
+    original_connect = robot.connect
+    robot.connect = lambda *, defer_motion=False: original_connect()
+    robot.pause_motion = lambda: None
+    robot.reset_to_initial = lambda **kwargs: pytest.fail("must not reset disconnected GELLO")
+    robot.get_gripper_motion_parameters = lambda: (50.0, 84.0)
+    teleop = GelloTeleop(GelloTeleopConfig(gripper_control_mode="keyboard"))
+    teleop._is_connected = True
+    teleop.gello_agent = SimpleNamespace(_robot=SimpleNamespace(
+        _driver=driver, gripper_open_close=None,
+        set_torque_mode=lambda enabled: pytest.fail("must not reuse disconnected serial"),
+    ))
+    teleop.connect = lambda: None
+    teleop.disconnect = lambda: None
+    session.cfg.robot.manual_mode = False
+    session.cfg.teleop = teleop.config
+    monkeypatch.setattr(recording, "make_teleoperator_from_config", lambda cfg: teleop)
+    monkeypatch.setattr(recording, "record_loop", lambda **kwargs: pytest.fail("must not capture"))
+    control = RecordingControl("unplugged-gello")
+    control.prepare_dataset = lambda: None
+    control.preview = RecordingWebPreview(WebPreviewConfig())
+    states = []
+
+    def send(message):
+        if message["type"] != "state":
+            return
+        state = dict(message["state"])
+        states.append(state)
+        if state["phase"] == "ready":
+            action = "exit" if state.get("error") else "start"
+            control.command({"action": action, "session_id": control.session_id,
+                             "version": state["version"], "request_id": str(len(states))})
+
+    control.send = send
+    try:
+        dataset = recording.record(session.cfg, recording_control=control)
+        assert dataset.num_episodes == 0
+        assert any(state["phase"] == "ready" and "USB disconnected" in (state.get("error") or "")
+                   for state in states)
+        assert not any(state["phase"] == "recording" for state in states)
+        assert not teleop._teleop_enabled
+        assert not robot._is_connected
     finally:
         control.close()

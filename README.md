@@ -461,7 +461,7 @@ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
     -u http_proxy -u https_proxy -u all_proxy NO_PROXY='*' no_proxy='*' \
     UV_PROJECT_ENVIRONMENT=.venv-n0 uv sync --python 3.10 --extra xense \
     --default-index https://mirrors.aliyun.com/pypi/simple/
-.venv-n0/bin/python scripts/uf_n0_eval.py --check-config
+.venv/bin/python scripts/uf_starvla_eval.py --config_path config/eval/xarm7_n0_eval.yaml --check_config=true
 # 现有 StarVLA 关节策略入口
 .venv-n0/bin/python scripts/uf_starvla_eval.py --config_path config/eval/xarm7_starvla_eval_config.yaml
 ```

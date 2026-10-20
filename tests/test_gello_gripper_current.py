@@ -1,4 +1,6 @@
 import threading
+import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -72,6 +74,13 @@ def make_driver(handler=None):
     driver._gripper_current_spec = None
     driver._gripper_restore_operating_mode = None
     driver._joint_angles = np.zeros(8, dtype=int)
+    driver._velocities = np.zeros(8, dtype=int)
+    driver._sample_condition = threading.Condition()
+    driver._sample_sequence = 1
+    driver._sample_stamp = time.monotonic()
+    driver._read_error = None
+    driver._stop_thread = threading.Event()
+    driver._reading_thread = SimpleNamespace(is_alive=lambda: True)
     return driver
 
 

@@ -226,6 +226,19 @@ class GelloTeleop(UFBaseTeleop):
             if runtime.status()["state"] != "active":
                 raise RuntimeError("GELLO compensation stopped; disconnect and reconnect to resume")
 
+    def check_health(self, *, require_fresh=False):
+        """Reject disconnected or frozen leader input before robot motion."""
+        if not self._is_connected:
+            raise RuntimeError("GELLO unavailable: not connected. Restart the session.")
+        self.check_current_control()
+        driver = self.gello_agent._robot._driver
+        checker = getattr(driver, "check_health", None)
+        if checker is not None:
+            checker(require_fresh=require_fresh)
+        else:
+            # CurrentRuntime.get_joints already validates its sample age.
+            driver.get_joints()
+
     def get_current_control_status(self):
         runtime = getattr(self, "_current_runtime", None)
         result = {"state": "disabled"} if runtime is None else runtime.status()
@@ -467,19 +480,28 @@ class GelloTeleop(UFBaseTeleop):
 
     def set_teleop_enabled(self, enabled: bool, obs=None):
         if enabled:
-            self.check_current_control()
-        if enabled and not self._is_connected:
-            raise DeviceNotConnectedError("Gello teleop is not connected")
+            if not self._is_connected:
+                raise DeviceNotConnectedError("Gello teleop is not connected")
+            self.check_health(require_fresh=True)
+        else:
+            # Disable follower output even if serial cleanup cannot complete.
+            self._teleop_enabled = False
+            self._needs_alignment = True
+            self._reset_joint_control_mode()
         if enabled and self._needs_alignment:
             if obs is None:
                 raise ValueError("Robot observation is required to enable GELLO teleoperation")
             self.reset_to_robot_observation(obs)
         if not enabled and self._is_connected and hasattr(self, "gello_agent"):
             self._safely_disable_gripper_current_mode("pause")
+            checker = getattr(self.gello_agent._robot._driver, "check_health", None)
+            if checker is not None:
+                try:
+                    checker()
+                except RuntimeError as exc:
+                    logger.warning("GELLO follower disabled; serial cleanup unavailable: %s", exc)
+                    return
             self.gello_agent._robot.set_torque_mode(False)
-            self._needs_alignment = True
-        if not enabled:
-            self._reset_joint_control_mode()
         self._teleop_enabled = enabled
         logger.info("Gello teleoperation %s", "enabled" if enabled else "disabled")
 

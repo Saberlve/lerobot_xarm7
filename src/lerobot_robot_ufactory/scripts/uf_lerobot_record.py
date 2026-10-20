@@ -1525,6 +1525,10 @@ def _reset_recording_robot(robot, *, open_gripper_first=False, cancel_check=None
 
 def _prepare_recording_episode(robot, teleop, is_uf_teleop, manual_mode, *, reset_robot=True, cancel_check=None):
     if is_uf_teleop:
+        check_health = getattr(teleop, "check_health", None)
+        if check_health is not None:
+            # Require a newly received sample before any reset/gripper motion.
+            check_health(require_fresh=True)
         # Stop teleop output before handing control to the xArm reset motion.
         teleop.set_teleop_enabled(False)
 
