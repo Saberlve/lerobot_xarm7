@@ -14,11 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import cast
 from lerobot.utils.import_utils import make_device_from_device_class
 from lerobot.cameras.utils import make_cameras_from_configs as lerobot_make_cameras_from_configs
 from lerobot.cameras.camera import Camera
 from lerobot.cameras.configs import CameraConfig
+
+
+def connect_cameras(cameras: dict[str, Camera]) -> None:
+    """Overlap RealSense warmup; keep other SDK initialization serialized."""
+    if not cameras:
+        return
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="uf-rgb-connect") as pool:
+        pending = [pool.submit(camera.connect) for camera in cameras.values()
+                   if camera.config.type == "intelrealsense"]
+        for camera in cameras.values():
+            if camera.config.type != "intelrealsense":
+                camera.connect()
+        # Join every worker before the caller starts readers or handles failure.
+        for future in pending:
+            future.result()
+    if not all(camera.is_connected for camera in cameras.values()):
+        raise ConnectionError("Could not connect to the cameras, check that all cameras are plugged-in.")
 
 
 def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> dict[str, Camera]:

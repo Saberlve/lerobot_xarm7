@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition, Thread, Event, Lock
 from lerobot.robots import Robot
-from lerobot_robot_ufactory.cameras.utils import make_cameras_from_configs
+from lerobot_robot_ufactory.cameras.utils import connect_cameras, make_cameras_from_configs
 from lerobot_robot_ufactory.cameras.synchronization import (
     TimestampedCameraBuffer,
     select_synchronized_samples,
@@ -427,23 +427,9 @@ class UFRobot(Robot, Thread):
         if self._needs_local_kinematics():
             self._initialize_local_kinematics()
 
-        for cam in self.cameras.values():
-            cam.connect()
-            self._is_connected = self._is_connected and cam.is_connected
+        connect_cameras(self.cameras)
 
-        if not self._is_connected:
-            print("Could not connect to the cameras, check that all cameras are plugged-in.")
-            raise ConnectionError()
-
-        self._start_rgb_sync_buffers()
-        if self.cameras:
-            self._camera_stop_event.clear()
-            self._camera_thread = Thread(
-                target=self._camera_read_worker,
-                daemon=True,
-                name="uf-camera-worker",
-            )
-            self._camera_thread.start()
+        self._start_camera_streams()
 
         # if self._gripper_type == GripperType.PikaGripper:
         #     if not self.pika_gripper.connect():
@@ -470,6 +456,45 @@ class UFRobot(Robot, Thread):
             self._check_motion_code('web standby set_state(3)', self.real_arm.set_state(3))
 
         self._is_connected = True
+
+    def _start_camera_streams(self) -> None:
+        self._start_rgb_sync_buffers()
+        if self.cameras:
+            self._camera_stop_event.clear()
+            self._camera_thread = Thread(
+                target=self._camera_read_worker, daemon=True, name="uf-camera-worker",
+            )
+            self._camera_thread.start()
+
+    def suspend_cameras(self, keys) -> None:
+        """Release layout RGB devices while keeping the arm and Photon alive."""
+        self._camera_stop_event.set()
+        with self._camera_cond:
+            self._camera_cond.notify_all()
+        thread = self._camera_thread
+        if thread is not None:
+            thread.join(timeout=3)
+            if thread.is_alive():
+                raise RuntimeError("Camera reader did not stop; RGB devices were not released")
+        self._camera_thread = None
+        self._stop_rgb_sync_buffers()
+        for key in keys:
+            camera = self.cameras[key]
+            if camera.is_connected:
+                camera.disconnect()
+        with self._camera_cond:
+            self._latest_camera_obs = {}
+            self._latest_camera_timing = {}
+            self._latest_camera_anchor_s = None
+            self._camera_updated = False
+
+    def resume_cameras(self, keys) -> None:
+        """Reconnect released RGB devices without reconnecting the arm/Photon."""
+        connect_cameras({key: self.cameras[key] for key in keys
+                         if not self.cameras[key].is_connected})
+        if not all(camera.is_connected for camera in self.cameras.values()):
+            raise ConnectionError("A retained camera disconnected; exit the evaluation session and reconnect")
+        self._start_camera_streams()
 
     def _start_rgb_sync_buffers(self) -> None:
         """Timestamp every non-Photon RGB stream in a dedicated reader.
