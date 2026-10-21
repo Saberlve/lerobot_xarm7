@@ -1,18 +1,10 @@
-# Validated 2026-10-20 via the public policy server and PolicyClient.
-deployment_profile: xarm7_eef_ftp1
+# Training config: train_files/configs/tasks/egg_pick/N0_egg_pick_baseline.yaml
+deployment_profile: xarm7_eef_n0vtla
 action_space: eef10
-single_task: Pick up the egg and place it in the green egg tray.
-action_chunk_size: 15
-steps_per_inference: 10
-server_host: 127.0.0.1
-server_port: 10093
-state_stats_key: ''
+single_task: "Pick up the egg and place it in the green egg tray."
+action_chunk_size: 15  # 对应训练配置的 chunk_size / action_horizon
+steps_per_inference: 10  # 每执行 10 个动作步后重新推理
 dry_run: true
-fps: 15
-temporal_ensemble: false
-steps_per_inference_te: 2
-temporal_ensemble_coeff: 0.01
-te_ensemble_gripper: false
 n_episodes: 1
 max_episode_steps: 900
 camera_keys:
@@ -26,22 +18,16 @@ max_tcp_step_mm: 75
 max_tcp_rotation_step_deg: 45
 robot:
   type: uf::robot
-  id: uf_robot
   robot_dof: 7
   # Absolute XYZ (mm) + RPY (rad), sent with set_position in mode 7.
   control_space: cartesian
   # Joint-feedback FK supplies the original EEF10 policy state.
   record_space: joint
   robot_ip: 192.168.1.245
-  gripper_type: 2
   gripper_speed: 50
-  gripper_force: 50
   gripper_command_interval_s: 0.03334
   max_linear_velocity: 100  # mm/s
   min_tcp_z_mm: 2
-  tcp_z_guard_backend: local_projection
-  controller_safety_boundary: true
-  enable_logs: false
   cameras:
     wrist_camera:
       type: intelrealsense
@@ -67,3 +53,7 @@ robot:
       width: 400
       height: 700
       fps: 60
+server_host: 127.0.0.1
+server_port: 10093
+fps: 15
+temporal_ensemble: false

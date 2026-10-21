@@ -1,0 +1,44 @@
+# Training config: train_files/configs/tasks/whiteboard_erase/pi05_whiteboard_erase_baseline.yaml
+deployment_profile: xarm7_eef10
+single_task: "Grasp the whiteboard eraser, maintain steady contact while erasing all marks in the target area, then withdraw from the whiteboard."
+action_chunk_size: 30  # 对应训练配置的 chunk_size / action_horizon
+steps_per_inference: 15  # 每执行 15 个动作步后重新推理
+action_space: eef10
+dry_run: true
+max_episode_steps: 900
+# Maximum change from measured pose or the previous Cartesian target.
+max_tcp_step_mm: 75
+max_tcp_rotation_step_deg: 45
+robot:
+  type: uf::robot
+  robot_dof: 7
+  # Absolute XYZ (mm) + RPY (rad), sent with set_position in mode 7.
+  control_space: cartesian
+  # Joint-feedback FK supplies the original EEF10 policy state.
+  record_space: joint
+  robot_ip: 192.168.1.245
+  gripper_speed: 50
+  max_linear_velocity: 100  # mm/s
+  min_tcp_z_mm: -2.0
+  gripper_error_log_path: logs/xarm7_gripper_errors.log
+  cameras:
+    wrist_camera:
+      type: intelrealsense
+      serial_number_or_name: '242622070583'
+      width: 640
+      height: 480
+      fps: 15
+    third_camera:
+      type: intelrealsense
+      serial_number_or_name: '148522072685'
+      width: 640
+      height: 480
+      fps: 15
+server_host: 127.0.0.1
+server_port: 10093
+fps: 15
+n_episodes: 1
+camera_keys:
+- third_camera
+- wrist_camera
+temporal_ensemble: false
