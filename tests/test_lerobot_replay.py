@@ -188,13 +188,15 @@ def test_reset_to_initial_enables_robot_before_motion(monkeypatch):
             control_space="joint",
             gripper_type=0,
             cameras={},
+            min_tcp_z_mm=10.0,
         )
     )
     arm = FakeArm()
     robot.real_arm = arm
     robot._is_connected = True
     robot._initial_point = [0.0] * 7
-    robot.configure = lambda: None
+    robot._min_tcp_z_mm = None  # This test isolates reset ordering from the height guard.
+    robot.configure = lambda **kwargs: None
 
     robot.reset_to_initial()
 

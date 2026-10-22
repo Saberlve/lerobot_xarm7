@@ -201,6 +201,7 @@ def test_discard_reset_opens_first_and_resume_only_realigns():
             calls.append("gripper_open")
 
         def reset_to_initial(self):
+            self.open_gripper()
             calls.append("robot_reset")
 
         def get_observation(self):
@@ -215,7 +216,7 @@ def test_discard_reset_opens_first_and_resume_only_realigns():
 
     robot, teleop = Robot(), Teleop()
     teleop.set_teleop_enabled(False)
-    _reset_recording_robot(robot, open_gripper_first=True)
+    _reset_recording_robot(robot)
     assert calls == ["teleop_False", "gripper_open", "robot_reset"]
     _prepare_recording_episode(robot, teleop, True, False, reset_robot=False)
     assert calls == [
@@ -232,8 +233,9 @@ def test_failed_gripper_open_prevents_discard_reset():
             raise RuntimeError("gripper did not open")
 
         def reset_to_initial(self):
+            self.open_gripper()
             calls.append("robot_reset")
 
     with pytest.raises(RuntimeError, match="gripper did not open"):
-        _reset_recording_robot(Robot(), open_gripper_first=True)
+        _reset_recording_robot(Robot())
     assert calls == []

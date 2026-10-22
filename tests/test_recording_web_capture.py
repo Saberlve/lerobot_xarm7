@@ -336,10 +336,11 @@ def test_exit_discards_current_episode_and_postprocesses_saved_raw(session, monk
         control.close()
 
 
-@pytest.mark.parametrize("cancelled", [False, True])
-def test_web_reset_can_cancel_before_sending_motion(cancelled):
+@pytest.mark.parametrize("cancel_stage", ["none", "before", "before_open", "after_open"])
+def test_web_reset_can_cancel_before_sending_motion(cancel_stage):
     from lerobot_robot_ufactory.robots.uf_robot.uf_robot import UFRobot
     calls = []
+    cancelled = cancel_stage == "before"
     class Arm:
         def motion_enable(self, **kwargs):
             calls.append("enable")
@@ -349,6 +350,9 @@ def test_web_reset_can_cancel_before_sending_motion(cancelled):
         def set_mode(self, mode):
             return 0
         def set_state(self, state):
+            nonlocal cancelled
+            if cancel_stage == "before_open":
+                cancelled = True
             return 0
         def set_servo_angle(self, **kwargs):
             assert kwargs["wait"] is False
@@ -361,17 +365,28 @@ def test_web_reset_can_cancel_before_sending_motion(cancelled):
     robot.real_arm = Arm()
     robot._initial_point = [0] * 7
     robot._dof = 7
+    robot._gripper_type = 0
     robot._min_tcp_z_mm = None
     robot._check_motion_code = lambda operation, code: None
-    robot.configure = lambda: calls.append("configure")
+    def open_gripper():
+        nonlocal cancelled
+        calls.append("open")
+        if cancel_stage == "after_open":
+            cancelled = True
+    robot.open_gripper = open_gripper
+    def configure(**kwargs):
+        assert kwargs == {"move_gripper_to_open": False}
+        calls.append("configure")
+    robot.configure = configure
     robot.pause_motion = lambda: calls.append("pause")
-    if cancelled:
+    if cancel_stage != "none":
         with pytest.raises(InterruptedError):
-            robot.reset_to_initial(cancel_check=lambda: True)
-        assert calls == ["pause"]
+            robot.reset_to_initial(cancel_check=lambda: cancelled)
+        assert calls == {"before": ["pause"], "before_open": ["enable", "pause"],
+                         "after_open": ["enable", "open", "pause"]}[cancel_stage]
     else:
         robot.reset_to_initial(cancel_check=lambda: False)
-        assert calls == ["enable", "move", "configure"]
+        assert calls == ["enable", "open", "move", "configure"]
 
 
 @pytest.mark.parametrize("missed_frames", [1, 3])

@@ -69,22 +69,32 @@ class UFMockTeleop(Teleoperator, threading.Thread):
         self.__set_record_status(RECORD_NONE)
         self._action_datas.clear()
 
+    def _reset_arm_to_initial(self, speed):
+        if self.config.gripper_type > 0:
+            code = self.arm.set_gripper_position(800, wait=True)
+            if code != 0:
+                raise RuntimeError(f"Failed to open gripper before reset, code={code}")
+        if self.config.initial_tcp_pose is None:
+            return 0
+        return self.arm.set_position(*self.config.initial_tcp_pose, speed=speed, wait=True)
+
     def __init_robot(self):
         self.arm.connect(self.config.robot_ip)
         self.arm.motion_enable()
         self.arm.set_mode(0)
         self.arm.set_state(0)
 
-        if self.config.initial_tcp_pose is not None:
-            self.arm.set_position(*self.config.initial_tcp_pose, speed=self.config.mock_tcp_speed, wait=True)
         if self.config.gripper_type > 0:
             self.arm.set_gripper_enable(True)
             self.arm.set_gripper_speed(3000)
-            self.arm.set_gripper_position(800, wait=True)
 
             if self.arm.arm.version_is_ge(2, 7, 100) and hasattr(self.arm, 'set_external_device_monitor_params'):
                 self.arm.set_external_device_monitor_params(self.config.gripper_type, self.config.gripper_freq)
                 self._report_gripper = True
+
+        code = self._reset_arm_to_initial(self.config.mock_tcp_speed)
+        if code != 0:
+            raise RuntimeError(f"Failed to move to mock initial point, code={code}")
 
         self.rt_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.rt_sock.setblocking(True)
@@ -95,12 +105,11 @@ class UFMockTeleop(Teleoperator, threading.Thread):
     def __mock(self, events=None) -> bool:
         mock_tcp_speed = self.config.mock_tcp_speed
         grasp_tcp_speed = self.config.grasp_tcp_speed
-        initial_tcp_pose = self.config.initial_tcp_pose
         self.arm.set_mode(0)
         self.arm.set_state(0)
-        self.arm.set_position(*initial_tcp_pose, speed=mock_tcp_speed)
-        if self.config.gripper_type > 0:
-            self.arm.set_gripper_position(800, wait=True)
+        code = self._reset_arm_to_initial(mock_tcp_speed)
+        if code != 0:
+            return False
 
         if abs(self._last_mock_x - self.mock_x_range[0]) >= abs(self._last_mock_x - self.mock_x_range[1]):
             mock_x_range = [self.mock_x_range[0], self._last_mock_x]
@@ -172,7 +181,7 @@ class UFMockTeleop(Teleoperator, threading.Thread):
         _, tcp_hover_pose = self.arm.get_position(is_radian=False)
 
         # 回到初始位置
-        code = self.arm.set_position(*initial_tcp_pose, speed=mock_tcp_speed, wait=True)
+        code = self._reset_arm_to_initial(mock_tcp_speed)
         if code or (events and events['exit_early']):  # exit early
             return False
 
@@ -304,7 +313,7 @@ class UFMockTeleop(Teleoperator, threading.Thread):
             return False
         time.sleep(0.25)
         # 回到初始位置
-        code = self.arm.set_position(*initial_tcp_pose, speed=grasp_tcp_speed, wait=True)
+        code = self._reset_arm_to_initial(grasp_tcp_speed)
         if code or (events and events['exit_early']):  # exit early
             self.__reset_action_data()
             return False

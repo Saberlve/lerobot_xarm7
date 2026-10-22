@@ -743,13 +743,14 @@ class UFRobot(Robot, Thread):
             self.stop_gripper_at_current_position()
 
     def open_gripper(self) -> None:
-        """Open the configured gripper before a recording reset."""
+        """Wait for the configured gripper to open before resetting the arm."""
         if not self._is_connected or self.real_arm is None:
             raise ConnectionError("UF Robot is not connected")
         if self._gripper_type > GripperType.NoGripper:
             self._configure_gripper(move_to_open=True)
 
     def reset_to_initial(self, cancel_check=None) -> None:
+        """Open the gripper successfully, then move to the SDK initial pose."""
         if not self._is_connected or self.real_arm is None:
             raise ConnectionError("UF Robot is not connected")
         if self._initial_point is None:
@@ -766,6 +767,13 @@ class UFRobot(Robot, Thread):
         self._check_motion_code("set_mode(0)", code)
         code = self.real_arm.set_state(0)
         self._check_motion_code("set_state(0)", code)
+        if cancel_check is not None and cancel_check():
+            self.pause_motion()
+            raise InterruptedError("Reset cancelled before opening the gripper")
+        self.open_gripper()
+        if cancel_check is not None and cancel_check():
+            self.pause_motion()
+            raise InterruptedError("Reset cancelled after opening the gripper")
         code = self.real_arm.set_servo_angle(
             angle=self._initial_point,
             speed=ROBOT_RESET_SPEED_DEG,
@@ -791,7 +799,7 @@ class UFRobot(Robot, Thread):
                     raise TimeoutError("Web reset did not reach the initial pose")
                 time.sleep(0.05)
 
-        self.configure()
+        self.configure(move_gripper_to_open=False)
         if self._min_tcp_z_mm is not None:
             self._initialize_tcp_z_guard()
 

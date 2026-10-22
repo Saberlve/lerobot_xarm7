@@ -748,6 +748,8 @@ def test_normal_mode_waits_for_gripper_to_open_before_control(monkeypatch, tmp_p
 
     open_calls = [call for call in arm.calls if call[0] == "set_gripper_position"]
     assert open_calls == [("set_gripper_position", 800, {"wait": True})]
+    names = [call[0] for call in arm.calls]
+    assert names.index("set_gripper_position") < names.index("set_servo_angle")
     assert robot._last_gripper_command == 0.0
 
     before_writes = len(
@@ -767,8 +769,10 @@ def test_normal_mode_waits_for_gripper_to_open_before_control(monkeypatch, tmp_p
     (2, 84, "set_gripper_g2_position"),
 ])
 @pytest.mark.parametrize("open_fails", [False, True])
-def test_discard_reset_waits_for_gripper_before_arm_motion(
-    monkeypatch, tmp_path, gripper_type, open_position, api, open_fails,
+@pytest.mark.parametrize("reset_entry", ["direct", "recording", "cancellable"])
+@pytest.mark.parametrize("manual_mode", [False, True])
+def test_every_reset_waits_for_gripper_before_arm_motion(
+    monkeypatch, tmp_path, gripper_type, open_position, api, open_fails, reset_entry, manual_mode,
 ):
     from lerobot_robot_ufactory.robots.uf_robot import uf_robot as uf_robot_module
 
@@ -778,7 +782,7 @@ def test_discard_reset_waits_for_gripper_before_arm_motion(
     robot = UFRobot(UFRobotConfig(
         calibration_dir=tmp_path, robot_ip=arm.robot_ip, robot_dof=7,
         min_tcp_z_mm=10.0,
-        gripper_type=gripper_type, manual_mode=True, gripper_error_log_path=None,
+        gripper_type=gripper_type, manual_mode=manual_mode, gripper_error_log_path=None,
     ))
     robot.connect()
     arm.calls.clear()
@@ -794,13 +798,19 @@ def test_discard_reset_waits_for_gripper_before_arm_motion(
         return 23 if open_fails else 0
 
     monkeypatch.setattr(arm, api, open_gripper)
+    arm.get_servo_angle = lambda **kwargs: (0, arm.initial_point)
+    def reset():
+        if reset_entry == "recording":
+            record_module._reset_recording_robot(robot)
+        else:
+            robot.reset_to_initial(cancel_check=(lambda: False) if reset_entry == "cancellable" else None)
     if open_fails:
         with pytest.raises(RuntimeError, match=f"{api} failed, code=23"):
-            record_module._reset_recording_robot(robot, open_gripper_first=True)
+            reset()
         assert not any(call[0] == "set_servo_angle" for call in arm.calls)
         assert robot._last_gripper_command == 1.0
     else:
-        record_module._reset_recording_robot(robot, open_gripper_first=True)
+        reset()
         opens = [i for i, call in enumerate(arm.calls) if call[0] == api]
         resets = [i for i, call in enumerate(arm.calls) if call[0] == "set_servo_angle"]
         assert len(opens) == len(resets) == 1
@@ -808,7 +818,7 @@ def test_discard_reset_waits_for_gripper_before_arm_motion(
         assert arm.calls[opens[0]][1] == open_position
         assert robot._last_gripper_command == 0.0
         assert robot._gripper_param.gripper_norm == 0.0
-        assert arm.mode == 2
+        assert arm.mode == (2 if manual_mode else robot.config.joint_command_mode)
     assert arm._arm._baud_checkset is False
     robot.disconnect()
 

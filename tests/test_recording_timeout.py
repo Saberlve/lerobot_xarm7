@@ -458,21 +458,24 @@ def test_keyboard_discard_opens_and_resets_before_waiting_for_start(session, mon
             callbacks["press"](keys.left)
 
     def open_gripper():
-        dataset = session.dataset
-        assert dataset.episode_buffer["episode_index"] == 1
-        assert dataset.episode_buffer["size"] == 0
-        assert not dataset._get_image_file_dir(1, "observation.images.photon").exists()
-        assert dataset.saved[0]["size"] == 2
+        if session.robot.attempt == 1:
+            dataset = session.dataset
+            assert dataset.episode_buffer["episode_index"] == 1
+            assert dataset.episode_buffer["size"] == 0
+            assert not dataset._get_image_file_dir(1, "observation.images.photon").exists()
+            assert dataset.saved[0]["size"] == 2
         calls.append("open")
 
     def reset():
+        # Real UFRobot owns gripper opening on every reset, including retries.
+        session.robot.open_gripper()
         calls.append("reset")
         original_reset()
 
     def main_loop_sleep(_duration):
         nonlocal wait_ticks
         if session.robot.attempt == 2:
-            assert calls == ["reset", "reset", "open", "reset"]
+            assert calls == ["open", "reset", "open", "reset", "open", "reset"]
             assert session.robot.observation_count == 0
             assert session.dataset.episode_buffer["size"] == 0
             wait_ticks += 1
@@ -493,7 +496,7 @@ def test_keyboard_discard_opens_and_resets_before_waiting_for_start(session, mon
     ))
     dataset = recording.record(session.cfg, async_save=async_save)
     assert wait_ticks == 4
-    assert calls == ["reset", "reset", "open", "reset"]
+    assert calls == ["open", "reset", "open", "reset", "open", "reset"]
     assert [row["episode_index"] for row in dataset.saved] == [0, 1]
     assert dataset.saved[1]["frames"][0]["observation.state"].tolist() == [2.0]
     assert session.retry_prompts == 0

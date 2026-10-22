@@ -481,7 +481,7 @@ def controlled_recording(
                     recording._discard_current_episode(dataset)
                     control.transition("resetting", stage="Opening gripper, then resetting arm")
                     try:
-                        recording._reset_recording_robot(robot, open_gripper_first=True,
+                        recording._reset_recording_robot(robot,
                             cancel_check=lambda: control.events["pause_recording"])
                         reset_after_discard = True
                     except InterruptedError:

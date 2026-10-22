@@ -1505,15 +1505,11 @@ def record_loop(
     return episode_synchronization
 
 
-def _reset_recording_robot(robot, *, open_gripper_first=False, cancel_check=None):
+def _reset_recording_robot(robot, *, cancel_check=None):
     if cancel_check is not None and cancel_check():
         robot.pause_motion()
         raise InterruptedError('Reset cancelled before motion')
-    if open_gripper_first:
-        open_gripper = getattr(robot, "open_gripper", None)
-        if open_gripper is not None:
-            # The gripper command must finish successfully before arm motion.
-            open_gripper()
+    # The robot reset owns gripper opening for recording and evaluation alike.
     reset = getattr(robot, "reset_to_initial", None)
     if reset is None:
         reset = robot.configure
@@ -2069,7 +2065,7 @@ def record(cfg: UFRecordConfig, async_save: bool = False, postprocess_only: bool
                 if events["stop_recording"]:
                     break
                 if is_uf_teleop or manual_mode:
-                    _reset_recording_robot(robot, open_gripper_first=True)
+                    _reset_recording_robot(robot)
                     robot_reset_after_discard = True
                 if is_evt:
                     wait_for_start_release = bool(key_dict[keyboard.Key.space])
