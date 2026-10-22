@@ -2,7 +2,7 @@
 deployment_profile: xarm7_eef10
 single_task: "Insert the charger plug into the socket."
 action_chunk_size: 25  # 对应训练配置的 chunk_size / action_horizon
-steps_per_inference: 15  # 每执行 15 个动作步后重新推理
+steps_per_inference: 23  # 每执行 23 个动作步后重新推理
 action_space: eef10
 dry_run: true
 max_episode_steps: 900

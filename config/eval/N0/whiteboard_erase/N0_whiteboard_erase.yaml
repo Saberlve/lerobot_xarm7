@@ -3,7 +3,7 @@ deployment_profile: xarm7_eef_n0vtla
 action_space: eef10
 single_task: "Grasp the whiteboard eraser, maintain steady contact while erasing all marks in the target area, then withdraw from the whiteboard."
 action_chunk_size: 30  # 对应训练配置的 chunk_size / action_horizon
-steps_per_inference: 15  # 每执行 15 个动作步后重新推理
+steps_per_inference: 25  # 每执行 25 个动作步后重新推理
 dry_run: true
 n_episodes: 1
 max_episode_steps: 900

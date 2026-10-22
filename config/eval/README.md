@@ -8,7 +8,9 @@
 通常只需关注配置顶部两个参数：
 
 - `action_chunk_size`：与模型训练的 `chunk_size` / `action_horizon` 一致，用于检查服务端模型是否匹配；修改此值不会改变模型输出长度。
-- `steps_per_inference`：chip_pick、whiteboard_erase、charger_insert 为 15，其余任务为 10；表示执行相应数量的动作步后重新推理，并非模型内部的去噪迭代次数。所有任务关闭 temporal ensemble。
+- `steps_per_inference`：四种模型均按任务设置：chip_pick=23、egg_pick=13、charger_press=10、pullback_car=13、whiteboard_erase=25、nut_removal=13、nut_tighten=13、charger_insert=23；表示执行相应数量的动作步后重新推理，并非模型内部的去噪迭代次数。所有任务关闭 temporal ensemble。
+
+下表为各模型的 `action_chunk_size`（训练输出长度）：
 
 | 任务 | ACT | pi05 | N0 | FTP1 |
 |---|---|---|---|---|

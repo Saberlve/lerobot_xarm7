@@ -3,7 +3,7 @@ deployment_profile: xarm7_eef_ftp1
 action_space: eef10
 single_task: "Pick up the egg and place it in the green egg tray."
 action_chunk_size: 15  # 对应训练配置的 chunk_size / action_horizon
-steps_per_inference: 10  # 每执行 10 个动作步后重新推理
+steps_per_inference: 13  # 每执行 13 个动作步后重新推理
 server_host: 127.0.0.1
 server_port: 10093
 state_stats_key: ''

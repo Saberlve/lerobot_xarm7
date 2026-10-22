@@ -3,7 +3,7 @@ deployment_profile: xarm7_eef_ftp1
 action_space: eef10
 single_task: "Insert the charger plug into the socket."
 action_chunk_size: 25  # 对应训练配置的 chunk_size / action_horizon
-steps_per_inference: 15  # 每执行 15 个动作步后重新推理
+steps_per_inference: 23  # 每执行 23 个动作步后重新推理
 server_host: 127.0.0.1
 server_port: 10093
 state_stats_key: ''
