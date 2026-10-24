@@ -5,6 +5,7 @@ Policies and observation builders are injected by each model entry.
 """
 from __future__ import annotations
 import logging
+import os
 import select
 import sys
 import time
@@ -34,6 +35,8 @@ class EEFExecutionConfig:
     n_episodes: int = 1
     max_episode_steps: int = 900
     dry_run: bool = True
+    record_video: bool = False
+    video_dir: str = ""
     max_joint_step_deg: float = 90
     ik_position_tolerance_mm: float = 2
     ik_rotation_tolerance_deg: float = 2
@@ -41,6 +44,8 @@ class EEFExecutionConfig:
     max_tcp_rotation_step_deg: float = 45
 
     def __post_init__(self):
+        if type(self.record_video) is not bool:
+            raise ValueError("record_video must be boolean")
         if self.action_space not in ("eef10", "joint"):
             raise ValueError("action_space must be eef10 or joint")
         if self.action_chunk_size is not None and (type(self.action_chunk_size) is not int or self.action_chunk_size < 1):
@@ -267,7 +272,7 @@ def run(
     command_reader=read_command,
     sleep=time.sleep,
 ):
-    robot = policy = te = None
+    robot = policy = te = recording = None
     exit_requested = False
     cartesian = cfg.robot.get("control_space") == "cartesian"
 
@@ -312,6 +317,9 @@ def run(
         logging.info("阶段：连接机械臂和相机")
         robot = robot_factory(cfg)
         robot.connect(defer_motion=True)
+        if getattr(cfg, "record_video", False) or os.environ.get("VLARMORY_RECORD_VIDEO") == "1":
+            from lerobot_robot_ufactory.datasets.evaluation_video import start_evaluation_video
+            recording = start_evaluation_video(robot, cfg)
         if robot._local_kinematics is None:
             raise RuntimeError("Recording FK was not initialized")
         logging.info("阶段：机械臂和相机连接完成，耗时 %.2f 秒", time.monotonic() - stage_start)
@@ -394,7 +402,11 @@ def run(
                     robot.pause_motion()
             finally:
                 try:
-                    robot.disconnect()
+                    try:
+                        if recording is not None:
+                            recording.close()
+                    finally:
+                        robot.disconnect()
                 finally:
                     if policy is not None:
                         (te if te is not None else policy).close()

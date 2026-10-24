@@ -38,6 +38,7 @@ Mutually exclusive with `rtc_mode`; `steps_per_inference` is ignored.
 """
 
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
@@ -56,6 +57,8 @@ class StarVLAEvalConfig:
     # Robot state/action representation is independent of the model framework.
     action_space: str = "joint"
     dry_run: bool = True
+    record_video: bool = False
+    video_dir: str = ""
     check_config: bool = False
     max_episode_steps: int = 900
     max_joint_step_deg: float = 90
@@ -116,6 +119,8 @@ class StarVLAEvalConfig:
     state_stats_key: str = ""
 
     def __post_init__(self):
+        if type(self.record_video) is not bool:
+            raise ValueError("record_video must be boolean")
         # Preserve each former entry's defaults when a config omits a field.
         defaults = dict(fps=30, steps_per_inference=25, steps_per_inference_te=10,
                         te_ensemble_gripper=True, n_episodes=50, camera_keys=["camera"],
@@ -403,6 +408,10 @@ def eval_loop(cfg: StarVLAEvalConfig):
         cfg.log_dir if cfg.enable_logs else ""
     )
     run_start_t = time.perf_counter()
+    recording = None
+    if cfg.record_video or os.environ.get("VLARMORY_RECORD_VIDEO") == "1":
+        from lerobot_robot_ufactory.datasets.evaluation_video import start_evaluation_video
+        recording = start_evaluation_video(robot, cfg)
 
     try:
         episode = 0
@@ -546,6 +555,8 @@ def eval_loop(cfg: StarVLAEvalConfig):
 
     finally:
         print("\n********** starVLA Policy Eval Loop Exit **********")
+        if recording is not None:
+            recording.close()
         close_logs()
         client.close()
         if robot.is_connected:

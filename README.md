@@ -467,3 +467,12 @@ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
 ```
 
 服务端启动、N0 dry run 与执行说明见 [评测指南](scripts/README_eval.md)。
+
+### 可选评测录像
+
+统一 `uf_starvla_eval.py` / EEF 执行器支持 `record_video: true`（默认 `false`）
+和可选 `video_dir`。录制 `camera_keys` 中的两路 RGB，固定 15 FPS。
+从现有相机采集缓存分流，后台线程和独立 FFmpeg H.264 进程完成录像，编码背压不阻塞
+策略控制循环。需要 PATH 中有含 libx264 的 `ffmpeg`。控制台提供开关并将每条视频与
+评测结果关联；终端运行时默认保存到 `videos/eval-<时间戳>/`，指定 `video_dir` 时
+请使用尚不存在的目录。
