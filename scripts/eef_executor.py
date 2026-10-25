@@ -14,11 +14,19 @@ import numpy as np
 
 POSE_KEYS = ("pose.x", "pose.y", "pose.z", "pose.r11", "pose.r21", "pose.r31", "pose.r12", "pose.r22", "pose.r32")
 
+
+def validate_gripper_config(cfg):
+    if cfg.action_space != "eef10" or cfg.temporal_ensemble or cfg.n_episodes != 1:
+        raise ValueError("continue_move requires EEF10, one episode and blocking inference")
+
+
 @dataclass
 class EEFExecutionConfig:
     robot: dict
     deployment_profile: str | None = None
     action_space: str = "eef10"
+    execution_mode: str = "full"
+    gripper_log_dir: str = ""
     server_host: str = "127.0.0.1"
     server_port: int = 10093
     state_stats_key: str | None = None
@@ -37,6 +45,8 @@ class EEFExecutionConfig:
     dry_run: bool = True
     record_video: bool = False
     video_dir: str = ""
+    enable_logs: bool = False
+    log_dir: str = "logs"
     max_joint_step_deg: float = 90
     ik_position_tolerance_mm: float = 2
     ik_rotation_tolerance_deg: float = 2
@@ -44,6 +54,10 @@ class EEFExecutionConfig:
     max_tcp_rotation_step_deg: float = 45
 
     def __post_init__(self):
+        if self.execution_mode not in ("full", "continue_move"):
+            raise ValueError("execution_mode must be full or continue_move")
+        if self.execution_mode == "continue_move":
+            validate_gripper_config(self)
         if type(self.record_video) is not bool:
             raise ValueError("record_video must be boolean")
         if self.action_space not in ("eef10", "joint"):
@@ -89,7 +103,7 @@ class EEFExecutionConfig:
             raise ValueError("single_task must match the training instruction")
 
 
-def build_observation(robot, obs, cfg):
+def measured_state(robot, obs, cfg):
     if cfg.robot.get("control_space") == "cartesian":
         joints = np.asarray([obs[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)])
         transform = robot._local_kinematics.forward_matrix(joints)
@@ -100,6 +114,11 @@ def build_observation(robot, obs, cfg):
     raw = np.asarray([recorded[robot.prefix + key] for key in (*POSE_KEYS, "gripper.pos")], dtype=np.float32)
     if not np.isfinite(raw).all():
         raise ValueError("Non-finite robot EEF state")
+    return raw
+
+
+def build_observation(robot, obs, cfg):
+    raw = measured_state(robot, obs, cfg)
     camera_keys = cfg.camera_keys
     result = dict(state=raw, lang=cfg.single_task,
                   image=[np.asarray(obs[robot.prefix + key]).copy() for key in camera_keys])
@@ -272,7 +291,12 @@ def run(
     command_reader=read_command,
     sleep=time.sleep,
 ):
-    robot = policy = te = recording = None
+    if getattr(cfg, "execution_mode", "full") not in ("full", "continue_move"):
+        raise ValueError("Unsupported execution mode; use full or continue_move")
+    robot = policy = te = recording = trace = action_log = None
+    diagnostic = getattr(cfg, "execution_mode", "full") == "continue_move"
+    if diagnostic:
+        validate_gripper_config(cfg)
     exit_requested = False
     cartesian = cfg.robot.get("control_space") == "cartesian"
 
@@ -315,9 +339,20 @@ def run(
                          cfg.temporal_ensemble_coeff, cfg.te_ensemble_gripper)
         stage_start = time.monotonic()
         logging.info("阶段：连接机械臂和相机")
+        if diagnostic:
+            from lerobot_robot_ufactory.evaluation_logging.motion_diagnostics import MotionDiagnostics
+            directory = cfg.gripper_log_dir or os.environ.get('VLARMORY_GRIPPER_LOG_DIR')
+            trace = MotionDiagnostics(directory)
+        elif getattr(cfg, 'enable_logs', False) and getattr(cfg, 'log_dir', 'logs'):
+            from lerobot_robot_ufactory.evaluation_logging.eef_action_log import EEFActionLog
+            action_log = EEFActionLog(getattr(cfg, 'log_dir', 'logs'))
         robot = robot_factory(cfg)
-        robot.connect(defer_motion=True)
-        if getattr(cfg, "record_video", False) or os.environ.get("VLARMORY_RECORD_VIDEO") == "1":
+        if diagnostic:
+            robot.connect(defer_motion=True, from_current_pose=True)
+        else:
+            robot.connect(defer_motion=True)
+        record_video = getattr(cfg, "record_video", False) or os.environ.get("VLARMORY_RECORD_VIDEO") == "1"
+        if record_video and not diagnostic:
             from lerobot_robot_ufactory.datasets.evaluation_video import start_evaluation_video
             recording = start_evaluation_video(robot, cfg)
         if robot._local_kinematics is None:
@@ -335,14 +370,30 @@ def run(
                 break
             if not cfg.dry_run:
                 stage_start = time.monotonic()
-                logging.info("阶段：复位机械臂（第 %d/%d 条）", episode + 1, cfg.n_episodes)
-                robot.reset_to_initial(cancel_check=poll_exit)
-                logging.info("阶段：复位完成，耗时 %.2f 秒", time.monotonic() - stage_start)
+                if diagnostic:
+                    if poll_exit():
+                        break
+                    robot.prepare_policy_from_current()
+                    logging.info("闭环动作诊断：从当前臂位同时执行机械臂与夹爪，不预先闭合或复位")
+                else:
+                    logging.info("阶段：复位机械臂（第 %d/%d 条）", episode + 1, cfg.n_episodes)
+                    robot.reset_to_initial(cancel_check=poll_exit)
+                    logging.info("阶段：复位完成，耗时 %.2f 秒", time.monotonic() - stage_start)
+            if diagnostic and record_video:
+                from lerobot_robot_ufactory.datasets.evaluation_video import start_evaluation_video
+                recording = start_evaluation_video(robot, cfg)
             (te if te is not None else policy).reset()
             logging.info("Episode %d/%d", episode + 1, cfg.n_episodes)
             actions = None
             offset = 0
             reference = None
+            chunk = 0
+            inference_ms = 0.
+            observation_elapsed_s = None
+            if trace:
+                obs = observe()
+                trace.begin([obs[f'{robot.prefix}J{i}.pos'] for i in range(1, 8)],
+                            measured_state(robot, obs, cfg), cfg)
             for step in range(cfg.max_episode_steps):
                 command = command_reader()
                 if command == "q":
@@ -361,6 +412,9 @@ def run(
                         break
                 elif actions is None or offset >= cfg.steps_per_inference:
                     obs = observe()
+                    if trace:
+                        observation_elapsed_s = trace.elapsed()
+                        input_state = measured_state(robot, obs, cfg)
                     reference = observation_reference(obs)
                     start = time.monotonic()
                     actions = np.asarray(policy.predict_action(observation_builder(robot, obs, cfg))["actions"])
@@ -370,45 +424,91 @@ def run(
                         "Episode=%d step=%d inference=%.1f ms", episode + 1, step, (time.monotonic() - start) * 1000
                     )
                     offset = 0
+                    chunk += 1
+                    inference_ms = (time.monotonic() - start) * 1000
+                    if trace:
+                        trace.prediction(actions, chunk=chunk, step=step,
+                                         observation_elapsed_s=observation_elapsed_s,
+                                         inference_ms=inference_ms, state=input_state)
                     # Discard a completed inference when reset/exit arrived while waiting.
                     command = command_reader()
                     if command in {"r", "q"}:
                         exit_requested = command == "q"
                         break
                 start = tick_start if te is not None else time.monotonic()
+                if trace:
+                    # Telemetry uses RT cache only: preserve the original RGB /
+                    # tactile acquisition cadence and avoid added controller RPCs.
+                    feedback = robot.get_motion_observation()
+                    feedback_elapsed_s = feedback.get('_state_sample_monotonic_s', time.monotonic()) - trace.started
+                    gripper_feedback_elapsed_s = feedback.get('_gripper_sample_monotonic_s', time.monotonic()) - trace.started
                 if te is None:
                     action = actions[offset]
                 command = (cartesian_action if cartesian else joint_action)(robot, action, reference, cfg)
+                if action_log:
+                    action_feedback = action_log.feedback(robot, cfg, measured_state)
+                    command_time = time.monotonic()
+                if trace:
+                    command_elapsed_s = trace.elapsed()
                 if cfg.dry_run:
                     sent = command
                 else:
                     sent = robot.send_action(command)
+                if action_log:
+                    action_log.record(episode=episode, step=step, action=action, command=command,
+                                      command_time=command_time, feedback=action_feedback, cfg=cfg,
+                                      chunk=chunk, offset=offset, inference_ms=inference_ms, robot=robot)
+                if trace:
+                    trace.record(robot=robot, state=measured_state(robot, feedback, cfg),
+                                 joints=[feedback[f'{robot.prefix}J{i}.pos'] for i in range(1, 8)],
+                                 action=action, feedback_elapsed_s=feedback_elapsed_s,
+                                 gripper_feedback_elapsed_s=gripper_feedback_elapsed_s,
+                                 command_elapsed_s=command_elapsed_s,
+                                 observation_elapsed_s=observation_elapsed_s, step=step,
+                                 chunk=chunk, offset=offset, inference_ms=inference_ms, dry_run=cfg.dry_run)
                 reference = (eef_target(action) if cartesian else
                              np.asarray([sent[f"{robot.prefix}J{i}.pos"] for i in range(1, 8)]))
                 offset += 1
                 sleep(max(0, 1 / cfg.fps - (time.monotonic() - start)))
             if not cfg.dry_run:
+                if trace:
+                    trace.event('policy_loop_end', reason='operator_stop' if exit_requested else 'step_limit')
                 robot.pause_motion()
             if exit_requested:
                 break
     except InterruptedError:
-        if not exit_requested:
+        if trace:
+            exit_requested = True
+            trace.event('cancelled')
+        elif not exit_requested:
             raise
+    except BaseException as exc:
+        if trace:
+            trace.failure(exc)
+        raise
     finally:
-        # Cleanup also covers camera/connection failure and KeyboardInterrupt.
-        if robot is not None:
-            try:
-                if robot.is_connected and not cfg.dry_run:
-                    robot.pause_motion()
-            finally:
+        try:
+            # Cleanup also covers camera/connection failure and KeyboardInterrupt.
+            if robot is not None:
                 try:
-                    try:
-                        if recording is not None:
-                            recording.close()
-                    finally:
-                        robot.disconnect()
+                    if robot.is_connected and not cfg.dry_run:
+                        robot.pause_motion()
                 finally:
-                    if policy is not None:
-                        (te if te is not None else policy).close()
-        elif policy is not None:
-            (te if te is not None else policy).close()
+                    try:
+                        try:
+                            if recording is not None:
+                                recording.close()
+                        finally:
+                            robot.disconnect()
+                    finally:
+                        if policy is not None:
+                            (te if te is not None else policy).close()
+            elif policy is not None:
+                (te if te is not None else policy).close()
+        finally:
+            try:
+                if trace:
+                    trace.close(stopped=exit_requested)
+            finally:
+                if action_log:
+                    action_log.close()

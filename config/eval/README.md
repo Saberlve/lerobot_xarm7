@@ -27,6 +27,20 @@
 语言指令来自对应的 GELLO 任务配置。新配置沿用已有硬件设置与 `dry_run: true`。
 根目录原有 YAML 保留供旧命令和测试使用。
 
+普通 EEF 评测默认关闭动作曲线记录；设置 `enable_logs: true` 开启（`log_dir: logs`）。
+每次运行创建独立的 `logs/eef_eval_<时间>_<随机后缀>/`，相对路径以启动目录为准；
+开启后终端会打印绝对路径。可用 `enable_logs: false` 关闭。
+
+- `actions.csv`：每个执行步记录 episode、step、时间戳、10 维模型动作、下发前实际反馈、
+  关节角、控制命令和 SDK dispatch 信息。XYZ 统一为 mm，关节角为 rad，旋转为列向量 6D。
+  `elapsed_s` 是运行内相对单调时间，反馈使用缓存采样时间。反馈不可用时留空并记录 `feedback_error`。
+- `episode_001_curves.svg` 等：退出或结束时按 episode 生成 10 维动作与反馈曲线，可直接用浏览器打开。
+  CSV 逐行写入，强制杀进程时仍可读取已写入的数据，但可能没有 SVG。
+- temporal ensemble 模式记录融合后的控制动作，chunk 编号、offset 和单次推理耗时留空。
+  `dry_run` 同样记录，但不会下发控制；控制命令和 SDK 接受状态不代表目标已到达。
+
+记录读取现有实时状态缓存，不增加相机采集或控制器 RPC。夹爪专项保留原有独立日志。
+
 在 lerobot_xarm7 目录运行，例如：
 
 ```bash

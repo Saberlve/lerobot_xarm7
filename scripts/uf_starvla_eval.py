@@ -47,7 +47,7 @@ from pprint import pformat
 import numpy as np
 import yaml
 
-from eef_executor import EEFExecutionConfig, make_policy, run as run_eef_executor
+from eef_executor import EEFExecutionConfig, make_policy, run as run_eef_executor, validate_gripper_config
 from starvla_client import RTCPolicyClientWrapper, TemporalEnsembleClientWrapper
 
 @dataclass
@@ -56,6 +56,8 @@ class StarVLAEvalConfig:
     deployment_profile: str | None = None
     # Robot state/action representation is independent of the model framework.
     action_space: str = "joint"
+    execution_mode: str = "full"
+    gripper_log_dir: str = ""
     dry_run: bool = True
     record_video: bool = False
     video_dir: str = ""
@@ -109,16 +111,20 @@ class StarVLAEvalConfig:
     # Keys of the cameras in the robot observation dict.
     camera_keys: list[str] | None = None
     tactile_keys: list[str] | None = None
-    # Master switch for the diagnostic CSV logs (steps + seams). When false,
+    # Master switch for action logs (EEF CSV + SVG; joint steps + seams). When false,
     # no log files are created regardless of log_dir.
-    enable_logs: bool = True
-    # Directory for 30 Hz state/action diagnostic logs and per-seam diffs
+    enable_logs: bool = False
+    # Directory for state/action logs at the configured control frequency
     # (only used when enable_logs is true).
     log_dir: str = "logs"
     # Top-level key in dataset_statistics.json ("" = auto-pick when single).
     state_stats_key: str = ""
 
     def __post_init__(self):
+        if self.execution_mode not in ("full", "continue_move"):
+            raise ValueError("execution_mode must be full or continue_move")
+        if self.execution_mode == "continue_move" and self.action_space != "eef10":
+            raise ValueError("continue_move requires an EEF10 model")
         if type(self.record_video) is not bool:
             raise ValueError("record_video must be boolean")
         # Preserve each former entry's defaults when a config omits a field.
@@ -148,6 +154,8 @@ def load_config(path: str | Path) -> StarVLAEvalConfig:
 
 
 def _validate_eef_config(cfg):
+    if cfg.execution_mode == "continue_move":
+        validate_gripper_config(cfg)
     profile = cfg.deployment_profile
     if profile not in (None, "xarm7_eef10", "xarm7_eef_n0vtla", "xarm7_eef_ftp1"):
         raise ValueError("Unsupported EEF deployment_profile")
@@ -237,62 +245,6 @@ def _build_action_dict(action: np.ndarray) -> dict:
     action_dict = {f"J{i + 1}.pos": float(action[i]) for i in range(7)}
     action_dict["gripper.pos"] = float(action[7])
     return action_dict
-
-
-def _rt_joint_state(robot) -> list[float] | None:
-    """Latest joint positions from the 250 Hz RT report cache (non-blocking).
-
-    This is the same feedback source GELLO recordings use for the state, so
-    logging it at 30 Hz does not perturb the control loop. Returns None while
-    the report thread has not delivered the first packet.
-    """
-    if not getattr(robot, "_rt_report_normal", False):
-        return None
-    with robot._update_lock:
-        return list(robot.rt_actual_joint_pos)
-
-
-def _open_diagnostic_logs(log_dir: str):
-    """Open per-tick and per-seam diagnostic CSVs.
-
-    steps CSV: one row per 30 Hz control tick (RT state + sent action).
-    seams CSV: one row per re-inference (new_chunk[0] - last_executed_action).
-    """
-    if not log_dir:
-        return None, None, lambda: None
-    import csv
-    from pathlib import Path
-
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    log_path = Path(log_dir)
-    log_path.mkdir(parents=True, exist_ok=True)
-    step_file = (log_path / f"starvla_eval_{stamp}_steps.csv").open("w", newline="", buffering=1)
-    seam_file = (log_path / f"starvla_eval_{stamp}_seams.csv").open("w", newline="", buffering=1)
-    step_writer = csv.writer(step_file)
-    seam_writer = csv.writer(seam_file)
-    step_writer.writerow(
-        ["t_s", "episode", "chunk", "step_in_chunk"]
-        + [f"s{i}" for i in range(1, 8)]
-        + ["sg"]
-        + [f"a{i}" for i in range(1, 8)]
-        + ["ag"]
-    )
-    seam_writer.writerow(
-        ["t_s", "episode", "chunk", "inference_ms"]
-        + [f"d{i}" for i in range(1, 8)]
-        + ["dg"]
-        + [f"last{i}" for i in range(1, 8)]
-        + ["last_g"]
-        + [f"new{i}" for i in range(1, 8)]
-        + ["new_g"]
-    )
-    print(f"Diagnostic logs: {step_file.name}, {seam_file.name}")
-
-    def _close():
-        step_file.close()
-        seam_file.close()
-
-    return step_writer, seam_writer, _close
 
 
 def eval_loop(cfg: StarVLAEvalConfig):
@@ -404,10 +356,10 @@ def eval_loop(cfg: StarVLAEvalConfig):
 
     print("\n********** starVLA Policy Eval Episode Loop Start **********")
 
-    step_writer, seam_writer, close_logs = _open_diagnostic_logs(
-        cfg.log_dir if cfg.enable_logs else ""
-    )
-    run_start_t = time.perf_counter()
+    action_log = None
+    if cfg.enable_logs and cfg.log_dir:
+        from lerobot_robot_ufactory.evaluation_logging.joint_action_log import JointActionLog
+        action_log = JointActionLog(cfg.log_dir)
     recording = None
     if cfg.record_video or os.environ.get("VLARMORY_RECORD_VIDEO") == "1":
         from lerobot_robot_ufactory.datasets.evaluation_video import start_evaluation_video
@@ -455,13 +407,10 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     current_step = rtc.current_step_in_chunk + 1
                     if rtc.chunk_index != prev_chunk_index:
                         chunk_index = rtc.chunk_index
-                        if seam_writer is not None and last_action is not None:
-                            seam_writer.writerow(
-                                [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index, f"{rtc.last_inference_ms:.1f}"]
-                                + [f"{v:.6f}" for v in (action - last_action)]
-                                + [f"{v:.6f}" for v in last_action]
-                                + [f"{v:.6f}" for v in action]
-                            )
+                        if action_log:
+                            action_log.record_seam(episode=episode, chunk=chunk_index,
+                                                   inference_ms=rtc.last_inference_ms,
+                                                   previous=last_action, action=action)
                     last_action = action
                 elif te is not None:
                     # TE: fresh observation every tick; the wrapper re-infers
@@ -478,13 +427,10 @@ def eval_loop(cfg: StarVLAEvalConfig):
                     # jump between consecutive ensembled actions.
                     if te.chunk_index != prev_chunk_index:
                         chunk_index = te.chunk_index
-                        if seam_writer is not None and last_action is not None:
-                            seam_writer.writerow(
-                                [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index, f"{te.last_inference_ms:.1f}"]
-                                + [f"{v:.6f}" for v in (action - last_action)]
-                                + [f"{v:.6f}" for v in last_action]
-                                + [f"{v:.6f}" for v in action]
-                            )
+                        if action_log:
+                            action_log.record_seam(episode=episode, chunk=chunk_index,
+                                                   inference_ms=te.last_inference_ms,
+                                                   previous=last_action, action=action)
                     last_action = action
                 elif current_actions is None or current_step >= min(
                     cfg.steps_per_inference, len(current_actions)
@@ -506,14 +452,10 @@ def eval_loop(cfg: StarVLAEvalConfig):
 
                     # Seam diagnostic: how far the new chunk's first action
                     # jumps from the last action actually executed.
-                    if seam_writer is not None and current_actions is not None and current_step > 0:
-                        last_executed = current_actions[current_step - 1]
-                        seam_writer.writerow(
-                            [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index + 1, f"{inference_ms:.1f}"]
-                            + [f"{v:.6f}" for v in (new_actions[0] - last_executed)]
-                            + [f"{v:.6f}" for v in last_executed]
-                            + [f"{v:.6f}" for v in new_actions[0]]
-                        )
+                    if action_log and current_actions is not None and current_step > 0:
+                        action_log.record_seam(episode=episode, chunk=chunk_index + 1,
+                                               inference_ms=inference_ms,
+                                               previous=current_actions[current_step - 1], action=new_actions[0])
                     current_actions = new_actions
                     current_step = 0
                     chunk_index += 1
@@ -536,17 +478,9 @@ def eval_loop(cfg: StarVLAEvalConfig):
                 elif gripper_cmd is None:
                     gripper_cmd = float(action[7])
 
-                # 30 Hz state/action row. State comes from the RT report
-                # cache (same source as GELLO recordings), so this does not
-                # add any blocking controller reads to the control loop.
-                if step_writer is not None:
-                    joints = _rt_joint_state(robot) or [float("nan")] * 7
-                    step_writer.writerow(
-                        [f"{time.perf_counter() - run_start_t:.6f}", episode, chunk_index, current_step - 1]
-                        + [f"{v:.6f}" for v in joints]
-                        + ["" if gripper_cmd is None else f"{gripper_cmd:.4f}"]
-                        + [f"{v:.6f}" for v in action]
-                    )
+                if action_log:
+                    action_log.record_step(robot=robot, episode=episode, chunk=chunk_index,
+                                           step=current_step - 1, gripper=gripper_cmd, action=action)
 
                 dt_s = time.perf_counter() - start_loop_t
                 precise_sleep(max(sleep_time_s - dt_s, 0.0))
@@ -557,7 +491,8 @@ def eval_loop(cfg: StarVLAEvalConfig):
         print("\n********** starVLA Policy Eval Loop Exit **********")
         if recording is not None:
             recording.close()
-        close_logs()
+        if action_log:
+            action_log.close()
         client.close()
         if robot.is_connected:
             robot.disconnect()

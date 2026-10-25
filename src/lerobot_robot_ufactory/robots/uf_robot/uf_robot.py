@@ -402,7 +402,8 @@ class UFRobot(Robot, Thread):
     def _needs_local_kinematics(self) -> bool:
         return self._min_tcp_z_mm is not None or self._record_space in ("tcp", "both")
 
-    def connect(self, calibrate: bool = True, *, defer_motion: bool = False) -> None:
+    def connect(self, calibrate: bool = True, *, defer_motion: bool = False,
+                from_current_pose: bool = False, motion_prepare=None) -> None:
         if self._needs_local_kinematics():
             self._local_joint_origins = read_xarm7_kinematics(self.config.robot_ip)
         self.real_arm = XArmAPI(self.config.robot_ip)
@@ -436,7 +437,17 @@ class UFRobot(Robot, Thread):
         #         print('Could not connect to pika gripper.')
         #         raise ConnectionError()
 
-        if self.config.manual_mode:
+        if from_current_pose:
+            # Cancel queued arm targets before enabling the gripper. Never run
+            # normal configure/reset, which changes the arm streaming mode.
+            # Retained sessions supply a cancellation-locked preparation call,
+            # so a stop during camera connection cannot later re-enable the arm.
+            (motion_prepare or self.prepare_current_pose)()
+            self._configure_gripper(move_to_open=False)
+            self._configure_g2_current_monitor()
+            self._start_gripper_position_reader_if_needed()
+            self._start_rt_report_thread_if_needed()
+        elif self.config.manual_mode:
             self.configure()
         elif defer_motion:
             self.configure(move_gripper_to_open=False)
@@ -732,6 +743,55 @@ class UFRobot(Robot, Thread):
         for timing in camera_timing.values():
             if "capture_monotonic_s" in timing:
                 timing["pair_skew_ms"] = pair_skew_ms
+
+    def prepare_current_pose(self) -> None:
+        """Leave teaching mode and hold the current arm pose without any pose target."""
+        if not self._is_connected or self.real_arm is None:
+            raise ConnectionError("UF Robot is not connected")
+        if self.real_arm.error_code:
+            raise RuntimeError("Clear the controller fault before starting gripper evaluation")
+        if self._gripper_type not in (GripperType.xArmGripper, GripperType.xArmGripperG2):
+            raise ValueError("Closed-loop diagnostics requires an xArm gripper with measured position feedback")
+        # state=4 cancels old queued targets; set_state(0) must never resume them.
+        self._check_motion_code("current-pose stop", self.real_arm.set_state(4))
+        self._check_motion_code("current-pose mode", self.real_arm.set_mode(0))
+        self._check_motion_code("current-pose enable", self.real_arm.motion_enable(enable=True))
+        self._check_motion_code("current-pose ready", self.real_arm.set_state(0))
+        self._last_gripper_command = None
+
+    def prepare_policy_from_current(self) -> None:
+        """Enable policy control at the operator's pose; never reset or close first."""
+        self.prepare_current_pose()  # Cancels any old queue without a pose target.
+        self._initialize_tcp_z_guard()
+        mode = 7 if self._control_space == "cartesian" else 6
+        self._check_motion_code("diagnostic policy mode", self.real_arm.set_mode(mode))
+        self._check_motion_code("diagnostic policy ready", self.real_arm.set_state(0))
+        # Avoid a blocking first arm command delaying the first gripper command.
+        # The existing reduced speed for the first 20 joint commands still applies.
+        self._cmd_cnt = 1
+
+    def get_motion_observation(self) -> dict:
+        """Read timestamped arm/gripper telemetry from RT cache, without cameras or RPCs."""
+        now = time.perf_counter()
+        sample = self.latest_state_before(now)
+        gripper = sample.gripper_position
+        gripper_time = sample.gripper_sample_monotonic_s
+        if gripper_time is None:
+            gripper_time = sample.capture_monotonic_s
+        if gripper is None or not math.isfinite(gripper):
+            raise TimeoutError("Actual gripper feedback is unavailable")
+        if not 0 <= (now - gripper_time) * 1000 <= self.config.sync_max_skew_ms:
+            raise TimeoutError("Actual gripper feedback is stale")
+        return {**{f'{self.prefix}J{i+1}.pos': value for i, value in enumerate(sample.joint_positions)},
+                f'{self.prefix}gripper.pos': float(gripper),
+                '_state_sample_monotonic_s': sample.capture_monotonic_s,
+                '_gripper_sample_monotonic_s': gripper_time}
+
+    def get_action_diagnostics(self) -> dict:
+        """SDK acceptance/skip results, not a claim that a target was reached."""
+        return dict(arm=dict(getattr(self, '_last_arm_dispatch', {})),
+                    gripper=dict(getattr(self, '_last_gripper_dispatch', {})),
+                    gripper_last_sent=self._last_gripper_command)
 
     def pause_motion(self) -> None:
         """Pause controller motion and cancel any active gripper target."""
@@ -1562,6 +1622,7 @@ class UFRobot(Robot, Thread):
 
     def _send_gripper_action(self, gripper_norm: float, *, force: bool = False) -> None:
         gripper_norm = min(max(float(gripper_norm), 0.0), 1.0)
+        self._last_gripper_dispatch = dict(status='pending', target=gripper_norm)
         logs_enabled = bool(getattr(self, "enable_logs", True))
         if (
             not force
@@ -1569,6 +1630,7 @@ class UFRobot(Robot, Thread):
             and abs(gripper_norm - self._last_gripper_command)
             < self.config.gripper_command_threshold
         ):
+            self._last_gripper_dispatch['status'] = 'threshold'
             return
 
         # The gripper goes through the controller RS485 bridge. Driving that
@@ -1577,6 +1639,7 @@ class UFRobot(Robot, Thread):
         # rate-limited so an error cannot cause a retry storm.
         now = time.perf_counter()
         if not force and now - self._last_gripper_command_attempt_s < self.config.gripper_command_interval_s:
+            self._last_gripper_dispatch['status'] = 'rate_limit'
             return
         self._last_gripper_command_attempt_s = now
         command_start_s = now if logs_enabled else None
@@ -1623,6 +1686,7 @@ class UFRobot(Robot, Thread):
             result = self.real_arm.getset_tgpio_modbus_data(modbus_datas)
 
         code = result[0] if isinstance(result, (tuple, list)) else result
+        self._last_gripper_dispatch.update(status='sent' if code in (None, 0) else 'error', code=code)
         command_dt_ms = (
             (time.perf_counter() - command_start_s) * 1000
             if logs_enabled
@@ -1868,6 +1932,7 @@ class UFRobot(Robot, Thread):
             raise RuntimeError(f"xArm controller stopped or faulted, {self._motion_status()}")
 
     def send_action(self, action: dict) -> np.ndarray:
+        self._last_arm_dispatch = dict(status='not_sent')
         if not self._is_connected:
             raise ConnectionError()
         self._log_controller_error_if_changed("send_action")
@@ -1905,6 +1970,7 @@ class UFRobot(Robot, Thread):
                 self.logs["safety_guard_dt_s"] = time.perf_counter() - guard_start_t
                 self.logs["safety_guard_path"] = self._last_guard_path
             if safe_cmd is None:
+                self._last_arm_dispatch['status'] = 'guard_rejected'
                 # Do not send an unverified arm target. Gripper handling below
                 # remains independent and can continue safely.
                 safe_cmd = None
@@ -1935,6 +2001,7 @@ class UFRobot(Robot, Thread):
                     wait=wait_,
                 )
                 self._check_motion_code("set_servo_angle", code)
+                self._last_arm_dispatch = dict(status='sent', space='joint', target=safe_cmd[:self._dof].tolist())
         elif self._control_space == "cartesian":
             lin_spd = self._max_linear_velocity
 
@@ -1962,6 +2029,7 @@ class UFRobot(Robot, Thread):
                     is_tool_coord=False, relative=False, wait=False,
                 )
                 self._check_motion_code("set_position_aa", code)
+            self._last_arm_dispatch = dict(status='sent', space='cartesian', target=list(cmd_list))
 
         if self._cmd_cnt < 99999:
             self._cmd_cnt += 1 # CHECK!! possibility of overflow?
