@@ -92,6 +92,62 @@ class Camera:
         return self._cap is not None and self._cap.isOpened()
 
 
+class RealSenseCamera(Camera):
+    """Read RGB through the SDK instead of guessing a V4L depth/RGB node."""
+
+    def open(self) -> bool:
+        import pyrealsense2 as rs
+
+        self._pipeline = rs.pipeline()
+        self._started = False
+        config = rs.config()
+        config.enable_device(self.serial)
+        config.enable_stream(rs.stream.color, self.width, self.height,
+                             rs.format.bgr8, 30)
+        try:
+            self._pipeline.start(config)
+            self._started = True
+            self._pending_frame = self._pipeline.wait_for_frames(5000).get_color_frame()
+            self.fourcc = "BGR8"
+            return True
+        except RuntimeError as exc:
+            print(f"RealSense {self.serial}: {exc}")
+            self.close()
+            return False
+
+    def read(self):
+        import numpy as np
+
+        if not self._started:
+            return None
+        try:
+            frame = self._pending_frame
+            self._pending_frame = None
+            if frame is None:
+                frame = self._pipeline.wait_for_frames(5000).get_color_frame()
+            return np.asanyarray(frame.get_data()) if frame else None
+        except RuntimeError as exc:
+            print(f"RealSense {self.serial}: {exc}")
+            return None
+
+    def close(self):
+        if getattr(self, "_started", False):
+            self._pipeline.stop()
+            self._started = False
+
+    @property
+    def fps(self) -> float:
+        return 30.0
+
+    @property
+    def current_fourcc(self) -> str:
+        return "BGR8"
+
+    @property
+    def is_open(self) -> bool:
+        return getattr(self, "_started", False)
+
+
 class CameraManager:
     """Camera discovery."""
 
@@ -102,6 +158,21 @@ class CameraManager:
         Uses /dev/v4l/by-path/ (unique per port), gets serial from by-id.
         video-index0 = Video Capture, index1+ = depth/IR/metadata.
         """
+        if cam_type == "all":
+            return [d for kind in ("realsense", "xvisio", "other")
+                    for d in CameraManager.find(kind)]
+        if cam_type == "realsense":
+            import pyrealsense2 as rs
+
+            context = rs.context()
+            return [{
+                "device": f"realsense:{d.get_info(rs.camera_info.serial_number)}",
+                "serial": d.get_info(rs.camera_info.serial_number),
+                "by_path": d.get_info(rs.camera_info.physical_port),
+                "by_id": "",
+                "default_w": 640, "default_h": 480, "default_fourcc": "",
+                "backend": "realsense",
+            } for d in context.query_devices()]
         if not BY_PATH_DIR.exists():
             return []
 
@@ -363,7 +434,8 @@ def main():
         w = args.width if args.width else d["default_w"]
         h = args.height if args.height else d["default_h"]
         fc = args.fourcc if args.fourcc else d["default_fourcc"]
-        cam = Camera(d["device"], serial=d["serial"],
+        camera_class = RealSenseCamera if d.get("backend") == "realsense" else Camera
+        cam = camera_class(d["device"], serial=d["serial"],
                      by_path=d["by_path"], by_id=d.get("by_id", ""),
                      width=w, height=h, fourcc=fc)
         if cam.open():
