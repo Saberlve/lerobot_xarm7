@@ -1,4 +1,4 @@
-# Training config: train_files/configs/tasks/charger_press/train_xarm7_act_charger_press.yaml
+# Training config: train_files/configs/tasks/charger_press/ACT_charger_press_baseline.yaml
 deployment_profile: xarm7_eef10
 single_task: "Press the pre-aligned charger plug down into the socket."
 action_chunk_size: 10  # 对应训练配置的 chunk_size / action_horizon

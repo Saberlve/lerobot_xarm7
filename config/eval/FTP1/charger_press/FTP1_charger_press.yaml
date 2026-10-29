@@ -1,4 +1,4 @@
-# Training config: train_files/configs/tasks/charger_press/train_xarm7_ftp1_charger_press.yaml
+# Training config: train_files/configs/tasks/charger_press/FTP1_charger_press_baseline.yaml
 deployment_profile: xarm7_eef_ftp1
 action_space: eef10
 single_task: "Press the pre-aligned charger plug down into the socket."
