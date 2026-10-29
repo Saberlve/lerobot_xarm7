@@ -1,4 +1,4 @@
-"""GELLO disconnects must never be accepted as stationary leader input."""
+"""Serial recovery during capture and fresh-input checks before motion."""
 import threading
 import time
 from types import SimpleNamespace
@@ -23,6 +23,7 @@ def make_driver():
     driver._sample_sequence = 1
     driver._sample_stamp = time.monotonic()
     driver._read_error = None
+    driver._reopen_serial_port = lambda: None
     driver._joint_angles = np.array([1024, 2048])
     driver._velocities = np.array([0, -1])
     driver._stop_thread = threading.Event()
@@ -30,7 +31,7 @@ def make_driver():
     return driver
 
 
-@pytest.mark.parametrize("fault", ["exception", "dead_reader", "stopped", "stale"])
+@pytest.mark.parametrize("fault", ["exception", "dead_reader", "stopped"])
 @pytest.mark.parametrize("method", ["get_joints", "get_positions_and_velocities"])
 def test_cached_encoder_sample_is_rejected_after_failure(fault, method):
     driver = make_driver()
@@ -106,17 +107,23 @@ def test_stationary_gello_still_publishes_fresh_samples():
     assert not driver._reading_thread.is_alive()
 
 
-def test_serial_exception_is_latched_and_propagated_from_reader():
+def test_serial_exception_keeps_retrying_with_cached_target(monkeypatch):
+    monkeypatch.setattr(adapter, "GELLO_STATE_TIMEOUT_S", 0.01)
     driver = make_driver()
-    failure = SerialException("device reports readiness but returned no data")
-    driver._groupSyncRead = Reader(error=failure)
+    driver._groupSyncRead = Reader(error=SerialException("USB disconnected"))
+    stamp = driver._sample_stamp
     driver._start_reading_thread()
-    driver._reading_thread.join(1)
-    assert driver._read_error is failure
-    assert not driver._reading_thread.is_alive()
-    with pytest.raises(RuntimeError, match="serial read failed") as error:
-        driver.get_joints()
-    assert error.value.__cause__ is failure
+    try:
+        driver._reading_thread.join(0.05)
+        assert driver._reading_thread.is_alive()
+        assert driver._read_error is None
+        assert driver._sample_stamp == stamp
+        assert driver.get_joints() == pytest.approx([np.pi / 2, np.pi])
+        with pytest.raises(RuntimeError, match="no fresh encoder sample"):
+            driver.check_health(require_fresh=True)
+    finally:
+        driver._stop_thread.set()
+        driver._reading_thread.join(1)
 
 
 def test_persistent_packet_failure_expires_cached_data(monkeypatch):
@@ -248,6 +255,130 @@ def test_single_failed_packet_can_recover_before_freshness_deadline():
         driver.check_health(require_fresh=True)
         assert driver.get_joints() == pytest.approx([np.pi / 2, np.pi])
         assert driver._read_error is None
+    finally:
+        driver._stop_thread.set()
+        driver._reading_thread.join(1)
+
+
+@pytest.mark.parametrize("initial_sample", [True, False])
+def test_transient_serial_exception_recovers(initial_sample, monkeypatch):
+    monkeypatch.setattr(adapter, "GELLO_RECONNECT_INTERVAL_S", 0.01)
+    driver = make_driver()
+    if not initial_sample:
+        driver._sample_stamp = None
+
+    class RecoveringReader(Reader):
+        calls = 0
+
+        def txRxPacket(self):
+            self.calls += 1
+            if self.calls <= 2:
+                raise SerialException("device reports readiness but returned no data")
+            return 0
+
+    driver._groupSyncRead = RecoveringReader()
+    driver._start_reading_thread()
+    try:
+        driver.check_health(require_fresh=True)
+        assert driver._groupSyncRead.calls >= 3
+        assert driver._read_error is None
+        assert driver.get_joints() == pytest.approx([np.pi / 2, np.pi])
+    finally:
+        driver._stop_thread.set()
+        driver._reading_thread.join(1)
+
+
+def test_capture_accepts_old_complete_sample_but_start_requires_fresh():
+    driver = make_driver()
+    driver._sample_stamp -= 10
+    assert driver.get_joints() == pytest.approx([np.pi / 2, np.pi])
+    assert driver.get_positions_and_velocities()[0] == pytest.approx([np.pi / 2, np.pi])
+    with pytest.raises(RuntimeError, match="no fresh encoder sample"):
+        driver.check_health(require_fresh=True)
+
+
+def test_next_episode_waits_for_new_sample_when_previous_cache_is_old():
+    driver = make_driver()
+    driver._sample_stamp -= 10
+    waiting = threading.Event()
+    original_wait = driver._sample_condition.wait
+
+    def signal_wait(timeout=None):
+        waiting.set()
+        return original_wait(timeout)
+
+    driver._sample_condition.wait = signal_wait
+
+    def publish():
+        if not waiting.wait(1):
+            return
+        with driver._sample_condition:
+            driver._sample_stamp = time.monotonic()
+            driver._sample_sequence += 1
+            driver._sample_condition.notify_all()
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    try:
+        driver.check_health(require_fresh=True)
+        assert waiting.is_set()
+        assert driver._sample_sequence == 2
+    finally:
+        waiting.set()
+        publisher.join(1)
+
+
+def test_reopen_uses_same_handler_and_restores_baudrate(monkeypatch):
+    driver = make_driver()
+    calls = []
+    driver._port = "/dev/serial/by-id/test"
+    driver._baudrate = 1000000
+    driver._portHandler = SimpleNamespace(
+        ser=object(), is_using=True,
+        closePort=lambda: calls.append("close"),
+        setBaudRate=lambda baud: calls.append(baud) or True,
+    )
+    monkeypatch.setattr(adapter.os.path, "exists", lambda path: True)
+    monkeypatch.setattr(adapter.os, "access", lambda path, mode: True)
+    adapter.SafeDynamixelDriver._reopen_serial_port(driver)
+    assert calls == ["close", 1000000]
+    assert not driver._portHandler.is_using
+
+
+def test_missing_port_does_not_attempt_to_kill_processes(monkeypatch):
+    driver = make_driver()
+    driver._port = "/dev/serial/by-id/missing"
+    driver._max_retries = 1
+    driver._initialize_hardware = driver._prepare_port
+    driver._kill_processes_using_port = lambda: pytest.fail("must not kill processes")
+    driver._fix_port_permissions = lambda: pytest.fail("must not change permissions")
+    monkeypatch.setattr(adapter.os.path, "exists", lambda path: False)
+    assert driver._initialize_with_retries() is False
+
+
+def test_reader_recovers_after_device_disappears_and_returns(monkeypatch):
+    monkeypatch.setattr(adapter, "GELLO_RECONNECT_INTERVAL_S", 0.01)
+    driver = make_driver()
+    recovered = threading.Event()
+    attempts = []
+    reader = Reader(error=SerialException("disconnected"))
+    driver._groupSyncRead = reader
+
+    def reopen():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise FileNotFoundError("USB absent")
+        reader.error = None
+        recovered.set()
+
+    driver._reopen_serial_port = reopen
+    driver._start_reading_thread()
+    try:
+        assert recovered.wait(1)
+        driver.check_health(require_fresh=True)
+        assert len(attempts) == 3
+        assert driver._read_error is None
+        assert driver._reading_thread.is_alive()
     finally:
         driver._stop_thread.set()
         driver._reading_thread.join(1)

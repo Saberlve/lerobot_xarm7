@@ -95,11 +95,11 @@ web_preview:
 dataset:
   # Background dataset image writers: 1 thread per camera, 4 threads total.
   # Tactile stream writers are configured independently.
-  num_episodes: 75
+  num_episodes: 21
   num_image_writer_processes: 1
   num_image_writer_threads_per_camera: 1
   # Dataset path relative to the directory where the command is started.
-  root: "datasets/xarm7_gello_tasks/egg_pick"
+  root: "datasets/xarm7_gello_tasks/egg_pick_21"
   repo_id: "ufactory/xarm7_gello_egg_pick"
   # Task description stored in the dataset.
   single_task: "Pick up the egg and place it in the green egg tray."
