@@ -102,7 +102,7 @@ dataset:
   root: "datasets/xarm7_gello_tasks/chip_pick"
   repo_id: "ufactory/xarm7_gello_chip_pick"
   # Task description stored in the dataset.
-  single_task: "Gently grasp a chip, lift it, hold it stably, transfer it to the target area, and place it down without damaging or dropping it."
+  single_task: "Pick up the potato chip and put it into the paper cup."
   fps: 15
   episode_time_s: 960  # max duration for one episode
   push_to_hub: False

@@ -1,7 +1,7 @@
 # Training config: train_files/configs/tasks/chip_pick/N0_chip_pick_baseline.yaml
 deployment_profile: xarm7_eef_n0vtla
 action_space: eef10
-single_task: "Gently grasp a chip, lift it, hold it stably, transfer it to the target area, and place it down without damaging or dropping it."
+single_task: "Pick up the potato chip and put it into the paper cup."
 action_chunk_size: 25  # 对应训练配置的 chunk_size / action_horizon
 steps_per_inference: 23  # 每执行 23 个动作步后重新推理
 dry_run: true
